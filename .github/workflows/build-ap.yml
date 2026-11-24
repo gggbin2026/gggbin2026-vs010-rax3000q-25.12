@@ -1,0 +1,191 @@
+name: Build AP (新内核)
+
+# 双机型 · 新内核 · 普通哑 AP。push 不触发，只在 Actions 手动 Run。
+# 与 build-wds.yml 同源：改公共编译链时两份要同步。
+# 差异只在 FW_MODE=ap / 前缀 Nwrt-AP-<内核版本>- / 叠加 files.ap/ 覆盖层（两种模式同样精简）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '机型：both=一次出两个'
+        required: true
+        default: 'both'
+        type: choice
+        options: [both, rax3000q, vs010]
+      baseline:
+        description: '新内核基线（见 baseline.env）'
+        required: true
+        default: 'qosmio-25.12-nss'
+        type: choice
+        options: [qosmio-25.12-nss, official-25.12.6, kuncy7-6.18-nss]
+      nand_patch:
+        description: 'V2 批次复旦微 FM25LS01 闪存补丁（默认关；报 unknown flash ID / EUCLEAN 才勾）'
+        required: false
+        default: 'false'
+        type: boolean
+      ssh:
+        description: 'SSH 连进 Actions 调试 (tmate)'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  FW_MODE: "ap"
+  TZ: Asia/Shanghai
+  KEEP_RELEASES: "5"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(github.event.inputs.device == 'both' && '["rax3000q","vs010"]' || format('["{0}"]', github.event.inputs.device)) }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Init environment
+      run: |
+        set -e
+        sudo apt-get -qq update
+        sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
+          gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip \
+          zlib1g-dev file wget quilt time device-tree-compiler ccache xz-utils jq
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Restore source / dl cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/.git
+          openwrt/dl
+        key: nk-${{ github.event.inputs.baseline }}-${{ matrix.device }}-v1
+        restore-keys: nk-${{ github.event.inputs.baseline }}-
+
+    - name: Prepare (clone + feeds + board + config + overlay)
+      id: prep
+      env:
+        DEVICE: ${{ matrix.device }}
+        BASELINE: ${{ github.event.inputs.baseline }}
+        NAND_PATCH: ${{ github.event.inputs.nand_patch }}
+      run: |
+        set -euo pipefail
+        chmod +x scripts/*.sh
+        sh scripts/verify.sh
+        bash scripts/prepare.sh "$DEVICE" "$FW_MODE" "$BASELINE"
+        cd openwrt
+        # 内核版本取「实际编译的那一个」：make kernel_version 优先，
+        # 退回 target/linux 的 LINUX_VERSION，再退回 baseline.env 记录值。
+        KVER=$(make -s kernel_version 2>/dev/null | tr -cd '0-9.' | cut -c1-24)
+        [ -z "$KVER" ] && KVER=$(grep -rhoE 'LINUX_VERSION=[0-9.]+' target/linux/ 2>/dev/null \
+            | sort -V | tail -1 | cut -d= -f2 | tr -cd '0-9.' | cut -c1-24)
+        if [ -z "$KVER" ]; then
+          case "$BASELINE" in
+            qosmio-25.12-nss) KVER=6.12.116 ;;
+            official-25.12.6) KVER=6.12.112 ;;
+            kuncy7-6.18-nss)  KVER=6.18.60  ;;
+            *) KVER=kernel ;;
+          esac
+        fi
+        echo "KERNEL=$KVER" >> $GITHUB_ENV
+        echo "KVER=$KVER"   >> $GITHUB_ENV
+        echo "HEAD=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+        echo "[prepare] 实际内核版本 = $KVER（将写入固件文件名）"
+
+    - name: Download sources
+      run: |
+        cd openwrt
+        make download -j8 V=s || make download -j1 V=s
+        find dl -size -1024c -delete || true
+
+    - name: Compile firmware
+      id: compile
+      run: |
+        cd openwrt
+        set -o pipefail
+        if make -j$(nproc) V=s 2>&1 | tee build.log; then
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "status=failure" >> $GITHUB_OUTPUT
+          echo "===== 失败摘要 ====="
+          grep -E 'make\[[0-9]+\]: \*\*\*|ERROR:|error:|fatal error|No rule to make|Cannot install|Collected errors' build.log | tail -60 || true
+          exit 1
+        fi
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: buildlog-${{ matrix.device }}-ap
+        path: openwrt/build.log
+        if-no-files-found: ignore
+
+    - name: Organize firmware
+      id: collect
+      if: steps.compile.outputs.status == 'success'
+      env:
+        DEVICE: ${{ matrix.device }}
+      run: |
+        set -euo pipefail
+        D="$DEVICE"; mkdir -p "$GITHUB_WORKSPACE/firmware_out"
+        case "$D" in
+          rax3000q) MATCH='*rax3000q*' ;;
+          vs010)    MATCH='*vs010*'   ;;
+        esac
+        find openwrt/bin/targets -type f \( -name "$MATCH" -o -name 'sha256sums' \) \
+             ! -path '*/packages/*' -exec cp -a {} "$GITHUB_WORKSPACE/firmware_out/" \; 2>/dev/null || true
+        cd "$GITHUB_WORKSPACE/firmware_out"
+        rm -f sha256sums
+        STAMP=$(date +%Y%m%d)
+        # 命名方式：<模式字样>-<实际内核版本>-<日期>-<机型>-<原文件名>
+        # 内核版本来自上一步 make kernel_version，不写死、不带旧 SDK 编号
+        KTAG="${KVER:-kernel}"
+        PREFIX="Nwrt-AP-${KTAG}-${STAMP}-"
+        for f in *factory* *sysupgrade* *initramfs*; do
+          [ -f "$f" ] || continue
+          case "$f" in "$PREFIX"*) continue ;; esac
+          mv -f -- "$f" "${PREFIX}${D}-${f}"
+        done
+        ls *factory* >/dev/null 2>&1 || { echo "::error::缺 factory 镜像"; ls -lh; exit 1; }
+        ls *sysupgrade* >/dev/null 2>&1 || { echo "::error::缺 sysupgrade 镜像"; ls -lh; exit 1; }
+        { for x in *; do [ -f "$x" ] && [ "$x" != sha256sums ] && sha256sum "$x"; done; } > sha256sums
+        echo "PREFIX=$PREFIX" >> $GITHUB_ENV
+        echo "=== 交付产物 ==="; ls -lh
+
+    - name: Upload firmware artifact
+      if: steps.compile.outputs.status == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Nwrt-AP-${{ matrix.device }}-${{ github.event.inputs.baseline }}
+        path: firmware_out
+        if-no-files-found: error
+        retention-days: 90
+
+    - name: Publish Release (rolling keep 5)
+      if: steps.compile.outputs.status == 'success'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DEVICE: ${{ matrix.device }}
+        BASELINE: ${{ github.event.inputs.baseline }}
+      run: |
+        set -euo pipefail
+        TAG="fw-${KVER:-kernel}-$(date +%Y%m%d-%H%M%S)-${DEVICE}-ap"
+        NOTES="基线: ${BASELINE} | 内核: ${KERNEL:-见 build.log} | 源码: ${HEAD:-}\n命名: Nwrt-AP-<内核版本>-<日期>-<机型>-*.ubi / *.bin（tag 带内核版本、后缀 -ap）\n模式: 普通哑 AP。WAN+LAN+2.4G+5G 全在 br-lan；管理 .240，NwrtAP-2G / NwrtAP-5G，本机 DHCP 关，无 WDS / 无主备 / 无机器狗\n无线: NSS FW 12.5 优先（12.2 回退）+ ECM→NSS 双射频卸载；CN / ch36 / HE160 / 本机 BDF / 256M LOW；HE160 在 CN 下覆盖 DFS，开机 5G 需约 60s CAC\n参考: mufeng05/openwrt-cmcc-pz-l8-nss 的 QSDK14 驱动口径（有线+双射频 949Mbps / 5G 160MHz 697Mbps / CPU 2.9%）\n⚠ 纯二层桥内被卸载的流量不经过 Linux 网桥：判速看 eth0/eth1 + NSS debugfs，不要看 br-lan\n防护: 无线端 rogue DHCP 已拦；firewall4 编译期关闭；上级 DHCP 正常透传\n精简: 只编 SSH(dropbear) + TTYD + LuCI 底座/中文/官方 bootstrap 主题 + 状态页，未编任何第三方 luci-app-*\n界面保障: 主题下拉只列真实存在的目录；luci-fix 每次开机重建 named main 并清理幽灵主题，不再出现 dispatcher.lua:427 / 主题切换后 500\n界面: CPU 状态新增温度（多传感器 + 配色）、TTYD 入口、NSS 加速与防护状态\n⚠ 刷前确认不死 U-Boot 支持 64 位引导；上级路由非 192.168.1.0/24 时改 lan 为 dhcp。\nNAND补丁: ${NAND_PATCH:-false}（默认关；仅 V2 批次 FM25LS01 需要，见 patches/README.md）\n完整说明见仓库 MIGRATION.md / FIRMWARE.md。"
+        gh release create "$TAG" firmware_out/* \
+          --title "AP 固件 ${DEVICE} · ${BASELINE} · $(date +%F)" \
+          --notes "$(printf '%b' "$NOTES")"
+        mapfile -t TAGS < <(gh release list --limit 100 --json tagName --jq \
+          ".[] | select(.tagName | endswith(\"-${DEVICE}-ap\")) | .tagName" | sort -r)
+        i=0
+        for t in "${TAGS[@]}"; do
+          i=$((i+1)); [ "$i" -le "$KEEP_RELEASES" ] && continue
+          gh release delete "$t" -y --cleanup-tag || true
+        done
