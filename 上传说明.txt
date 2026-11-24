@@ -1,69 +1,88 @@
-VS010 / RAX3000Q · 总修复可上传文件 · 第 44 次（2026-11-24）
+VS010 / RAX3000Q · 总修复可上传文件 · 第 45 次（2026-11-24）
 
-【先说三个「别踩」】
-1) ★ 你这次指定的是新仓库
-   https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt
-   （HEAD 6e34490 / 20:38，已含第 43 次修复，但 .gitignore 仍缺 3 行）。
-   之前两份编译日志 checkout 的是 gggbin2026/vs010-rax3000q-openwrt（6df9e4c），
-   那个旧仓库现在已无法匿名访问。workflow 没写 repository:，Release 会打到
-   运行它的那个仓库 → 请把包传到【上面这个新仓库】。
-2) 只传这一个【累积全量包】。之前所有包（第 41/42/43 次）全部作废，
-   不用先传第 43 次——本包已含 43 + 44 全部修复。
-3) 网页上传时确认生成的是 .github/workflows（第一个字符是点），
-   不是 github/workflows。仓库里若还有无点的 github/ 目录，整个删掉。
+【这次修了什么 —— 先说结论】
+你 13:54 那两份 WDS 编译日志（checkout 33482ba）都是
+  ##[error]Process completed with exit code 2
+而且 openwrt/build.log 根本不存在 —— 编译一步都没跑。
+不是内核、驱动、DTS 的问题，是 Prepare 步骤被一行「探测内核版本」静默掐死。
+另外按你要求，把「机器狗导致刷机后自动重启」也彻底关掉了。
 
-【这次修了什么】
+【根因 1（致命）：内核版本探测让整个步骤 exit 2】
+旧 workflow 里：
+    KVER=$(make -s kernel_version 2>/dev/null | tr -cd '0-9.' | cut -c1-24)
+qosmio 25.12-nss 上这个 make 目标返回非 0；步骤开头是 set -euo pipefail，
+命令替换一失败整个 Prepare 就退出码 2；2>/dev/null 又把错误吞了，
+所以日志里只看到「[prepare] ✓ 可以开始 make download / make」后直接失败，
+make download / make 一行没跑，build.log 自然不存在。
 
-一、按你贴的编译日志修错误
-   日志根因：✗ .gitignore 缺末尾 3 行 → RESULT: FAIL (1 项) → exit 1
-   → set -euo pipefail 中断，prepare.sh 一行没跑，没有 clone/feeds/make，
-   build.log 都不存在。不是内核或驱动报错。
-   修复：.gitignore 补回 openwrt/ firmware_out/ build.log 三行；
-   verify.sh 已分级（纯文档/卫生项只警告不阻断）；
-   第 43 次的 25.12 DTS 目录适配与 RAX3000Q 板级注入也在包里。
+修复：两份 workflow 改成【纯读源码树】，绝不调用 make：
+    target/linux/qualcommax/Makefile 的 KERNEL_PATCHVER (=6.12)
+  + target/linux/generic/kernel-6.12 的 LINUX_VERSION-6.12 (=.91)
+  → KVER=6.12.91，每级都有 || true 兜底，最后回落 baseline.env。
+固件名仍带内核版本，但以【源码树实际值】为准，可能与文档里记的
+6.12.116 不同，这是正确的，不是写错。git rev-parse 也加了 || echo unknown。
 
-二、用你上传的 DTS / DTB 校正两台板级（docs/oem-dts/ 只读取证）
-   · vs010.dtb = 45056 B 原厂运行态 FDT。VS010 LED 由 PZ-L8 的 GPIO35
-     改成实机 mesh=GPIO33 / pwr=GPIO31；补 4bit/512 NAND ECC；
-     WPS 键 GPIO34 保留、仍无 reset 键（防开机误进 failsafe）。
-   · 额外抓了 openwrt/openwrt @ main 的 ipq5018-rax3000q.dts 逐字节官方原文，
-     实测 v25.12.6 与 qosmio 25.12-nss 都没有 RAX3000Q → 三条基线仍需注入。
-     RAX3000Q 端口按官方映射改写（PHY0=WAN）、compatible 双写
-     cmcc,rax3000q + cmcc,rax3000qy、补 8bit/512 ECC、02_network 双分支。
-   · 坚决不改：RAX3000Q 不定义 keys/leds（恩山复位键 GPIO 冲突变砖实录）、
-     不整份替换官方 DTS（绑定名 &gmac1/&uniphy0 在 qosmio 树里不存在）、
-     不抄 boot-args、不照抄 5G bdf-addr。详见 docs/板级真值-第44次.md。
+★ 日志里满屏 "error: recursive dependency detected!"
+  （dnsdist-full / snort3 / knot-resolver / openappid）是 qosmio feed 自带包的
+  Kconfig 告警，make defconfig 末尾 "# No change to .config" + "✓ 收敛完成"，
+  【不是失败原因】，不用管、也没改代码。
 
-三、你这次重申的配置要求（全部编译期 + 运行期双层落地）
-   · 无线 DHCP Snooping「是否开启」→ ✅ 默认开启。
-     l2guard option enabled '1' + 开机独立 nft bridge 表，只丢无线口进来的
-     67→68 / 547→546；有线侧上级 DHCP 照常透传。
-     如实说明：这不是标准 DHCP Snooping（无 binding 表/无 trust 分级/
-     无额外守护进程），NSS 卸载下属尽力防护。
-   · 插件只留 TTYD：luci-app-* 只有 luci-app-ttyd 一个（verify 硬校验），
-     SSH=dropbear；firewall4/firewall 编译期 n + 运行期 99-no-firewall。
-   · ★ IPv6 关闭（本次新增）：common.seed 写 CONFIG_IPV6=n；
-     odhcpd/odhcpd-ipv6only/odhcp6c/luci-proto-ipv6/ip6tables/kmod-ip6tables
-     全部 is not set（gen-config.sh 再兜底一遍）；
-     新增运行期 files/etc/uci-defaults/99-no-ipv6（sysctl disable_ipv6 +
-     清 ULA/wan6/RA/DHCPv6 + 停 odhcpd）；AP 的 config odhcpd 段已删。
-     l2-guard 增加容错：DHCPv6 规则若因关 v6 加载失败，自动降级仅拦 IPv4。
-   · WAN + LAN + 2.4G + 5G 全在 br-lan（port-overlay.sh 生成
-     list ports lan1 lan2 lan3 wan），纯二层、本机 DHCP 关。
-   · 少占资源：不编 firewall4 / odhcpd / IPv6 工具族 / 任何第三方插件；
-     状态页是独立静态页 + 只读 CGI，不依赖 LuCI 主题（主题页不会再报错）。
+【根因 2：TTYD 和无线固件被自己的脚本删了】
+日志 4264/4265 行：
+    ::warning::ath11k-firmware-ipq5018-qcn6122 在当前 feeds 中未找到，已从 .config 显式关闭
+    ::warning::luci-app-ttyd 在当前 feeds 中未找到，已从 .config 显式关闭
+但 feeds install -a 日志里明明有 "Installing package 'luci-app-ttyd' from luci"。
+原因：gen-config.sh 旧第 5 段用 `./scripts/feeds list | awk '{print $1}'` 探测，
+在 qosmio 树上误判；更讽刺的是 =n 的主题会被 `grep '^...=y$' || continue` 跳过，
+它自称的「防主题白屏」一次都没生效，只把必需包删了。日志末尾
+"luci-app 数量: 0（只应为 ttyd）" 就是证据。
+
+修复：必需包（dropbear / ttyd / luci-app-ttyd /
+ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb）【永不自动删】，
+defconfig 后只核对只警告；只有「主题类且 =y」才做不存在即剔除；
+探测改用文件存在性 package/feeds/*/<pkg>/Makefile，不依赖 feeds list 格式。
+模拟树实测：4 个必需包全保留，feed 里没有的 argon 主题被正确剔除。
+
+【★ 根因 3：机器狗导致刷机后自动重启 —— 已彻底关闭】
+旧默认 WDS：enabled=1 / delay=5 / grace=6，首启脚本还 enable+start。
+单机、无对端 WDS、或只当有线网桥时，开机约 6+5≈11 分钟就 reboot -f，
+之后每周期反复重启，连 SSH 排障窗口都没有。
+
+现在四层都改了：
+  · files/etc/config/wdsdog        → enabled '0' + dryrun '1' 双保险
+  · files.ap/etc/config/wdsdog     → enabled '0'（原本就是）
+  · WDS 首启 99-bridge-ready 7c 段 → stop + disable，并 uci 强制写 enabled=0
+                                     （防 sysupgrade「保留配置」把旧值带回来）
+  · /usr/sbin/bridge-watchdog 代码缺省 → enabled 0 / dryrun 1
+                                     （配置文件丢失也不再回落成自动重启）
+  · banner / 两份 Release NOTES 文案同步
+脚本与 init.d【完整保留】，成对 WDS 部署仍可手动：
+    bridge-watchdog set-peer 192.168.1.242
+    bridge-watchdog set-delay 10
+    bridge-watchdog on
+    bridge-watchdog dryrun off     # 观察一两天确认不误重启才执行
+
+刷机动作本身仍会【正常重启一次】（原厂 Web API 返回 isreboot=1），
+这是刷机流程自带，不是故障；开机之后不会再无故重启。
 
 【怎么传】
-解压本包，按原路径【全部覆盖】上传到上面那个新仓库根目录。
-★ 包里【不含】这些，仓库原地保留别删：
-   FLASHING.md / firmware/* / flash.py / poll_build.py / ipq5018-vs010.dts
-   （以及旧仓库里的 ATR文件/、两份 ART、oem_extract/rootfs.ubi —— 若已迁过来也保留）
-★ 上传后本地跑 sh scripts/verify.sh → 看到 RESULT: PASS 再点编译。
+仓库就是 https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt
+（当前 HEAD 33482ba，21:48，你已把 .gitignore 三行补上，与第 44 次包 133/133 一致）。
+★ 只传这一个【累积全量包】，之前所有包（41/42/43/44 次）全部作废。
+解压后按原路径全部覆盖上传。网页上传注意：
+  · .github/workflows 第一个字符是【点】，别又变成 github/workflows
+  · .gitignore 是隐藏文件，网页上传容易漏；用 git 命令行最稳：
+        git add -A && git commit -m "第45次：编译链+TTYD+机器狗" && git push
+  · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
+    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART
 
-【编译】
-Actions 手动 Run workflow（push 不触发）；
-baseline 保持 qosmio-25.12-nss；★ device 先选 vs010 单跑一次，成功再 both；
+【上传后】
+本地 sh scripts/verify.sh → RESULT: PASS（0 警告）再去 Run workflow。
+建议 baseline 保持 qosmio-25.12-nss，★ device 先选 vs010 单跑一次，成功再 both；
 nand_patch / ART_CALIBRATION / ssh 全保持 false/0。
+这次 Prepare 会正常走到 make download / make，日志里应能看到
+  [prepare] 实际内核版本 = 6.12.xx（读自源码树，将写入固件文件名）
+以及 luci-app 数量: 1（ttyd）。
 
 【刷前边界不变】
 64 位不死 U-Boot 是硬门槛；VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区
@@ -71,4 +90,4 @@ nand_patch / ART_CALIBRATION / ssh 全保持 false/0。
 RAX3000Q 板级未在 6.12 实机验证，首次务必 3.3V USB-TTL；
 WDS 4addr 在开源 ath11k+NSS 下未验证；CN+HE160 开机 5G 约 60 秒 CAC 不可见。
 
-【历次修复清单】修复总览.md（累积至第 44 次）
+【历次修复清单】修复总览.md（累积至第 45 次）

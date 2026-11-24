@@ -296,3 +296,41 @@ model/compatible 融合，故意不定义 keys/leds、不引用 nvmem MAC）。�
 
 ⚠ **如实说明「DHCP Snooping」这个词**：本仓开的**不是** IEEE 标准 DHCP Snooping（不维护 binding 表、不做 trust/untrust 端口分级、不占额外守护进程），而是等价目标的**轻量二层过滤**——只拦无线侧冒充 DHCP 服务器的报文。真端口级 snooping 需要 QCA8337/NSS 数据面支持；且 NSS wifi_offload 下部分射频报文不过 host bridge hook，属**尽力防护**。边界见 `docs/DHCP与SSH防护.md`。
 关闭 IPv6 后，`l2-guard` 若发现内核不接受 DHCPv6 匹配行，会**自动降级为仅拦 IPv4**，绝不因为一行规则把整张表丢掉。
+
+## 第 45 次：编译失败修复 + 机器狗默认停用（2026-11-24）
+
+**编译为什么失败**：13:54 两份 WDS 日志都是 `exit code 2`，但 `make download` / `make` 根本没跑、
+`build.log` 不存在。根因是 Prepare 步骤里探测内核版本那行调用了 make 的一个目标，
+在 `set -euo pipefail` 下返回非 0 就静默终止（错误还被 `2>/dev/null` 吞了）。
+现在改成**纯读源码树**：`KERNEL_PATCHVER` + `LINUX_VERSION-<主版本>` 拼接，带兜底，绝不调用 make。
+日志里满屏 `recursive dependency detected!` 是 qosmio feed 里 dnsdist/snort3 等包的
+Kconfig 告警，`make defconfig` 最终 `No change to .config` 且成功，**不是失败原因**。
+
+顺带修掉日志里 `luci-app 数量: 0（只应为 ttyd）`：`gen-config.sh` 旧探测把
+**`luci-app-ttyd` 和 `ath11k-firmware-ipq5018-qcn6122` 当成「feed 里没有」删掉了**
+（feeds install 明明装了）。现在必需包永不自动删，只对主题类做存在性剔除。
+
+**★ 机器狗（bridge-watchdog）默认停用，刷机后不会自动重启**
+
+旧默认 `enabled=1 / delay=5 / grace=6` + 首启 `enable+start`：单机、无对端 WDS、
+或只当有线网桥时，开机约 **6+5≈11 分钟**就 `reboot -f`，之后每个周期反复重启，
+连 SSH 排障窗口都没有。现在：
+
+| 层 | 值 |
+|---|---|
+| `files/etc/config/wdsdog`（WDS）/ `files.ap/etc/config/wdsdog`（AP） | `enabled '0'` |
+| WDS 基底 `dryrun` | `'1'`（双保险，即便被手动 on 也先只记日志） |
+| WDS 首启 `99-bridge-ready` 7c 段 | `stop + disable`，并 `uci set wdsdog.main.enabled=0`（防 sysupgrade 保留配置带回旧值） |
+| `/usr/sbin/bridge-watchdog` 代码缺省 | `enabled 0` / `dryrun 1`（配置文件丢失也不回落成自动重启） |
+| 脚本与 init.d | **完整保留**，成对 WDS 部署可手动启用 |
+
+成对部署真要用时：
+```sh
+bridge-watchdog set-peer 192.168.1.242   # 先设对端，ping 判通最准
+bridge-watchdog set-delay 10             # 或延长触发时间
+bridge-watchdog on                       # 启用（dryrun=1 仍只记日志）
+bridge-watchdog dryrun off               # 观察一两天确认不误重启，才真启用
+```
+
+刷机动作本身仍会**正常重启一次**（原厂 Web API 返回 `isreboot=1`），这是刷机流程自带，不是故障；
+开机之后不会再无故重启。

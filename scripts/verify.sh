@@ -40,9 +40,10 @@ has 'PREFIX="Nwrt-WDS-${KTAG}-${STAMP}-"' .github/workflows/build-wds.yml \
   && ok "WDS 文件名 = 模式+内核版本+日期+机型" || warn "WDS 命名缺内核版本"
 has 'PREFIX="Nwrt-AP-${KTAG}-${STAMP}-"' .github/workflows/build-ap.yml \
   && ok "AP 文件名 = 模式+内核版本+日期+机型" || warn "AP 命名缺内核版本"
-has 'make -s kernel_version' .github/workflows/build-wds.yml \
-  && has 'make -s kernel_version' .github/workflows/build-ap.yml \
-  && ok "内核版本由 make kernel_version 实际抓取（含兜底）" || warn "未抓实际内核版本"
+has 'KERNEL_PATCHVER' .github/workflows/build-wds.yml \
+  && has 'KERNEL_PATCHVER' .github/workflows/build-ap.yml \
+  && ok "内核版本读自源码树（KERNEL_PATCHVER + LINUX_VERSION，不调用 make）" \
+  || warn "内核版本未从源码树读取"
 has 'fw-${KVER:-kernel}-' .github/workflows/build-wds.yml \
   && has 'fw-${KVER:-kernel}-' .github/workflows/build-ap.yml \
   && ok "Release tag 也带内核版本" || warn "tag 缺内核版本"
@@ -293,6 +294,47 @@ has 'GNU awk' scripts/gen-config.sh \
 # (5) 报告
 [ -s docs/编译链预检与板级缺口.md ] \
   && ok "第43次资产: docs/编译链预检与板级缺口.md" || bad "缺编译链预检报告"
+
+# ── 第 45 次：编译链致命项 / 必需包误删 / 机器狗自动重启 ──
+# (1) 致命：workflow 不得再用 make -s kernel_version（set -euo pipefail 下静默 exit 2）
+for f in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
+  if grep -q 'make -s kernel_version' "$f"; then
+    bad "$f 仍用 make -s kernel_version（会在 pipefail 下让 Prepare 静默 exit 2）"
+  else
+    has 'KERNEL_PATCHVER' "$f" && has 'target/linux/generic/kernel-' "$f" \
+      && ok "$f 内核版本改为纯源码树读取（不再调用 make）" \
+      || bad "$f 缺内核版本文件级兜底"
+  fi
+done
+# (2) 必需包：gen-config 不再误删 TTYD / ath11k 固件
+has 'REQUIRED_PKGS' scripts/gen-config.sh \
+  && has '_pkg_present' scripts/gen-config.sh \
+  && ok "gen-config 保留必需包、只对主题做存在性剔除" || bad "gen-config 缺第45次必需包保护"
+if grep -qE 'for p in .*ath11k-firmware-ipq5018-qcn6122.*ttyd' scripts/gen-config.sh; then
+  bad "gen-config 仍在探测并删除必需包"
+else
+  ok "必需包不在自动删除列表"
+fi
+# (3) 机器狗：默认停用，刷机后不会自动重启
+for f in files/etc/config/wdsdog files.ap/etc/config/wdsdog; do
+  grep -q "^[[:space:]]*option enabled '0'" "$f" \
+    && ok "$f 机器狗默认停用" || bad "$f 机器狗仍默认启用（会刷后自动重启）"
+done
+grep -q "^[[:space:]]*option dryrun '1'" files/etc/config/wdsdog \
+  && ok "WDS 机器狗 dryrun=1 双保险" || bad "WDS 机器狗缺 dryrun 双保险"
+has 'bridge-watchdog disable' files/etc/uci-defaults/99-bridge-ready \
+  && has "wdsdog.main.enabled='0'" files/etc/uci-defaults/99-bridge-ready \
+  && ok "WDS 首启脚本改为 stop+disable（不再 enable+start）" \
+  || bad "WDS 首启脚本仍会启用机器狗"
+has 'ENABLED=$(_cfg enabled 0)' files/usr/sbin/bridge-watchdog \
+  && has 'DRYRUN=$(_cfg dryrun 1)' files/usr/sbin/bridge-watchdog \
+  && ok "bridge-watchdog 代码级缺省也安全（0 / 1）" \
+  || bad "bridge-watchdog 缺省仍会回落到自动重启"
+if grep -q '5 分钟重启' files/etc/banner; then
+  bad "banner 仍宣称开机 5 分钟自动重启"
+else
+  ok "banner 文案已改为默认停用"
+fi
 
 # ── 第 44 次（配置收口）：IPv6 关闭 / DHCP 防护 / 插件精简 ──
 # (1) IPv6：编译期全局开关 + 运行期三层兜底
