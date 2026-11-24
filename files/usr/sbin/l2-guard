@@ -61,6 +61,20 @@ apply() {
         echo "applied pattern=\"$(cfg wlan_pattern)\" dryrun=$(cfg dryrun)" > "$MARK"
         logger -t l2-guard "无线端 DHCP 防护已启用"
         echo "l2-guard: 已启用，拦 [$(cfg wlan_pattern)] 的 67→68 / 547→546"
+    elif [ "$(cfg dhcpv6)" = '1' ]; then
+        # 第 44 次：IPv6 编译期关闭后，某些内核/nft 组合不接受 DHCPv6 匹配行。
+        # 此时去掉 547→546 只保留 IPv4 的 67→68，绝不因为一行规则把整张表丢掉。
+        grep -v 'sport 547' "$RULES" > "$RULES.v4" 2>/dev/null || true
+        nft delete table bridge "$TABLE" 2>/dev/null || true
+        if [ -s "$RULES.v4" ] && nft -f "$RULES.v4" 2>/dev/null; then
+            echo "applied-v4-only pattern=\"$(cfg wlan_pattern)\"" > "$MARK"
+            logger -t l2-guard 'DHCPv6 规则不可用，已降级为仅拦 IPv4 rogue DHCP'
+            echo 'l2-guard: 已启用（仅 IPv4，DHCPv6 规则被内核跳过）'
+        else
+            echo 'failed' > "$MARK"
+            logger -t l2-guard 'nft 规则加载失败，已跳过（不影响开机）'
+            echo 'l2-guard: 规则加载失败，已跳过'
+        fi
     else
         echo 'failed' > "$MARK"
         logger -t l2-guard 'nft 规则加载失败，已跳过（不影响开机）'

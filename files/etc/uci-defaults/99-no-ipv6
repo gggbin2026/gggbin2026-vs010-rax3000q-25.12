@@ -1,0 +1,37 @@
+#!/bin/sh
+# 【第 44 次 · 用户明确要求】关闭 IPv6：哑 AP / 纯二层网桥只跑 IPv4。
+# 编译期：common.seed 写 CONFIG_IPV6=n，gen-config.sh 兜底不编
+#         odhcpd / odhcpd-ipv6only / odhcp6c / luci-proto-ipv6 / ip6tables。
+# 运行期（本文件）：sysctl disable_ipv6 + UCI 清 ULA/RA/DHCPv6 + 停 odhcpd，
+#         防止 sysupgrade 保留的旧配置把 IPv6 又带回来。
+# 不碰 br-lan、不碰 SSH/TTYD、不动 l2-guard 那条二层 DHCP 防护。
+mkdir -p /etc/sysctl.d
+cat > /etc/sysctl.d/99-no-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
+net.ipv6.conf.lo.disable_ipv6=1
+EOF
+if command -v sysctl >/dev/null 2>&1; then
+    sysctl -p /etc/sysctl.d/99-no-ipv6.conf >/dev/null 2>&1 || true
+fi
+if command -v uci >/dev/null 2>&1; then
+    uci -q set network.lan.ipv6='0'       2>/dev/null || true
+    uci -q set network.lan.delegate='0'   2>/dev/null || true
+    uci -q set network.globals.ula_prefix='' 2>/dev/null || true
+    uci -q delete network.lan.ip6assign   2>/dev/null || true
+    uci -q delete network.wan6            2>/dev/null || true
+    uci -q delete dhcp.lan.dhcpv6         2>/dev/null || true
+    uci -q delete dhcp.lan.ra             2>/dev/null || true
+    uci -q delete dhcp.lan.ndp            2>/dev/null || true
+    uci -q set dhcp.lan.dhcpv6='disabled' 2>/dev/null || true
+    uci -q set dhcp.lan.ra='disabled'     2>/dev/null || true
+    uci commit network 2>/dev/null || true
+    uci commit dhcp    2>/dev/null || true
+fi
+for s in odhcpd odhcpd-ipv6only; do
+    [ -x "/etc/init.d/$s" ] || continue
+    "/etc/init.d/$s" stop    2>/dev/null || true
+    "/etc/init.d/$s" disable 2>/dev/null || true
+done
+logger -t nwrt 'IPv6 已关闭（编译期 CONFIG_IPV6=n + 运行期 sysctl/uci/odhcpd 三层）'
+exit 0

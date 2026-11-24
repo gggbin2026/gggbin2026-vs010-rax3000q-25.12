@@ -88,3 +88,27 @@ CGI 的 `protect.ssh` / `protect.ttyd` 会显示是否 enabled。
 
 未变：`firewall4`/`firewall` 编译期 n、运行期 disable；只删自己那张 nft 表，
 绝不 flush 全局 ruleset；SSH 与 TTYD 保留。
+
+## 第 44 次补充：默认开启状态与 IPv6 关闭（2026-11-24）
+
+**「无线 DHCP Snooping 是否开启」——答案是：默认开启。**
+`/etc/config/l2guard` 里 `option enabled '1'`，开机由 `/etc/init.d/l2-guard` 建表，
+`l2-guard status` 或状态页 `/bridge/` `/ap/` 都能看到 `applied`。
+
+但要如实区分：它**不是**标准 DHCP Snooping（无 binding 表、无 trust 端口分级、
+无独立守护进程），只是用一条 `nft bridge` 规则达到「无线端不能私开 DHCP」的同等目标。
+真 snooping 需要交换芯片/NSS 数据面支持；NSS 卸载下部分报文不过 host bridge hook，
+所以是**尽力防护**。这是「最稳 + 最少占资源」下的折中，不额外编任何包
+（`nftables` + `kmod-nft-bridge` 本来就要用于二层过滤）。
+
+**IPv6 已关闭**（用户明确要求，只跑 IPv4 纯二层）：
+- 编译期 `CONFIG_IPV6=n`；`odhcpd` / `odhcpd-ipv6only` / `odhcp6c` /
+  `luci-proto-ipv6` / `ip6tables` / `kmod-ip6tables` 全部 `is not set`
+- 运行期 `files/etc/uci-defaults/99-no-ipv6`：sysctl 关 IPv6、清 ULA /
+  `wan6` / RA / DHCPv6、停 odhcpd；AP 模式的 `config odhcpd` 段已删除
+- `l2-guard` 的 DHCPv6 拦截行若因内核关闭 v6 而加载失败，会**自动降级只拦 IPv4**，
+  不会把整张 nft 表丢掉（v4 rogue DHCP 防护仍然生效）
+
+> `CONFIG_IPV6` 是 OpenWrt 官方全局开关，不是老 QSDK 5.4 为绕 ECM BUG_ON 的 hack；
+> 6.12 主线没有那个 BUG，这里纯粹按用户「精简、少占资源」的要求关闭。
+

@@ -76,7 +76,22 @@ CONFIG_PACKAGE_kmod-nft-bridge=y
 # CONFIG_PACKAGE_smartdns is not set
 # CONFIG_PACKAGE_https-dns-proxy is not set
 
+# ── 用户明确要求：关闭 IPv6（哑 AP / 纯二层网桥只跑 IPv4，少占资源）──
+# 第 44 次修订：旧注释写「不要写 CONFIG_IPV6=n」，那是针对「QSDK 5.4 ECM BUG_ON
+# 需要靠关 IPv6 规避」的老坑；6.12 主线不存在该 BUG。但用户这次是【主动要求
+# 精简、关闭 IPv6】，与 BUG 规避无关，所以按官方全局开关正式关闭。
+# CONFIG_IPV6 是 OpenWrt 官方 config/Config-global.in 的全局符号（不是内核
+# CONFIG_KERNEL_IPV6），写 =n 由 gen-config.sh 转成 "# CONFIG_IPV6 is not set"，
+# make defconfig 会保留；它让 dnsmasq / 各包不带 v6 特性，是官方支持的配置。
+CONFIG_IPV6=n
+CONFIG_PACKAGE_odhcpd=n
+CONFIG_PACKAGE_odhcpd-ipv6only=n
+CONFIG_PACKAGE_odhcp6c=n
+CONFIG_PACKAGE_luci-proto-ipv6=n
+CONFIG_PACKAGE_ip6tables=n
+CONFIG_PACKAGE_kmod-ip6tables=n
+
 # 注意：25.12 用 apk，不要再写 luci-lib-ipkg / luci-i18n-opkg-zh-cn / opkg
-# 注意：不要写 CONFIG_IPV6=n —— 那是 QSDK 5.4 ECM BUG_ON 的规避，6.12 不需要
 # 注意：不要写 CONFIG_ATH11K_NSS_SUPPORT / MAC80211_NSS_SUPPORT（5.4 私有符号）
 # 注意：WAN + LAN 全部在 br-lan（port-overlay.sh 生成 list ports lan1/lan2/lan3/wan）
+# 注意：插件只保留 luci-app-ttyd；SSH=dropbear；firewall4/firewall 编译期 n

@@ -1,10 +1,34 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 /*
- * VS010 (Unicom) Device Tree Source —— 新内核 6.12 融合版
- * 母本：新仓库 ipq5018-vs010.dts（官方 25.12 qualcommax / CMCC PZ-L8 风格，
- *       &wifi/&wifi1 + ath11k-calibration-variant + DSA QCA8337）
- * 融入：老仓库 6c74d54 实机真值（vs010/wifi-truth.conf、NWRT fdt 反编译稿）
- *       —— WPS 键 GPIO34、无复位键；原厂 BDF 本地落盘；ART MAC 偏移 0x0/0x6。
+ * VS010 (中国联通 CUCC) Device Tree Source —— 新内核 6.12 融合版 · 第 44 次校正
+ *
+ * 骨架：qosmio/openwrt-ipq @ 25.12-nss 的 ipq5018-pz-l8.dts
+ *       （只借 6.12 主线 ath11k/DSA 绑定：&wifi/&wifi1、
+ *        qcom,ath11k-calibration-variant、QCA8337 ports 写法）
+ *       ——【不】继承它的 GPIO / LED / 端口 label。
+ *
+ * 硬件真值（第 44 次）：用户上传的 docs/oem-dts/vs010.dtb（45056 B，
+ *   DTB v17，原厂闭源固件运行态 /sys/firmware/fdt 导出）逐节点解析：
+ *     model="CUCC VS010"  compatible="cucc,vs010" "qcom,ipq5018-ap-mp02.1" ...
+ *     按键：仅 wps = GPIO34 / KEY_WPS_BUTTON(0x211) / debounce 60 ——【无 reset 键】
+ *     LED ：mesh = GPIO33 低有效；pwr = GPIO31 低有效（默认 on）
+ *     NAND：4bit/512（F5D01G41LB ESMT 系）
+ *     dp1/dp2 local-mac = 58:99:a8:13:18:1b / 58:95:d8:13:28:2a
+ *     0:ART @0x780000(1MiB)、0:TRAINING @0x880000、rootfs @0x900000
+ *
+ * 来源纠正：本仓库 fork 自 xiangye277/vs010-openwrt，而核查报告
+ *   （docs/oem-dts/VS010与CMCC机型DTS资料核查报告.md 第三/五章）明确记录
+ *   该版「GPIO 与 switch port 配置不正确」，作者本人在 issue #1 已否定。
+ *   因此 GPIO/LED/ECC 一律以上面这份实机 FDT 为准，不再引用该版。
+ *
+ * 仍待实机核对的两处（本次【故意不改】，见 docs/板级真值-第44次.md）：
+ *   1) QCA8337 端口排序：PZ-L8 是 PHY3=WAN；VS010 原厂 FDT 的
+ *      switch_wan_bmp=0 / switch_lan_bmp=0x1e（四个口全 LAN），maxdarksol 版
+ *      把直连 CPU 的 LAN3 对调成 WAN。maxdarksol 全文未取到，改错会网口全灭；
+ *      由于 WAN+LAN 全在 br-lan，label 错位不影响桥接，刷后逐个试口即可。
+ *   2) 5G bdf-addr：原厂 FDT 是 0x4d300000，主线 PZ-L8 骨架是 0x4d100000，
+ *      属 5.4 闭源 cnss2 与 6.12 主线 ath11k 两套内存布局差异，禁止照抄。
+ *
  * 不要用老仓库 vs010/ipq5018-vs010.dts（QSDK 5.4 wifi0/wifi1 写法）覆盖本文件。
  */
 
@@ -24,10 +48,10 @@
 
 	aliases {
 		serial0 = &blsp1_uart1;
-		led-boot = &led_status;
-		led-failsafe = &led_status;
-		led-running = &led_status;
-		led-upgrade = &led_status;
+		led-boot = &led_pwr;
+		led-failsafe = &led_mesh;
+		led-running = &led_pwr;
+		led-upgrade = &led_mesh;
 		label-mac-device = <&dp1>;
 	};
 
@@ -39,7 +63,7 @@
 	/*
 	 * 按老仓库 NWRT /sys/firmware/fdt 实机真值修正（第 22 次校准）：
 	 * VS010 实物只有 WPS 键 = GPIO34 / KEY_WPS_BUTTON(0x211)，没有 reset 键。
-	 * 原 6.12 稿借 RAX3000Q 的 GPIO33 + KEY_RESTART，GPIO33 悬空会被常判按下，
+	 * 原 6.12 稿误把 GPIO33 配成 KEY_RESTART（实机 GPIO33 是 mesh 指示灯），会被常判按下，
 	 * preinit 据此进 FAILSAFE（无 IP / 无无线 / 进不了 WEB）。整段删除复位键。
 	 */
 	keys {
@@ -55,16 +79,23 @@
 		};
 	};
 
+	/* vs010.dtb 实机 /soc/leds：mesh(GPIO33) + pwr(GPIO31)，均低有效。
+	 * 旧版沿用 PZ-L8 的 WAN 绿灯 GPIO35，与本机不符，第 44 次已替换。 */
 	leds {
 		compatible = "gpio-leds";
 		pinctrl-0 = <&led_pins>;
 		pinctrl-names = "default";
 
-		led_status: led-0 {
-			gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
-			color = <LED_COLOR_ID_GREEN>;
-			function = LED_FUNCTION_STATUS;
+		led_mesh: led-0 {
+			label = "mesh";
+			gpios = <&tlmm 33 GPIO_ACTIVE_LOW>;
 			default-state = "off";
+		};
+
+		led_pwr: led-1 {
+			label = "pwr";
+			gpios = <&tlmm 31 GPIO_ACTIVE_LOW>;
+			default-state = "on";
 		};
 	};
 };
@@ -114,6 +145,10 @@
 		compatible = "spi-nand";
 		reg = <0>;
 		nand-ecc-engine = <&qpic_nand>;
+		/* vs010.dtb 实机 /soc/qpic-nand@79b0000/nandcs@0：4bit/512。
+		 * F5D01G41LB(ESMT 系) 物理参数，与 RAX3000Q 的 8bit/512 不同。 */
+		nand-ecc-strength = <4>;
+		nand-ecc-step-size = <512>;
 		nand-bus-width = <8>;
 
 		partitions {
@@ -131,6 +166,9 @@
 					// VS010 MAC layout: raw bytes at ART+0
 					// eth0: D8:3D:CC:72:D5:43 @ offset 0x00
 					// eth1: D8:3D:CC:72:D5:42 @ offset 0x06
+					// vs010.dtb 实机 dp1/dp2 local-mac 作交叉：
+					//   58:99:a8:13:18:1b / 58:95:d8:13:28:2a
+					// 仍按 ART 0x0/0x6 取（第 39 次 ART 实证），不写死本机值
 					macaddr_eth0: macaddr@0 {
 						reg = <0x0 0x6>;
 					};
@@ -204,6 +242,15 @@
 	pinctrl-names = "default";
 	reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
 
+	/*
+	 * 第 44 次「待实机核对」：以下 label 沿用 PZ-L8（PHY3=WAN，
+	 * PHY0/1/2=LAN3/2/1），而 VS010 原厂 FDT 是 switch_lan_bmp=0x1e
+	 * （四口全 LAN）、switch_wan_bmp=0，maxdarksol 版把直连 CPU 的 LAN3
+	 * 对调成 WAN。maxdarksol 全文未取到，改错会网口全灭 → 本次不改。
+	 * 由于 WAN+LAN+2.4G+5G 都在 br-lan（哑 AP），label 错位不影响桥接，
+	 * 刷后上级线插哪个口不通就逐个换；要彻底对齐请按
+	 * docs/板级真值-第44次.md 上机取证后再改这一段。
+	 */
 	// QCA8337 Phy0 -> LAN3
 	qca8337_0: ethernet-phy@0 {
 		reg = <0>;
@@ -298,7 +345,8 @@
 	};
 
 	led_pins: led-state {
-		pins = "gpio35";
+		/* mesh GPIO33 + pwr GPIO31（vs010.dtb 实机；旧 gpio35 是 PZ-L8 的 WAN 灯） */
+		pins = "gpio33", "gpio31";
 		function = "gpio";
 		drive-strength = <8>;
 		bias-pull-down;
@@ -380,6 +428,8 @@
 	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
 	qcom,ath11k-calibration-variant = "Unicom-VS010";
 	qcom,ath11k-fw-memory-mode = <1>;
+	/* vs010.dtb 原厂 FDT 的 5G bdf-addr 是 0x4d300000；这里保留主线
+	 * PZ-L8 骨架的 0x4d100000（6.12 ath11k 内存布局），禁止照抄闭源值 */
 	qcom,bdf-addr = <0x4d100000>;
 	qcom,m3-dump-addr = <0x4df00000>;
 
