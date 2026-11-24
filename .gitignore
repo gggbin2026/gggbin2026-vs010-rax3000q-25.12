@@ -10,3 +10,6 @@ tmp/
 logs/
 .env
 *.swp
+openwrt/
+firmware_out/
+build.log
