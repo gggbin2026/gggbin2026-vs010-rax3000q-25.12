@@ -228,7 +228,8 @@ if [ "$D" = rax3000q ]; then
   [ -s "$SRC" ] || { echo "::error::缺 $SRC（第 43 次新增的 RAX3000Q 板级）"; exit 1; }
   cp "$SRC" "$DTS_DIR/ipq5018-rax3000q.dts"
   echo "  ✓ DTS → $DTS_DIR/ipq5018-rax3000q.dts"
-  echo "::warning::[rax3000q] 板级按同芯片 PZ-L8 骨架 + 5.4 闭源 DTB 硬件真值融合，"
+  echo "::warning::[rax3000q] 板级 = PZ-L8 的 6.12 绑定骨架 + 官方 main DTS 硬件真值"
+  echo "::warning::（第 44 次：QCA8337 端口/ECC/compatible 已按逐字节官方原文校正）"
   echo "::warning::未在 6.12 主线实机验证；首次刷务必接 3.3V USB-TTL 看串口。"
 
   # 设备定义：与 cmcc_pz-l8 同骨架，补 DEVICE_PACKAGES（否则射频不 probe）
@@ -254,12 +255,22 @@ TARGET_DEVICES += cmcc_rax3000q
 MKEOF
     echo "  ✓ 追加 Device/cmcc_rax3000q（含 factory.img，适配原厂 Web API）"
   fi
-
-  # board.d 网络映射：好固件 02_network 里实证是 cmcc,rax3000qy 分支
-  if [ -f "$NET" ] && ! grep -q 'cmcc,rax3000qy' "$NET"; then
+  # board.d 网络映射：★ 第 44 次——两个 compatible 都要有分支
+  #   官方 main（2026-09-27 合入）用 cmcc,rax3000q；
+  #   用户手上的 QSDK 12.2 好固件 FDT 用 cmcc,rax3000qy（QY 变体）。
+  #   DTS 的 compatible 两个都写了，这里也必须两个都注入，否则 board_name
+  #   匹配不到 → ucidef 不生效 → WAN/LAN 不进 br-lan。
+  #   注意用单引号 sed（双引号会把 \\t 吃掉，插入成 tcmcc... 语法错误）。
+  if [ -f "$NET" ]; then
     if grep -q 'cmcc,pz-l8' "$NET"; then
-      sed -i '/^[[:space:]]*cmcc,pz-l8[|)]/i\\tcmcc,rax3000qy|\\' "$NET"
-      echo "  ✓ 02_network 追加 cmcc,rax3000qy"
+      if ! grep -qF 'cmcc,rax3000q|' "$NET"; then
+        sed -i '/^[[:space:]]*cmcc,pz-l8[|)]/i\\tcmcc,rax3000q|\\' "$NET"
+        echo "  ✓ 02_network 追加 cmcc,rax3000q（官方主线名）"
+      fi
+      if ! grep -qF 'cmcc,rax3000qy|' "$NET"; then
+        sed -i '/^[[:space:]]*cmcc,pz-l8[|)]/i\\tcmcc,rax3000qy|\\' "$NET"
+        echo "  ✓ 02_network 追加 cmcc,rax3000qy（QY 变体）"
+      fi
     else
       echo "::warning::02_network 锚点 cmcc,pz-l8 不存在，请手工核对端口映射"
     fi

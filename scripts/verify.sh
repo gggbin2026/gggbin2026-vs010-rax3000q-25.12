@@ -294,6 +294,97 @@ has 'GNU awk' scripts/gen-config.sh \
 [ -s docs/编译链预检与板级缺口.md ] \
   && ok "第43次资产: docs/编译链预检与板级缺口.md" || bad "缺编译链预检报告"
 
+# ── 第 44 次（配置收口）：IPv6 关闭 / DHCP 防护 / 插件精简 ──
+# (1) IPv6：编译期全局开关 + 运行期三层兜底
+has 'CONFIG_IPV6=n' config/common.seed \
+  && ok "编译期 CONFIG_IPV6=n（官方全局开关，非 5.4 ECM hack）" || bad "IPv6 编译期未关"
+for k in odhcpd odhcpd-ipv6only odhcp6c luci-proto-ipv6 ip6tables kmod-ip6tables; do
+  grep -qE "^CONFIG_PACKAGE_$k=n$" config/common.seed \
+    && ok "编译期不编 $k" || bad "缺 CONFIG_PACKAGE_$k=n"
+done
+has 'luci-proto-ipv6' scripts/gen-config.sh \
+  && has 'CONFIG_IPV6=n 由 common.seed' scripts/gen-config.sh \
+  && ok "gen-config.sh 兜底再写一遍 IPv6 包" || bad "gen-config 缺 IPv6 兜底"
+IP6=files/etc/uci-defaults/99-no-ipv6
+[ -s "$IP6" ] && sh -n "$IP6" 2>/dev/null \
+  && has 'disable_ipv6=1' "$IP6" && has 'ula_prefix' "$IP6" \
+  && has 'dhcp.lan.ra' "$IP6" && has 'odhcpd' "$IP6" \
+  && ok "运行期 99-no-ipv6（sysctl + UCI + 停 odhcpd）" || bad "缺/错 99-no-ipv6"
+# (2) 无线 DHCP 防护：默认开 + IPv6 关闭后的降级容错
+has "option enabled '1'" files/etc/config/l2guard \
+  && ok "无线端 DHCP 防护默认开启（l2-guard）" || bad "无线 DHCP 防护未开启"
+has 'sport 547' files/usr/sbin/l2-guard \
+  && has 'applied-v4-only' files/usr/sbin/l2-guard \
+  && ok "l2-guard 有 DHCPv6 失败时降级仅拦 IPv4 的容错" || bad "l2-guard 缺 v4 降级容错"
+if grep -q "^config odhcpd" files.ap/etc/config/dhcp 2>/dev/null; then
+  bad "files.ap/etc/config/dhcp 仍留 config odhcpd 段（包已不编）"
+else
+  ok "AP 模式 dhcp 配置已删 odhcpd 段"
+fi
+# (3) 精简复核：插件只有 ttyd、防火墙关、WAN/LAN 同桥
+n=$(grep -c '^CONFIG_PACKAGE_luci-app-.*=y$' config/common.seed)
+[ "$n" -eq 1 ] && has 'CONFIG_PACKAGE_luci-app-ttyd=y' config/common.seed \
+  && ok "插件仅 luci-app-ttyd 一个（+ dropbear/TTYD）" || bad "插件数量异常: $n"
+has 'for k in firewall4 firewall' scripts/gen-config.sh \
+  && ok "防火墙编译期显式 n" || bad "防火墙未关"
+has 'list ports' scripts/port-overlay.sh \
+  && ok "WAN+LAN 全部在 br-lan" || bad "未生成同桥"
+
+# ── 第 44 次：用户上传的 DTS/DTB 板级真值核对 ──
+DTS_V=board/ipq5018-vs010.6.12.dts
+DTS_R=board/ipq5018-rax3000q.6.12.dts
+# (1) 只读取证资产（缺了说明包没传全 → 硬判据）
+for f in docs/oem-dts/README.md docs/oem-dts/vs010.dtb \
+         docs/oem-dts/VS010_原厂MTD分区表.txt \
+         docs/oem-dts/VS010与CMCC机型DTS资料核查报告.md \
+         docs/oem-dts/VS010_DTS获取清单与来源.md \
+         docs/oem-dts/ipq5018-pz-l8.dts docs/oem-dts/ipq5018-rax3000q.dts \
+         docs/oem-dts/ipq5018-rax3000q.MAIN.dts; do
+  [ -s "$f" ] && ok "第44次取证资产: $f" || bad "缺第44次取证资产: $f"
+done
+# 文档报告只警告，不阻断编译（第 43 次教训：纯文档项不能卡死 CI）
+[ -s docs/板级真值-第44次.md ] \
+  && ok "第44次资产: docs/板级真值-第44次.md" \
+  || warn "缺 docs/板级真值-第44次.md（不阻断编译）"
+# (2) VS010：实机 FDT 的 LED / NAND ECC 已落地，且仍无复位键
+has 'led_mesh: led-0' "$DTS_V" && has 'led_pwr: led-1' "$DTS_V" \
+  && has '"gpio33", "gpio31"' "$DTS_V" \
+  && ok "VS010 LED 已按 vs010.dtb 实机改为 mesh33/pwr31" || bad "VS010 LED 仍是 PZ-L8 的 GPIO35"
+has 'nand-ecc-strength = <4>' "$DTS_V" && has 'nand-ecc-step-size = <512>' "$DTS_V" \
+  && ok "VS010 NAND ECC 4bit/512（实机 FDT）" || bad "VS010 缺 4bit/512 ECC"
+if sed -E '/^[[:space:]]*(\/\/|\/\*|\*|\*\/)/d' "$DTS_V" \
+     | grep -qE 'KEY_RESTART|label[[:space:]]*=[[:space:]]*"reset"'; then
+  bad "VS010 DTS 含复位键（悬空 GPIO 会误进 failsafe）"
+else
+  ok "VS010 DTS 仍无复位键（实机 FDT 只有 WPS GPIO34）"
+fi
+has 'xiangye277' "$DTS_V" && ok "VS010 头注释已纠正 fork 来源被否定的问题" \
+  || warn "VS010 头注释未标注来源纠正（不阻断）"
+has '0x4d300000' "$DTS_V" && ok "VS010 已标注 5G bdf-addr 跨栈差异（不改）" \
+  || warn "VS010 缺 bdf-addr 跨栈差异说明（不阻断）"
+# (3) RAX3000Q：按官方 main 原文校正端口 / ECC / 双 compatible
+has '"cmcc,rax3000q", "cmcc,rax3000qy"' "$DTS_R" \
+  && ok "RAX3000Q compatible 双写（官方名 + QY 变体）" || bad "RAX3000Q compatible 未双写"
+has 'nand-ecc-strength = <8>' "$DTS_R" && has 'nand-ecc-step-size = <512>' "$DTS_R" \
+  && ok "RAX3000Q NAND ECC 8bit/512（GD5F1GQ5REYIG）" || bad "RAX3000Q 缺 8bit/512 ECC"
+if grep -qE '^[[:space:]]*(keys|leds) \{' "$DTS_R"; then
+  bad "RAX3000Q DTS 定义了 keys/leds（变砖案例：复位键 GPIO 冲突）"
+else
+  ok "RAX3000Q DTS 故意不定义 keys/leds（防硬砖）"
+fi
+has 'label = "wan"' "$DTS_R" && has 'phy-handle = <&qca8337_0>' "$DTS_R" \
+  && has 'label = "lan3"' "$DTS_R" && has 'phy-handle = <&qca8337_4>' "$DTS_R" \
+  && ok "RAX3000Q 端口按官方映射：PHY0=WAN / PHY4=LAN3" \
+  || bad "RAX3000Q 端口仍是 PZ-L8 的 PHY3=WAN"
+has 'label-mac-device = <&dp2>' "$DTS_R" \
+  && ok "RAX3000Q label-mac-device 指向单链路 gmac1(=&dp2)" || bad "RAX3000Q MAC 设备引用不对"
+# (4) 编译期注入双分支（否则 board_name 匹配不到 → 不进 br-lan）
+grep -Fq 'cmcc,rax3000q|' scripts/board-inject.sh \
+  && grep -Fq 'cmcc,rax3000qy|' scripts/board-inject.sh \
+  && ok "02_network 注入两个 compatible 分支" || bad "02_network 缺双分支"
+has '第 44 次补证' baseline.env && ok "baseline.env 已补「官方 main 有但 25.12 稳定分支无」实证" \
+  || warn "baseline.env 缺第 44 次补证（不阻断）"
+
 # ── NAND 补丁（V2 批次，默认关）──
 for f in patches/README.md patches/440-mtd-spinand-add-support-for-FudanMicro-FM25LS01.patch scripts/apply-nand-patch.sh; do
   [ -s "$f" ] && ok "NAND 资产: $f" || bad "缺 NAND 资产: $f"

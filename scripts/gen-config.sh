@@ -55,16 +55,19 @@ for seed in common themes "$MODE"; do
   done < "$f"
 done
 
-# ── 4. 显式关闭「防火墙 + 无用插件」：# 注释行不会进 .config，这里兜底 ──
+# ── 4. 显式关闭「防火墙 + IPv6 + 无用插件」：# 注释行不会进 .config，这里兜底 ──
 # 纯二层桥不做三层转发；firewall4 会带一整套 nft 规则和菜单链，是系统问题主要来源。
-for k in firewall4 firewall odhcpd-ipv6only \
+# 第 44 次：用户明确要关 IPv6、只留 TTYD，这里把 v6 相关包也全部显式 n。
+for k in firewall4 firewall \
+         odhcpd odhcpd-ipv6only odhcp6c luci-proto-ipv6 ip6tables kmod-ip6tables \
          luci-mod-dashboard luci-app-librespeed luci-app-adblock luci-app-sqm \
          luci-app-wireguard luci-app-statistics luci-theme-material luci-theme-edge \
          smartdns https-dns-proxy iperf3 htop nano curl wget-ssl \
          luci-lib-ipkg luci-i18n-opkg-zh-cn; do
   echo "# CONFIG_PACKAGE_$k is not set" >> .config
 done
-echo "[gen-config] ✓ 防火墙与 18 类无用包已显式 n（luci-app-ttyd / dropbear 保留）"
+echo "[gen-config] ✓ 防火墙/IPv6/无用包已显式 n（只留 SSH dropbear + luci-app-ttyd）"
+echo "[gen-config] ✓ CONFIG_IPV6=n 由 common.seed 写入，defconfig 不会改回 y"
 
 # ── 5. 第三方包若 feed 没加，提前给可见警告（不中断编译）──
 for p in ath11k-firmware-ipq5018-qcn6122 luci-theme-argon luci-theme-footstrap \

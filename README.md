@@ -21,7 +21,7 @@ Actions 里点哪个入口就出哪套，push 不触发编译。
 
 | baseline | 内核 | 无线 | 说明 |
 |---|---|---|---|
-| **`qosmio-25.12-nss`（默认，最稳）** | **6.12.116** | NSS FW **12.5**，`cmcc_rax3000q` 实机验证；5G 160MHz 773~833Mbps | 推荐：两台都能编、有硬件加速、稳定分支 |
+| **`qosmio-25.12-nss`（默认，最稳）** | **6.12.116** | NSS FW **12.5**；5G 160MHz 773~833Mbps | 推荐：有硬件加速、稳定分支。**两台板级都由本仓注入**（该树整树 `rax3000q` 0 命中，旧文案「实机验证」已纠正） |
 | `official-25.12.6` | 6.12.112 | 无 NSS | 官方稳定版，apk；**别拿来要无线满速**（DSA 软转 502M 就跑满双核） |
 | `kuncy7-6.18-nss` | **6.18.60** | NSS FW 12.5 优先；5G 160MHz AP→STA 915Mbps、CPU 1~3% | 更高内核尝鲜；不含这两台板级，需自己移植 |
 
@@ -253,3 +253,46 @@ model/compatible 融合，故意不定义 keys/leds、不引用 nvmem MAC）。�
 **建议 `device` 先选 `vs010` 单跑一次**，成功再 `both`。
 
 完整复盘与本地预检记录见 **[docs/编译链预检与板级缺口.md](docs/编译链预检与板级缺口.md)**。
+
+## 第 44 次：用你上传的 DTS / DTB 校正两台板级
+
+老仓库 `3000Q-VS010-固件/DTS/` 新上传的 6 份资料（尤其 **`vs010.dtb`**，45 KB
+原厂运行态 FDT）全部只读存档到 `docs/oem-dts/`，并额外抓到了
+`openwrt/openwrt @ main` 的 `ipq5018-rax3000q.dts` **逐字节官方原文**做交叉校验。
+
+**实证结论**：RAX3000Q/QY 确实在 2026-09-27 合入 OpenWrt **main**，但
+**v25.12.6 稳定 tag 和 qosmio 25.12-nss 都没有** → 三条基线仍需本仓注入板级。
+
+改了这些（按机型分别修，不再两台共用一套猜值）：
+
+- **VS010**：LED 从 PZ-L8 的 GPIO35 改成实机 `mesh=GPIO33` / `pwr=GPIO31`；
+  补 `4bit/512` NAND ECC；头注释纠正 fork 来源 `xiangye277` 版
+  **已被作者本人否定（GPIO 与 switch port 配置有误）**。
+- **RAX3000Q**：QCA8337 端口按官方映射整段改写
+  （`PHY0=WAN`、`PHY1/3/4=LAN1/2/3`、`port@0` 单条 SGMII CPU 链路）；
+  补 `8bit/512` ECC（GD5F1GQ5REYIG）；compatible 双写 `cmcc,rax3000q` +
+  `cmcc,rax3000qy`；`02_network` 两个分支都注入。
+
+**坚决不改的**：两台都不定义 keys/leds（恩山变砖实录：复位键 GPIO 冲突会
+循环重启、TTL 失联、需编程器）；VS010 端口排序不改（正确基线 maxdarksol 全文
+未取到，改错网口全灭，而 WAN+LAN 全在 `br-lan` 故 label 错位不影响桥接）；
+5G `bdf-addr`、`boot-args`、官方 DTS 整份替换一律不做（跨栈/跨绑定差异）。
+
+逐项核对表、变砖警示、刷前备份清单与刷后排查见
+**[docs/板级真值-第44次.md](docs/板级真值-第44次.md)**。
+
+## 第 44 次（配置收口）：IPv6 关闭 · DHCP 防护 · 插件精简
+
+用户这次把边界又说了一遍，逐条落成**编译期 + 运行期双层**，不是只写文档：
+
+| 要求 | 状态 | 落地 |
+|---|---|---|
+| **无线 DHCP Snooping 是否开启** | ✅ **默认开启** | `files/etc/config/l2guard` 的 `option enabled '1'`，开机 `l2-guard` 建独立 `nft bridge` 表，只丢无线口 `wlan* / phy*-ap*` 进来的 **67→68（DHCPv4 Offer/ACK）** 与 **547→546（DHCPv6）**；有线侧上级 DHCP 正常透传 |
+| 插件只留 TTYD | ✅ | `common.seed` 里 `luci-app-*` **只有 `luci-app-ttyd` 一个**（`verify.sh` 硬校验）；SSH=`dropbear`；LuCI 模块/中文/bootstrap 属底座不算插件，其余第三方/统计/科学/下载工具全部显式 `n` |
+| 防火墙关闭 | ✅ | 编译期 `firewall4` / `firewall` 显式 `is not set`；运行期 `99-no-firewall` stop+disable、清空 `/etc/config/firewall`、关软/硬 flow offload |
+| **IPv6 关闭** | ✅ **本次新增** | 编译期 `CONFIG_IPV6=n` + 不编 `odhcpd/odhcpd-ipv6only/odhcp6c/luci-proto-ipv6/ip6tables`（`gen-config.sh` 兜底再写一遍）；运行期新增 `99-no-ipv6`：sysctl `disable_ipv6=1`、清 ULA / RA / DHCPv6 / wan6、停 odhcpd |
+| WAN + LAN 一个桥 | ✅ | `port-overlay.sh` 生成 `config device 'br_lan'` + `list ports lan1 lan2 lan3 wan`；2.4G/5G 也进 `br-lan`，纯二层、本机 DHCP 关 |
+| 尽量少占资源 | ✅ | 不编 firewall4 / odhcpd / IPv6 协议族工具 / 任何第三方插件；状态页是独立静态页 + 只读 CGI，不依赖 LuCI 主题 |
+
+⚠ **如实说明「DHCP Snooping」这个词**：本仓开的**不是** IEEE 标准 DHCP Snooping（不维护 binding 表、不做 trust/untrust 端口分级、不占额外守护进程），而是等价目标的**轻量二层过滤**——只拦无线侧冒充 DHCP 服务器的报文。真端口级 snooping 需要 QCA8337/NSS 数据面支持；且 NSS wifi_offload 下部分射频报文不过 host bridge hook，属**尽力防护**。边界见 `docs/DHCP与SSH防护.md`。
+关闭 IPv6 后，`l2-guard` 若发现内核不接受 DHCPv6 匹配行，会**自动降级为仅拦 IPv4**，绝不因为一行规则把整张表丢掉。

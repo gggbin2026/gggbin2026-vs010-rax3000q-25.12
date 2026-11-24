@@ -289,3 +289,47 @@ failsafe，DTS **不定义 keys/leds**；ART 头全 FF，**不引用 nvmem macad
 用 `uci` 固化。首次刷务必 3.3V USB-TTL，建议先 `device=vs010` 单编验证编译链。
 
 详见 **[docs/编译链预检与板级缺口.md](docs/编译链预检与板级缺口.md)**。
+
+## 十三、第 44 次板级真值校正（DTS / DTB 取证）
+
+用户上传的 `docs/oem-dts/vs010.dtb`（原厂运行态 FDT）与
+`docs/oem-dts/ipq5018-rax3000q.MAIN.dts`（OpenWrt main 逐字节官方原文）
+给出了两台**不同的**硬件真值，本仓不再两台共用一套 PZ-L8 推断值：
+
+| 项 | VS010 | RAX3000Q |
+|---|---|---|
+| 按键 | 仅 WPS GPIO34，**无 reset** | reset GPIO23 / mesh GPIO38（**本仓故意不定义**） |
+| LED | mesh GPIO33 + pwr GPIO31（低有效） | 红24 / 绿19 / 蓝17（**故意不定义**） |
+| NAND ECC | **4 bit / 512** | **8 bit / 512**（GD5F1GQ5REYIG） |
+| QCA8337 | 排序待实机核对（本次不改） | **PHY0=WAN、PHY1/3/4=LAN1/2/3**，单条 SGMII CPU 链路 |
+| 5G bdf-addr | 原厂 0x4d300000（**不照抄**，主线骨架 0x4d100000） | 0x4d100000 |
+
+⚠ **刷前必读**：核查报告记录 2026-04-25 一例 VS010 刷 CMCC RAX3000Q 的
+U-Boot/大分区后，因复位键 GPIO 不一致循环重启、TTL 失联、最终需编程器。
+**VS010 绝不刷 CMCC 机型的 U-Boot / MIBIB / 大分区包**；刷前至少备份
+`0:MIBIB`、`0:APPSBLENV`、`0:APPSBL(_1)`、**`0:ART`(1 MiB，校准+MAC 不可再生)**、
+`0:TRAINING` 及 BOOTCONFIG/DEVCFG/CDT 三对。
+
+刷后若某个网口不通，上级线逐个换口（VS010 端口 label 待实证）；
+若 LuCI 操作 OOM，官方因 256 MiB 关 WiFi，社区做法是 `ath11k-smallbuffers` +
+zram（报告建议，未在两台实机验证）；若报 `unknown flash` / `-74 EUCLEAN`，
+按本机闪存型号核对 DTS 里两行 `nand-ecc-*`。
+
+详见 **[docs/板级真值-第44次.md](docs/板级真值-第44次.md)**，
+原始 7 份资料在 **[docs/oem-dts/](docs/oem-dts/README.md)**（只读，不进编译链）。
+
+## 十四、第 44 次配置收口：IPv6 关闭 · DHCP 防护 · 插件精简
+
+用户这次把边界又说了一遍，逐条落成**编译期 + 运行期双层**，不是只写文档：
+
+| 要求 | 状态 | 落地 |
+|---|---|---|
+| **无线 DHCP Snooping 是否开启** | ✅ **默认开启** | `files/etc/config/l2guard` 的 `option enabled '1'`，开机 `l2-guard` 建独立 `nft bridge` 表，只丢无线口 `wlan* / phy*-ap*` 进来的 **67→68（DHCPv4 Offer/ACK）** 与 **547→546（DHCPv6）**；有线侧上级 DHCP 正常透传 |
+| 插件只留 TTYD | ✅ | `common.seed` 里 `luci-app-*` **只有 `luci-app-ttyd` 一个**（`verify.sh` 硬校验）；SSH=`dropbear`；LuCI 模块/中文/bootstrap 属底座不算插件，其余第三方/统计/科学/下载工具全部显式 `n` |
+| 防火墙关闭 | ✅ | 编译期 `firewall4` / `firewall` 显式 `is not set`；运行期 `99-no-firewall` stop+disable、清空 `/etc/config/firewall`、关软/硬 flow offload |
+| **IPv6 关闭** | ✅ **本次新增** | 编译期 `CONFIG_IPV6=n` + 不编 `odhcpd/odhcpd-ipv6only/odhcp6c/luci-proto-ipv6/ip6tables`（`gen-config.sh` 兜底再写一遍）；运行期新增 `99-no-ipv6`：sysctl `disable_ipv6=1`、清 ULA / RA / DHCPv6 / wan6、停 odhcpd |
+| WAN + LAN 一个桥 | ✅ | `port-overlay.sh` 生成 `config device 'br_lan'` + `list ports lan1 lan2 lan3 wan`；2.4G/5G 也进 `br-lan`，纯二层、本机 DHCP 关 |
+| 尽量少占资源 | ✅ | 不编 firewall4 / odhcpd / IPv6 协议族工具 / 任何第三方插件；状态页是独立静态页 + 只读 CGI，不依赖 LuCI 主题 |
+
+⚠ **如实说明「DHCP Snooping」这个词**：本仓开的**不是** IEEE 标准 DHCP Snooping（不维护 binding 表、不做 trust/untrust 端口分级、不占额外守护进程），而是等价目标的**轻量二层过滤**——只拦无线侧冒充 DHCP 服务器的报文。真端口级 snooping 需要 QCA8337/NSS 数据面支持；且 NSS wifi_offload 下部分射频报文不过 host bridge hook，属**尽力防护**。边界见 `docs/DHCP与SSH防护.md`。
+关闭 IPv6 后，`l2-guard` 若发现内核不接受 DHCPv6 匹配行，会**自动降级为仅拦 IPv4**，绝不因为一行规则把整张表丢掉。
