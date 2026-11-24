@@ -1,11 +1,21 @@
-# WDS 无线看门狗（机器狗）默认配置 —— 2026-11-22 第 5 次更新
-# 改完不用重编：uci commit wdsdog && /etc/init.d/bridge-watchdog restart
-# 或者直接：bridge-watchdog set-delay 10
+# WDS 无线看门狗（机器狗）默认配置 —— 第 45 次：默认停用
+# ★ 用户实测：机器狗会导致刷机后自动重启。
+#   旧默认 enabled=1 / delay=5 / grace=6 → 单机、无对端、或只当有线网桥时，
+#   开机约 6+5=11 分钟后就 reboot -f，之后每个周期再来一次（脚本注释原话：
+#   「一直不通会 grace+delay 一个周期反复重启，这是看门狗的设计」）。
+#   刷完连 SSH 排障的窗口都没了，和「最稳、最少系统问题」直接冲突。
+# 因此：默认 enabled='0' + dryrun='1' 双保险；init.d 在 enabled!=1 时直接 return，
+#   首启脚本 99-bridge-ready 也改成 stop+disable（不再 enable+start）。
+# ★ 脚本 /usr/sbin/bridge-watchdog 与 init.d 仍完整保留，成对 WDS 部署时可手动开：
+#     bridge-watchdog on                 # 启用
+#     bridge-watchdog set-peer 192.168.1.242   # 强烈建议：ping 对端判通最准
+#     bridge-watchdog set-delay 10      # 或延长触发时间
+#   启前先 bridge-watchdog dryrun on 观察一两天，确认不会误重启再设回 0。
 config wdsdog 'main'
-	option enabled '1'       # 1=开机自启；0=完全停用（刷机/TTL 调试时先 off）
-	option delay '5'         # ★ 连续「无线不通」多少分钟才重启，可自定义（0~120，单位分钟）
-	option grace '6'         # ★ 开机宽限 6 分钟：等 ath11k 校准 + bridge-role 自动收敛，期间不计失败
+	option enabled '0'       # 0=默认停用（不会自动重启）；1=成对 WDS 部署时手动开
+	option delay '5'         # 连续「无线不通」多少分钟才重启（0~120，启用后生效）
+	option grace '6'         # 开机宽限：等 ath11k 校准 + bridge-role 收敛
 	option interval '30'     # 每多少秒检查一次
-	option iface 'auto'      # 只盯 WDS 那个 5G 接口；auto=自动挑 wlan1，也可手填 wlan0/wlan1
-	option peer ''           # 可选：对端管理 IP。填了就以 ping 对端为准（最贴近「桥通不通」）
-	option dryrun '0'        # 1=只写日志不真重启，先跑一两天确认不会误重启再设回 0
+	option iface 'auto'      # 只盯 WDS 那个 5G 接口
+	option peer ''           # 成对部署建议填对端管理 IP，以 ping 为准
+	option dryrun '1'        # 双保险：即便被手动 on，也先只记日志不真重启

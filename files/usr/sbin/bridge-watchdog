@@ -19,7 +19,10 @@
 #   peer 非空  → 直接 ping 对端管理 IP，通就算通（最贴近「桥到底通不通」）。
 #                成对部署强烈建议填：AP 端 .241 / STA 端 .242。
 #
-# 注意：一直不通会「grace + delay」一个周期反复重启，这是看门狗的设计。
+# ★ 第 45 次：默认停用（enabled=0 + dryrun=1），刷机后不会自动重启。
+#   用户实测旧默认 enabled=1 时，单机 / 无对端 / 只当有线桥会开机约 11 分钟
+#   就 reboot -f 并每周期反复重启。现在只有手动 `bridge-watchdog on` 才启用。
+# 注意：一旦手动启用，一直不通会「grace + delay」一个周期反复重启，这是看门狗的设计。
 #       要停手就 bridge-watchdog off / dryrun on，不要拔电猜。
 
 CONF_PKG=wdsdog
@@ -33,13 +36,16 @@ _cfg() {  # $1=key $2=默认值
     echo "$2"
 }
 load_cfg() {
-    ENABLED=$(_cfg enabled 1)
+    # 第 45 次：缺省值本身也要安全。若 /etc/config/wdsdog 丢失（sysupgrade
+    # 保留配置、首次刷机、手动删配置），旧版会回落到 enabled=1 / dryrun=0
+    # → 又开始自动重启。现在缺省是 0 / 1，任何异常场景都不会真重启。
+    ENABLED=$(_cfg enabled 0)
     DELAY=$(_cfg delay 5)
     GRACE=$(_cfg grace 3)
     INTERVAL=$(_cfg interval 30)
     IFACE_CFG=$(_cfg iface auto)
     PEER=$(_cfg peer '')
-    DRYRUN=$(_cfg dryrun 0)
+    DRYRUN=$(_cfg dryrun 1)
     # 防呆：非法值一律回落到安全缺省
     case "$DELAY" in ''|*[!0-9]*) DELAY=5 ;; esac
     case "$GRACE" in ''|*[!0-9]*) GRACE=3 ;; esac
@@ -207,7 +213,7 @@ bridge-watchdog —— WDS 无线看门狗（机器狗）
   bridge-watchdog status            查看配置 / 当前接口 / 连续不通多久 / 还剩多久重启
   bridge-watchdog once             立刻检测一次（通=退出码0，不通=1，绝不重启）
   bridge-watchdog set-delay N      ★自定义重启延时：N 分钟（0~120），例如 10
-  bridge-watchdog on | off         启用 / 停用（刷机、TTL 调试前先 off）
+  bridge-watchdog on | off         启用 / 停用（默认停用；成对 WDS 才需 on）
   bridge-watchdog dryrun on|off    只记日志不重启 / 恢复真重启
   bridge-watchdog set-peer IP      设对端管理 IP（如 192.168.1.242）；填了就以 ping 为准
   bridge-watchdog set-iface NAME   固定 WDS 接口（默认 auto，通常识别为 wlan1）

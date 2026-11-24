@@ -241,15 +241,21 @@ if command -v stty >/dev/null 2>&1 && [ -e "/dev/$TTY" ]; then
     stty -F "/dev/$TTY" 115200 sane echo -crtscts 2>/dev/null || true
 fi
 
-# ── 7c. 机器狗开机自启（2026-11-22 第 5 次更新）────────────────
-# uci-defaults 在 rcS 期间跑，START=95 的服务可能还没轮到，
-# 所以 enable（建 rc.d 链接）+ start（本次立即起）双保险。
-# enabled=0 时 init.d 的 start_service 会直接 return，off 是彻底停用。
-if [ -x /etc/init.d/bridge-watchdog ] && [ "$(uci -q get wdsdog.main.enabled 2>/dev/null)" = "1" ]; then
-    /etc/init.d/bridge-watchdog enable 2>/dev/null || true
-    /etc/init.d/bridge-watchdog start  2>/dev/null || true
-    logger -t bridge-watchdog "首次开机已启用（默认连续不通 5 分钟重启，可 set-delay 自定义）" 2>/dev/null || true
+# ── 7c.【第 45 次】机器狗默认停用，绝不自动重启 ──────────────────
+# 旧版在这里 enable+start：单机 / 无对端 WDS / 只当有线桥时，开机约 11 分钟
+# 就会 reboot -f，然后每周期反复重启（用户实测「刷机后自动重启」）。
+# 现在与 AP 版口径一致：显式 stop + disable，并且强制把 enabled 写成 0，
+# 专治 sysupgrade 勾了「保留配置」把旧 enabled=1 或旧 rc.d 链接带回来的情况。
+if [ -x /etc/init.d/bridge-watchdog ]; then
+    /etc/init.d/bridge-watchdog stop    2>/dev/null || true
+    /etc/init.d/bridge-watchdog disable 2>/dev/null || true
 fi
+if command -v uci >/dev/null 2>&1; then
+    uci -q set wdsdog.main.enabled='0' 2>/dev/null || true
+    uci -q set wdsdog.main.dryrun='1'  2>/dev/null || true
+    uci commit wdsdog 2>/dev/null || true
+fi
+logger -t bridge-watchdog "第45次：默认停用，刷机后不会自动重启（成对 WDS 可手动 on）" 2>/dev/null || true
 
 # ── 7d. 自动一主一备（第 8 次校准）─────────────────────────────
 # enable 建 rc.d 链接（以后每次开机都重判一次）+ start 本次立即后台跑。

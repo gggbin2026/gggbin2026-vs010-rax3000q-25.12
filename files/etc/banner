@@ -9,7 +9,7 @@
   2.4G   : BRIDGE-SETUP / admin12345
   状态页 : http://192.168.1.241/bridge/
   主/备  : 刷完自动一主一备（主 .241 / 备 .242，DHCP 主开备关）
-  机器狗 : 5G WDS 不通 5 分钟重启；调试前先 bridge-watchdog off
+  机器狗 : 默认停用（不会自动重启）；成对 WDS 可 bridge-watchdog on
   无线自检: wifi-bdf-check（BDF / 校准 / 每信道功率 / 关联终端）
   VS010 : 已装配本机原厂 BDF（ipq-wifi-cucc_vs010），非 RAX3000Q 板级表
   ------------------------------------------------------------

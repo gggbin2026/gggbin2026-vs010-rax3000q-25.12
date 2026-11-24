@@ -318,7 +318,7 @@ else
 fi
 
 # ── 机器狗状态（与 bridge-watchdog status 同口径）─────────────────
-WD_ENABLED=$(uci -q get wdsdog.main.enabled 2>/dev/null || echo '1')
+WD_ENABLED=$(uci -q get wdsdog.main.enabled 2>/dev/null || echo '0')
 WD_DELAY=$(uci -q get wdsdog.main.delay 2>/dev/null || echo '5')
 WD_GRACE=$(uci -q get wdsdog.main.grace 2>/dev/null || echo '3')
 WD_DRY=$(uci -q get wdsdog.main.dryrun 2>/dev/null || echo '0')
