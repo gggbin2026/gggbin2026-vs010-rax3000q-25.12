@@ -1,0 +1,14 @@
+# 「最新插件」候选清单 —— 2026-11-24 起【默认全部不编】
+# 用户要求：不要编译无用插件进去、要最稳、最少系统问题。
+# 只保留 SSH(dropbear) + TTYD(ttyd / luci-app-ttyd)，已在 common.seed。
+# 以下仅供以后按需开启，开启前先把对应 feed 加进 feeds.conf.default，
+# 并知悉：apk 与 opkg 命令不同；第三方 21.02 包名必须逐个核对。
+#
+# 官方 25.12 新增：luci-mod-dashboard、luci-app-librespeed、luci-app-weechat
+# luci-mod-dashboard
+# luci-app-librespeed
+# luci-app-weechat
+# luci-app-adblock / luci-app-sqm / luci-app-wireguard / luci-app-ttyd(已编)
+# luci-app-statistics / luci-app-https-dns-proxy / luci-app-smartdns
+# smartdns / https-dns-proxy / adblock / sqm-scripts / wireguard-tools
+# iperf3 / htop / btop / nano / curl / wget-ssl

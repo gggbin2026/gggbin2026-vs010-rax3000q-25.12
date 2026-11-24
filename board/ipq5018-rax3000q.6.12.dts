@@ -1,0 +1,345 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+/*
+ * CMCC RAX3000QY —— 6.12 主线 ath11k 板级（第 43 次新增）
+ *
+ * 骨架：qosmio/openwrt-ipq @ 25.12-nss 的 ipq5018-pz-l8.dts（同 IPQ5018 + QCN6122 + QCA8337）
+ * 硬件真值：用户上传的 QSDK 12.2 好固件（cmcc_rax3000qy factory.bin）里 FIT 的
+ *          /images/fdt@1（43778 B，parse-fdt.py 解析）：
+ *            model      = "CMCC RAX3000QY"
+ *            compatible = "cmcc,rax3000qy", "qcom,ipq5018-mp02.1", "qcom,ipq5018"
+ *            gpio_keys  = wps(GPIO23) + reset(GPIO25)；leds = sysb(17)/sysg(19)/sysr(25)
+ *            wifi board_id = 0x24(2G) / 0x60(5G)；caldb-addr=0
+ *
+ * ⚠ 本文件【未在 6.12 主线实机验证】：把 5.4 闭源 cnss2 的硬件事实映射到
+ *   主线 ath11k/DSA，键与 LED 的 GPIO 在两套栈里不一定等价。为避免
+ *   「悬空 GPIO 被配成按键 → 开机误进 failsafe」（VS010 踩过的坑），
+ *   这里【故意不定义 keys / leds 节点】，只保留网络与射频，最稳。
+ *   ART 头是全 FF（见 art/art-truth.conf），所以【不引用 nvmem macaddr】，
+ *   MAC 请按机身标签用 uci 固化；art-check 会提示。
+ *   端口 label 沿用 PZ-L8 的 DSA 映射，与丝印可能不一致，但 WAN+LAN 全在 br-lan。
+ *
+ * 首次刷机务必接 3.3V USB-TTL；若双频/网口异常，先用 device=vs010 单编验证。
+ */
+
+/dts-v1/;
+
+#include "ipq5018.dtsi"
+#include "ipq5018-ess.dtsi"
+#include "ipq5018-qcn6122.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "CMCC RAX3000QY";
+	/* 好固件 DTB 实证 compatible；末项保留 qcom,ipq5018 供通用匹配 */
+	compatible = "cmcc,rax3000qy", "qcom,ipq5018";
+
+	aliases {
+		serial0 = &blsp1_uart1;
+		label-mac-device = <&dp1>;
+	};
+
+	chosen {
+		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
+		stdout-path = "serial0:115200n8";
+	};
+
+};
+
+&sleep_clk {
+	clock-frequency = <32000>;
+};
+
+&xo_board_clk {
+	clock-div = <4>;
+	clock-mult = <1>;
+};
+
+&blsp1_uart1 {
+	status = "okay";
+
+	pinctrl-0 = <&serial_0_pins>;
+	pinctrl-names = "default";
+};
+
+&crypto {
+	status = "okay";
+};
+
+&cryptobam {
+	status = "okay";
+};
+
+&prng {
+	status = "okay";
+};
+
+&qfprom {
+	status = "okay";
+};
+
+&qpic_bam {
+	status = "okay";
+};
+
+&qpic_nand {
+	pinctrl-0 = <&qpic_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	nand@0 {
+		compatible = "spi-nand";
+		reg = <0>;
+		nand-ecc-engine = <&qpic_nand>;
+		nand-bus-width = <8>;
+
+		partitions {
+			compatible = "qcom,smem-part";
+
+			partition-art {
+				label = "0:art";
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					hw_mac_addr: mac-address@0 {
+						compatible = "mac-base";
+						reg = <0x0 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&switch {
+	status = "okay";
+
+	switch_mac_mode = <MAC_MODE_SGMII_CHANNEL0>;
+
+	qcom,port_phyinfo {
+		// MAC0 -> GE Phy --- MDI --- QCA8337 Phy4(Port5)
+		port@0 {
+			port_id = <1>;
+			mdiobus = <&mdio0>;
+			phy_address = <7>;
+		};
+
+		// MAC1 -> Uniphy --- SGMII --- QCA8337 SerDes(Port6)
+		port@1 {
+			port_id = <2>;
+			mdiobus = <&mdio1>;
+			forced-speed = <1000>;
+			forced-duplex = <1>;
+		};
+	};
+};
+
+// MAC0 -> GE Phy
+&dp1 {
+	status = "okay";
+};
+
+// MAC1 -> SGMII
+&dp2 {
+	status = "okay";
+
+	fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
+};
+
+&mdio0 {
+	status = "okay";
+};
+
+// MAC0 -> GE Phy -> QCA8337 Phy4
+&ge_phy {
+	qcom,dac-preset-short-cable;
+};
+
+&mdio1 {
+	status = "okay";
+
+	pinctrl-0 = <&mdio1_pins>;
+	pinctrl-names = "default";
+	reset-gpios = <&tlmm 26 GPIO_ACTIVE_LOW>;
+
+	// QCA8337 Phy0 -> LAN3
+	qca8337_0: ethernet-phy@0 {
+		reg = <0>;
+	};
+
+	// QCA8337 Phy1 -> LAN2
+	qca8337_1: ethernet-phy@1 {
+		reg = <1>;
+	};
+
+	// QCA8337 Phy2 -> LAN1
+	qca8337_2: ethernet-phy@2 {
+		reg = <2>;
+	};
+
+	// QCA8337 Phy3 -> WAN
+	qca8337_3: ethernet-phy@3 {
+		reg = <3>;
+	};
+
+	// QCA8337 Phy4 -> IPQ5018 GE Phy
+	qca8337_4: ethernet-phy@4 {
+		reg = <4>;
+	};
+
+	// QCA8337 switch
+	switch1: ethernet-switch@17 {
+		compatible = "qca,qca8337";
+		reg = <17>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@1 {
+				reg = <1>;
+				label = "lan3";
+				phy-handle = <&qca8337_0>;
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan2";
+				phy-handle = <&qca8337_1>;
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan1";
+				phy-handle = <&qca8337_2>;
+			};
+
+			port@4 {
+				reg = <4>;
+				label = "wan";
+				phy-handle = <&qca8337_3>;
+			};
+
+			/*
+			 * WAN cannot work if added
+			 * port@5 {
+			 * 	reg = <5>;
+			 * 	phy-handle = <&qca8337_4>;
+			 * 	phy-mode = "gmii";
+			 * 	ethernet = <&dp1>;
+			 * };
+			 */
+
+			port@6 {
+				reg = <6>;
+				phy-mode = "sgmii";
+				ethernet = <&dp2>;
+				qca,sgmii-enable-pll;
+
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
+};
+
+&tlmm {
+
+	mdio1_pins: mdio-state {
+		mdc-pins {
+			pins = "gpio36";
+			function = "mdc";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+
+		mdio-pins {
+			pins = "gpio37";
+			function = "mdio";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+	};
+
+	qpic_pins: qpic-state {
+		clock-pins {
+			pins = "gpio9";
+			function = "qspi_clk";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		cs-pins {
+			pins = "gpio8";
+			function = "qspi_cs";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio4", "gpio5", "gpio6", "gpio7";
+			function = "qspi_data";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	serial_0_pins: uart0-state {
+		pins = "gpio28", "gpio29";
+		function = "blsp0_uart1";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	switch_reset_pins: switch-reset-state {
+		pins = "gpio26";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-pull-down;
+	};
+};
+
+&q6v5_wcss {
+	status = "okay";
+};
+
+&wifi {
+	// IPQ5018
+	qcom,rproc = <&q6_wcss_pd1>;
+	qcom,ath11k-calibration-variant = "CMCC-RAX3000Q";
+	qcom,ath11k-fw-memory-mode = <1>;
+	qcom,bdf-addr = <0x4c400000>;
+
+	ieee80211-freq-limit = <2400000 2483000>;
+
+	status = "okay";
+};
+
+&wifi1 {
+	// QCN6102 5G
+	qcom,rproc = <&q6_wcss_pd2>;
+	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
+	qcom,ath11k-calibration-variant = "CMCC-RAX3000Q";
+	qcom,ath11k-fw-memory-mode = <1>;
+	qcom,bdf-addr = <0x4d100000>;
+	qcom,m3-dump-addr = <0x4df00000>;
+
+	ieee80211-freq-limit = <5150000 5730000>;
+
+	status = "okay";
+};

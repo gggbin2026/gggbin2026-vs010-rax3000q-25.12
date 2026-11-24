@@ -1,0 +1,246 @@
+#!/bin/sh
+# bridge-watchdog —— WDS 无线看门狗（机器狗）
+#
+# 干什么：只盯 5G WDS 链路。连续「不通」达到 delay 分钟就 sync + reboot -f。
+#         中间恢复立刻清零重新计时，不是「累计」，是「连续」。
+# 怎么改：bridge-watchdog set-delay 10     # 5 分钟 → 10 分钟（0~120 任意整数）
+#         bridge-watchdog dryrun on       # 先只记日志不重启，观察一两天
+#         bridge-watchdog off             # 刷机 / TTL 调试前务必先关
+#         bridge-watchdog status          # 看当前接口、连续不通多久、还剩多久重启
+#
+# ★ 计时用 /proc/uptime（单调时钟），不用 date：
+#   这板子没有 RTC，开机后 NTP 一同步 date 会跳几小时，用 wall clock 会瞬间误判
+#   「已经断了 5 分钟」而误重启。date 只用来给日志打可读时间。
+#
+# 判据（二选一，由 peer 决定）：
+#   peer 为空  → 查 WDS 接口的无线关联：STA 端 `iw link` 有 Connected to，
+#                或 AP 端 `iw station dump` 有 Station。只看 WDS 接口，
+#                2.4G 的 BRIDGE-SETUP 调试 AP 有没有人连都不算数。
+#   peer 非空  → 直接 ping 对端管理 IP，通就算通（最贴近「桥到底通不通」）。
+#                成对部署强烈建议填：AP 端 .241 / STA 端 .242。
+#
+# 注意：一直不通会「grace + delay」一个周期反复重启，这是看门狗的设计。
+#       要停手就 bridge-watchdog off / dryrun on，不要拔电猜。
+
+CONF_PKG=wdsdog
+STATE=/tmp/bridge-watchdog.state
+LOG=/tmp/bridge-watchdog.log
+
+# ── 配置读取（带缺省）────────────────────────────────────────────
+_cfg() {  # $1=key $2=默认值
+    v=$(uci -q get "$CONF_PKG.main.$1" 2>/dev/null)
+    [ -n "$v" ] && { echo "$v"; return; }
+    echo "$2"
+}
+load_cfg() {
+    ENABLED=$(_cfg enabled 1)
+    DELAY=$(_cfg delay 5)
+    GRACE=$(_cfg grace 3)
+    INTERVAL=$(_cfg interval 30)
+    IFACE_CFG=$(_cfg iface auto)
+    PEER=$(_cfg peer '')
+    DRYRUN=$(_cfg dryrun 0)
+    # 防呆：非法值一律回落到安全缺省
+    case "$DELAY" in ''|*[!0-9]*) DELAY=5 ;; esac
+    case "$GRACE" in ''|*[!0-9]*) GRACE=3 ;; esac
+    case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=30 ;; esac
+    [ "$INTERVAL" -ge 1 ] 2>/dev/null || INTERVAL=30
+    [ "$DELAY" -le 120 ]  2>/dev/null || DELAY=120
+}
+
+# ── 单调时钟 / 到期判定 ──────────────────────────────────────────
+_now() { awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0; }
+_due() {  # $1=now $2=首次失败时刻 $3=delay(分钟)
+    [ "$2" -gt 0 ] 2>/dev/null || return 1
+    [ $(( $1 - $2 )) -ge $(( $3 * 60 )) ] 2>/dev/null
+}
+
+# ── 接口挑选：只盯 WDS 的那个 5G 口 ───────────────────────────────
+_pick_iface() {
+    [ "$IFACE_CFG" != "auto" ] && { echo "$IFACE_CFG"; return; }
+    all=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')
+    [ -z "$all" ] && all=$(ls /sys/class/net 2>/dev/null | grep '^wlan')
+    for n in wlan1 phy1-ap0 wlan1-1; do
+        echo "$all" | grep -qx "$n" && { echo "$n"; return; }
+    done
+    echo "$all" | tail -n 1
+}
+
+# ── 健康判据 ─────────────────────────────────────────────────────
+_wireless_ok() {
+    i=$1
+    [ -n "$i" ] || return 1
+    [ -d "/sys/class/net/$i" ] || return 1
+    iw dev "$i" link 2>/dev/null | grep -qi '^Connected to' && return 0
+    iw dev "$i" station dump 2>/dev/null | grep -qi '^Station ' && return 0
+    return 1
+}
+_peer_ok() { ping -c 1 -W 2 -q "$1" >/dev/null 2>&1; }
+_health_ok() {
+    if [ -n "$PEER" ]; then _peer_ok "$PEER"; return $?; fi
+    i=$(_pick_iface)
+    # 【第 18 次校准】接口根本没注册 = ath11k / wifi up 尚未就绪，
+    # 不是「WDS 链路断了」。旧版把它当不通并开始计时 → 无线没起来时
+    # 每 (grace+delay) 分钟循环重启，串口刚敲两行就断，没法排障。
+    # 返回 2 由 loop 单独处理：清零计时、只记日志、绝不重启。
+    [ -z "$i" ] && return 2
+    [ -d "/sys/class/net/$i" ] || return 2
+    _wireless_ok "$i" && return 0
+    return 1
+}
+
+# ── 日志 / 重启动作（测试可覆盖 _do_reboot）────────────────────────
+_log() {
+    logger -t bridge-watchdog "$*" 2>/dev/null || true
+    printf '%s %s\n' "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$LOG"
+    n=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+    [ "$n" -gt 200 ] 2>/dev/null && { tail -n 100 "$LOG" > "$LOG.tmp"; mv "$LOG.tmp" "$LOG"; }
+    :
+}
+_do_reboot() {
+    _log "连续不通达到 ${DELAY} 分钟 → 执行重启"
+    sync 2>/dev/null || true
+    /sbin/reboot -f 2>/dev/null || busybox reboot -f 2>/dev/null || reboot -f
+}
+
+# ── 常驻循环（由 init.d 调）───────────────────────────────────────
+loop() {
+    load_cfg
+    first=0
+    grace_logged=0
+    notready_logged=0
+    _log "机器狗启动: delay=${DELAY}分 grace=${GRACE}分 interval=${INTERVAL}秒 iface=${IFACE_CFG} peer=${PEER:-未填} dryrun=${DRYRUN}"
+    while :; do
+        now=$(_now)
+        if [ "$now" -lt $(( GRACE * 60 )) ]; then
+            [ "$grace_logged" = 0 ] && { _log "开机宽限 ${GRACE} 分钟内（等 ath11k 校准 / wifi up），暂不判故障"; grace_logged=1; }
+            sleep "$INTERVAL"
+            continue
+        fi
+        _health_ok
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            [ "$notready_logged" = 0 ] && {
+                _log "WDS 接口尚未注册（ath11k / wifi up 未就绪），暂不计故障、不重启"
+                notready_logged=1
+            }
+            first=0
+            echo 0 > "$STATE"
+        elif [ "$rc" -eq 0 ]; then
+            notready_logged=0
+            [ "$first" -ne 0 ] && _log "WDS 链路恢复，连续失败计时清零"
+            first=0
+            echo 0 > "$STATE"
+        else
+            notready_logged=0
+            if [ "$first" -eq 0 ]; then
+                first=$now
+                _log "WDS 不通（iface=$(_pick_iface) peer=${PEER:-未填}），开始连续计时 ${DELAY} 分钟"
+            fi
+            echo "$first" > "$STATE"
+            if _due "$now" "$first" "$DELAY"; then
+                if [ "$DRYRUN" = "1" ]; then
+                    _log "dryrun=1：达到 ${DELAY} 分钟，本应重启，已跳过（把 dryrun 设 0 才真重启）"
+                    first=0
+                    echo 0 > "$STATE"
+                else
+                    _do_reboot
+                    # reboot 未立刻生效时也别疯狂刷；等下一轮
+                    first=$now
+                fi
+            fi
+        fi
+        sleep "$INTERVAL"
+    done
+}
+
+# ── 单次检测 / 状态 ──────────────────────────────────────────────
+once() {
+    load_cfg
+    i=$(_pick_iface)
+    printf '检测接口 : %s\n' "$i"
+    printf '判据     : %s\n' "$( [ -n "$PEER" ] && echo "ping $PEER" || echo '无线关联(iw link / station dump)' )"
+    if _health_ok; then echo '结果     : 通 (OK)'; return 0
+    else echo '结果     : 不通 (DOWN)'; return 1; fi
+}
+status() {
+    load_cfg
+    now=$(_now)
+    first=$(cat "$STATE" 2>/dev/null || echo 0)
+    case "$first" in ''|*[!0-9]*) first=0 ;; esac
+    echo '========== bridge-watchdog 状态 =========='
+    echo "  启用        : $ENABLED   (bridge-watchdog on / off)"
+    echo "  重启延时    : $DELAY 分钟  ★连续不通才重启，set-delay 10 可改成 10 分钟"
+    echo "  开机宽限    : $GRACE 分钟"
+    echo "  检查间隔    : $INTERVAL 秒"
+    echo "  检测接口    : $IFACE_CFG -> $(_pick_iface 2>/dev/null)"
+    echo "  对端 IP     : ${PEER:-（未填，只查无线关联）}"
+    echo "  试运行      : $DRYRUN  (1=只记日志不重启)"
+    echo "  开机时长    : $now 秒（单调时钟，不受 NTP 跳变影响）"
+    if [ "$first" -gt 0 ]; then
+        elapsed=$(( now - first )); left=$(( DELAY * 60 - elapsed ))
+        [ "$left" -lt 0 ] && left=0
+        echo "  连续不通    : $elapsed 秒"
+        echo "  距重启还剩  : $left 秒"
+    else
+        echo "  连续不通    : 0 秒（当前正常）"
+        echo "  距重启还剩  : -"
+    fi
+    echo '  ---------- 最近日志 ----------'
+    tail -n 6 "$LOG" 2>/dev/null || echo '  (暂无)'
+    echo '=========================================='
+}
+
+# ── 配置 CLI ─────────────────────────────────────────────────────
+_restart_if_running() {
+    [ -x /etc/init.d/bridge-watchdog ] && /etc/init.d/bridge-watchdog restart >/dev/null 2>&1 || true
+}
+_set() {  # $1=key $2=value
+    uci set "$CONF_PKG.main.$1=$2" 2>/dev/null
+    uci commit "$CONF_PKG" 2>/dev/null
+    _restart_if_running
+}
+usage() {
+    cat <<'EOF'
+bridge-watchdog —— WDS 无线看门狗（机器狗）
+
+  bridge-watchdog status            查看配置 / 当前接口 / 连续不通多久 / 还剩多久重启
+  bridge-watchdog once             立刻检测一次（通=退出码0，不通=1，绝不重启）
+  bridge-watchdog set-delay N      ★自定义重启延时：N 分钟（0~120），例如 10
+  bridge-watchdog on | off         启用 / 停用（刷机、TTL 调试前先 off）
+  bridge-watchdog dryrun on|off    只记日志不重启 / 恢复真重启
+  bridge-watchdog set-peer IP      设对端管理 IP（如 192.168.1.242）；填了就以 ping 为准
+  bridge-watchdog set-iface NAME   固定 WDS 接口（默认 auto，通常识别为 wlan1）
+  bridge-watchdog loop             内部使用，由 init.d 调，别手敲
+
+  出厂默认：连续不通 5 分钟重启，开机宽限 3 分钟。
+  想改成别人那种 10 分钟：bridge-watchdog set-delay 10
+EOF
+}
+main() {
+    cmd=${1:-status}
+    case "$cmd" in
+        loop)      loop ;;
+        once)      once ;;
+        status)    status ;;
+        set-delay)
+            n=${2:-}
+            case "$n" in ''|*[!0-9]*) echo '用法: bridge-watchdog set-delay 0..120（单位分钟）'; exit 1 ;; esac
+            [ "$n" -le 120 ] || { echo '最大 120 分钟'; exit 1; }
+            _set delay "$n"
+            echo "已设：连续无线不通 $n 分钟后重启（立即生效，无需重编）"
+            ;;
+        on)   _set enabled 1; echo '已启用机器狗'; /etc/init.d/bridge-watchdog start >/dev/null 2>&1 || true ;;
+        off)  _set enabled 0; echo '已停用机器狗（重启后也不会自启）'; /etc/init.d/bridge-watchdog stop >/dev/null 2>&1 || true ;;
+        dryrun)
+            case "${2:-}" in on|1) _set dryrun 1; echo 'dryrun=1：只记日志，不会真重启' ;;
+                             off|0) _set dryrun 0; echo 'dryrun=0：达到延时会真重启' ;;
+                             *) echo '用法: bridge-watchdog dryrun on|off'; exit 1 ;; esac
+            ;;
+        set-peer)  _set peer "${2:-}"; echo "对端 IP 已设为 '${2:-}'（空=改回查无线关联）" ;;
+        set-iface) _set iface "${2:-auto}"; echo "WDS 接口已设为 '${2:-auto}'" ;;
+        *) usage ;;
+    esac
+}
+# 只有被直接执行才跑 main；被 source 时只暴露函数（便于自检）
+case "$(basename "$0")" in bridge-watchdog) main "$@" ;; esac

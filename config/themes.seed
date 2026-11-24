@@ -1,0 +1,19 @@
+# 主题清单 —— 默认只编官方 25.12 luci feed 里确定存在的主题。
+# 本文件由 scripts/gen-config.sh 与 common.seed 一起写入 .config（差异式）。
+#
+# 官方 feed（openwrt/luci @ openwrt-25.12）自带：
+#   luci-theme-bootstrap / luci-theme-material / luci-theme-openwrt / luci-theme-openwrt2020
+# 社区主题（不在官方 feed，必须额外加源，包名要逐个核对）：
+#   luci-theme-argon      → jerrykuku/luci-theme-argon
+#   luci-theme-footstrap  → VizzleTF/luci-theme-footstrap（自带 install.sh 加 feed）
+#
+# ⚠ 把不存在的包写成 =y 不会报错，make defconfig 会静默丢弃；但
+#   /etc/config/luci 的 mediaurlbase / themes 段若指向空气，LuCI 就白屏、
+#   「系统 → 语言与样式」切一下主题就再也进不去（dispatcher/模板报错）。
+#   所以默认只留 bootstrap；运行期 luci-fix 会按「实际装了哪些目录」
+#   动态生成主题下拉，编进 argon 就自动用 argon，没编就稳稳用 bootstrap。
+
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-theme-argon=n
+CONFIG_PACKAGE_luci-theme-footstrap=n
+CONFIG_PACKAGE_luci-theme-material=n

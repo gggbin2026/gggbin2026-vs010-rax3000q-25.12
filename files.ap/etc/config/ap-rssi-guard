@@ -1,0 +1,12 @@
+# 【AP 模式专用】弱信号剔除守护配置（WDS 网桥版不打包本文件）
+# 语义：低于 reject_dbm 的新关联一律拒绝；低于 kick_dbm 的已关联终端剔除。
+# 两档都靠 /usr/sbin/ap-rssi-guard 兜底；hostapd 若支持 rssi_reject_assoc_rssi
+# 则第一道拦截在关联请求阶段完成（瞬间拒绝，不会先连上再断）。
+config guard 'main'
+	option enabled '0'
+	option reject_dbm '-90'
+	option kick_dbm '-92'
+	option interval '3'
+	option consecutive '3'
+	option dryrun '1'
+	option grace_sec '10'

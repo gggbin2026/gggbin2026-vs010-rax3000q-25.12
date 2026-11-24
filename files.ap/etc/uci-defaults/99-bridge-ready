@@ -1,0 +1,285 @@
+#!/bin/sh
+# ============================================================================
+# 【AP 模式专用】99-bridge-ready —— 由 files.ap/ 覆盖通用 WDS 版
+# 与 WDS 版的区别（其余开机兜底逻辑完全一致，第 8~18 次校准全部保留）：
+#   · 管理 IP 192.168.1.240（WDS 主 .241 / 备 .242）
+#   · 本机 DHCP 服务端关闭（ignore=1），地址由上级路由分配
+#   · 不启用 bridge-role（不做自动一主一备）
+#   · 不启用 bridge-watchdog（没有 5G WDS 链路可盯），并显式 disable 防旧 overlay
+#   · wireless / network / dhcp / banner 由 files.ap/etc/config/ 提供
+# 刷这个固件 = 普通无线 AP：网线插任意 LAN 口，2.4G/5G 都发普通 SSID。
+# ============================================================================
+# 【双仓通用 · 2026-11-22】21.02 原生 option ifname 写法
+# 首次开机执行一次：把机器收拾成「普通 AP 就绪」状态（纯 IPv4 傻交换桥）
+#   * 时区上海 + NTP 同步到当前时间；编译时刻写入 /etc/compile_time
+#   * 全射频 CN / ARGON 主题 / root 密码 admin
+#   * 固定管理 IP 192.168.1.240 / 开 STP / 本机 DHCP 服务端关（由上级分配）
+#   * 【有线修复】关 VLAN、删 WAN/WAN6、eth0+eth1 一并进 br-lan
+#   * IPv6 编译期关闭；关闭发送/接受 ICMP 重定向
+# uci-defaults 只在首次开机（overlay 无配置）跑；执行完删自己。
+. /lib/functions.sh
+
+# ── 0. root 密码 = admin（首次开机即生效，LuCI 不再提示「未设置密码」）──
+if [ -f /etc/shadow ]; then
+    awk -v h='$1$QsK9Wd$Kh.6Ulr/GvMk.eGLGzO340' 'BEGIN{FS=OFS=":"} $1=="root"{$2=h} {print}' /etc/shadow > /tmp/shadow.new \
+        && mv /tmp/shadow.new /etc/shadow && chmod 600 /etc/shadow
+fi
+
+# ── 1. 时区 + 真实时间 ─────────────────────────────────────────
+if uci -q get system.@system[0] >/dev/null; then
+    uci -q set system.@system[0].timezone='CST-8'
+    uci -q set system.@system[0].zonename='Asia/Shanghai'
+    uci -q set system.ntp.enabled='1'
+    uci -q delete system.ntp.server
+    for s in ntp.aliyun.com time1.cloud.tencent.com cn.pool.ntp.org; do
+        uci -q add_list system.ntp.server="$s"
+    done
+    uci commit system
+    [ -x /etc/init.d/sysntpd ] && { /etc/init.d/sysntpd enable 2>/dev/null || true; /etc/init.d/sysntpd restart 2>/dev/null || true; }
+    [ -x /etc/init.d/system ] && /etc/init.d/system reload 2>/dev/null || true
+fi
+# 编译时刻（workflow 在编译时动态写入），追加到登录 banner
+if [ -s /etc/compile_time ]; then
+    printf '\n构建时间: %s\n' "$(cat /etc/compile_time)" >> /etc/banner 2>/dev/null || true
+fi
+
+# ── 2. ARGON 主题（包已在 .config 中 =y）────────────────────────
+# 【第 17 次校准】先确保 `config core 'main'`（named section）存在：
+#   若 /etc/config/luci 缺失，或旧版被 UCI extended lookup 写成匿名 `config main`，
+#   `uci -q get luci.main` 会失败。此时必须删掉重建 named section，
+#   否则下面两句 uci set 会把畸形段落盘 → LuCI dispatcher.lua:427 报错、WEB 打不开。
+# 编译期已打包标准 files/etc/config/luci，正常路径不会进这个分支；
+# 这里专治 sysupgrade 保留配置 / firstboot / 旧 overlay 带过来的坏文件。
+# ★ 第 22 次校准：改调用独立脚本 luci-fix（每次开机由 bridge-netfix 也会再跑一次）。
+# 原来这里用 `uci -q set luci.main='core'` 重建，但本脚本【只在首启跑一次、跑完自删】，
+# sysupgrade 勾「保留配置」时旧 overlay 里的坏 /etc/config/luci 盖回来就没人修了，
+# 实机正是这样复现 dispatcher.lua:427。luci-fix 用 heredoc 直接写文件，
+# 绝不用 uci set 建段（那是造匿名 config main 的元凶），并校验 named section。
+if [ -x /usr/sbin/luci-fix ]; then
+    /usr/sbin/luci-fix >/dev/null 2>&1 || true
+else
+    if ! uci -q get luci.main >/dev/null 2>&1; then
+        rm -f /etc/config/luci /etc/config/luci.opkg 2>/dev/null || true
+        uci -q set luci.main='core'
+    fi
+fi
+# named section 此刻一定存在，下面三句只改值，不会触发 extended lookup
+uci -q set luci.main.mediaurlbase='/luci-static/argon'
+uci -q set luci.main.lang='zh_cn'
+uci -q set luci.main.resourcebase='/luci-static/resources'
+uci commit luci
+
+# ── 3. 无线：编译期已放 /etc/config/wireless，这里补 disabled + CN ────
+# 【为什么必须改】旧版只 set radio0/radio1.disabled=0，没动 wifi-iface：
+#   OpenWrt 默认生成的 wifi-iface 是 disabled=1 → 射频起来了也不发 SSID。
+#   而且旧版在没有 /etc/config/wireless 时靠 `wifi config` 生成，
+#   但 wifi config 依赖 /sys/class/ieee80211/phy* —— ath11k 没 probe 就生成空文件，
+#   后面所有 `uci set wireless.*` 全打空。编译期模板把这条链补死。
+# ⚠ 不再无条件跑 `wifi config`：它会覆盖编译期模板（尤其把 disabled 改回 1）。
+#   真要重扫射频，串口手动 `wifi config` 即可。
+if [ -s /etc/config/wireless ]; then
+    set_cn_all()   { uci -q set "wireless.$1.country=CN"; }
+    enable_radio() { uci -q set "wireless.$1.disabled=0"; }
+    enable_iface() { uci -q set "wireless.$1.disabled=0"; }
+    config_load wireless
+    config_foreach set_cn_all   wifi-device
+    config_foreach enable_radio wifi-device
+    config_foreach enable_iface wifi-iface
+    uci -q set wireless.radio0.country='CN' 2>/dev/null || true
+    uci -q set wireless.radio1.country='CN' 2>/dev/null || true
+    uci -q set wireless.radio0.disabled='0' 2>/dev/null || true
+    uci -q set wireless.radio1.disabled='0' 2>/dev/null || true
+    uci commit wireless
+    # 立刻拉起，不等下次 reboot；uci-defaults 阶段 phy 可能还没 ready，失败也不致命
+    # 【TTL 修复】wifi up 会等 ath11k 双射频校准（可达 60~90 秒），
+    # 它在 uci-defaults 里同步跑会拖住 /etc/init.d/rcS S boot，
+    # 进而推迟 procd spawn login —— 表现就是「进系统后按不了」。改成后台。
+    ( sleep 3; /sbin/wifi up 2>/dev/null || wifi up 2>/dev/null || true ) &
+else
+    echo "  ::warning:: /etc/config/wireless 缺失 —— 编译期模板没进 rootfs" >&2
+fi
+if command -v iw >/dev/null 2>&1; then iw reg set CN 2>/dev/null || true
+elif [ -x /usr/sbin/iw ]; then /usr/sbin/iw reg set CN 2>/dev/null || true; fi
+
+# ── 4. IPv6：编译期已关，配置面清空，删除 WAN6 / ULA / RA / DHCPv6 ──
+uci -q delete network.globals.ula_prefix
+uci -q delete network.lan.ip6assign
+uci -q delete network.lan.ipv6
+uci -q delete dhcp.lan.ra
+uci -q delete dhcp.lan.dhcpv6
+uci -q delete dhcp.lan.ndp
+uci -q delete network.wan6
+uci -q delete dhcp.wan6
+uci -q delete network.wan
+uci -q delete dhcp.wan
+[ -x /etc/init.d/odhcpd ] && { /etc/init.d/odhcpd stop 2>/dev/null || true; /etc/init.d/odhcpd disable 2>/dev/null || true; }
+
+# ── 5. 【登录修复】有线口：QSDK 5.4 / OpenWrt 21.02 只认 option ifname ──
+# ⚠ 上一版用的是 22.03+ 的 `config device` + `list ports` 语法：
+#   21.02 的 netifd 根本不解析 `config device`，network.lan.device 也不被识别，
+#   于是 br-lan 永远建不出来 → 没有管理 IP → 进不了 WEB。
+#   这里改成 21.02 原生写法：直接在 lan 段上写 type=bridge + ifname。
+# 编译期已在 files/etc/config/network 放好完整配置，这里再做一次兜底，
+# 防止 /bin/config_generate（board.d/02_network）在首启把它重新生成掉。
+# 兜底 A：万一 config_generate 没生成 lan 段，现场建一个（否则下面 uci set 全落空）
+uci -q get network.lan >/dev/null 2>&1 || uci -q set network.lan='interface'
+# 兜底 B：清掉 22.03 残留的 config device 段（21.02 netifd 不解析，留着只会干扰）
+while uci -q get network.@device[0] >/dev/null 2>&1; do
+    uci -q delete network.@device[0]
+done
+uci -q set network.lan.type='bridge'
+uci -q set network.lan.ifname='eth0 eth1'
+uci -q set network.lan.stp='1'
+uci -q set network.lan.force_link='1'
+# 关 VLAN 的同时必须保证 lan 不再引用 eth0.1 / eth1.1 这类 VLAN 子接口，
+# 否则子接口不存在，netifd 依旧建不出桥。上面 ifname 已改成物理口。
+if uci -q get network.@switch[0] >/dev/null 2>&1; then
+    uci -q set network.@switch[0].enable_vlan='0'
+    uci -q set network.@switch[0].reset='1'
+fi
+while [ -n "$(uci -q get network.@switch_vlan[0].vlan 2>/dev/null)" ]; do
+    uci -q delete network.@switch_vlan[0]
+done
+
+# ── 6. 固定管理 IP / STP（防火墙已整体移除）─────────────────────
+uci -q get network.lan >/dev/null 2>&1 || uci -q set network.lan='interface'
+uci set network.lan.type='bridge'
+uci set network.lan.ifname='eth0 eth1'
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.1.240'
+uci set network.lan.netmask='255.255.255.0'
+uci -q delete network.lan.gateway
+uci -q delete network.lan.dns
+uci set network.lan.stp='1'
+uci set network.lan.force_link='1'
+uci set dhcp.lan.ignore='1'   # ★ AP 模式：本机不做 DHCP 服务端，由上级分配
+uci -q set dhcp.lan.start='100'
+uci -q set dhcp.lan.limit='100'
+uci -q set dhcp.lan.leasetime='1h'          # ★ 第 8 次校准：租期 1 小时
+# 【第 12 次校准】firewall 包已编回（只为 Kconfig 依赖自洽），这里把它彻底关掉：
+#   ① 删掉包自带 / 旧 overlay 残留的 /etc/config/firewall*
+#   ② stop + disable，开机不再启动 fw3，不加载任何规则
+#   ③ LuCI「网络→防火墙」菜单不编（luci-app-firewall 为 n）
+# 纯二层桥不做 NAT、无 WAN、无 WAN/LAN 隔离，等价于「全放行」。
+# 注意：这里在 uci-defaults(S10boot) 跑，早于 S20firewall，时序上先删先禁用。
+rm -f /etc/config/firewall /etc/config/firewall.opkg 2>/dev/null || true
+[ -x /etc/init.d/firewall ] && { /etc/init.d/firewall stop 2>/dev/null || true; /etc/init.d/firewall disable 2>/dev/null || true; }
+
+# ── 7. 关闭发送/接受 ICMP 重定向（即时生效 + 落盘）──────────────
+for v in all default br-lan eth0 eth1; do
+    sysctl -w "net.ipv4.conf.$v.send_redirects=0"   2>/dev/null || true
+    sysctl -w "net.ipv4.conf.$v.accept_redirects=0" 2>/dev/null || true
+done
+[ -s /etc/sysctl.d/99-no-icmp-redirect.conf ] || cat > /etc/sysctl.d/99-no-icmp-redirect.conf <<'EOF'
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.br-lan.send_redirects = 0
+net.ipv4.conf.eth0.send_redirects = 0
+net.ipv4.conf.eth1.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+EOF
+
+uci commit network
+uci commit dhcp
+
+# ── 6b. 【第 16 次校准】网络服务链兜底 ─────────────────────────
+# 实机现象：/etc/config/network 已被本脚本正确重写（UCI 规范化后约 442 B），
+# 但 `ip a` 里 lo 仍 DOWN、没有 br-lan、ps 里没有 netifd —— 即「配置写好了，
+# 却没人把它变成接口」。常见成因：preinit 分叉 / overlay 旧 rc.d 链接 /
+# S20network 未 enable / netifd 在本脚本之前启动后没 reload。
+# 这里不依赖 rcS 后续步骤，当场启用并重载网络服务。
+if [ -x /etc/init.d/network ]; then
+    /etc/init.d/network enable  2>/dev/null || true
+    /etc/init.d/network restart 2>/dev/null || true
+fi
+# 再等 2 秒给 netifd；仍没有 br-lan 就纯手工起桥（不依赖 brctl / netifd）
+sleep 2
+if ! ip link show br-lan >/dev/null 2>&1; then
+    ip link add name br-lan type bridge 2>/dev/null \
+      || brctl addbr br-lan 2>/dev/null || true
+fi
+for e in eth0 eth1; do
+    [ -d "/sys/class/net/$e" ] || continue
+    ip link set "$e" up 2>/dev/null || true
+    ip link set "$e" master br-lan 2>/dev/null \
+      || brctl addif br-lan "$e" 2>/dev/null || true
+done
+ip link set br-lan up 2>/dev/null || true
+ip addr show br-lan 2>/dev/null | grep -q '192.168.1.240' \
+  || ip addr add 192.168.1.240/24 dev br-lan 2>/dev/null || true
+
+# 【第 18 次校准】兜底服务改为【编译期文件】files/etc/init.d/bridge-netfix，
+# 不再用 heredoc 现场生成（A 段能硬校验内容/语法，也不会因定界符出错）。
+# 除网络外它还负责 uhttpd cgi_prefix 与 wifi up 带重试 —— 实机「CGI 未返回数据」
+# 与「wlan1 未注册」都归它管。这里只做执行位 + enable + 本次立即跑一遍。
+# ── 7b0.【第 30 次】LuCI 早期自修（START=18，早于 uhttpd）──────────
+if [ -s /etc/init.d/luci-fix ]; then
+    chmod +x /etc/init.d/luci-fix 2>/dev/null || true
+    /etc/init.d/luci-fix enable 2>/dev/null || true
+    logger -t luci-fix "首启：早期自修服务已 enable（START=18）" 2>/dev/null || true
+fi
+# ── 7b0b.【第 30 次】SSH / dropbear 显式启用 ──────────────────────
+# 实机「SSH 连不上」：dropbear 包在、但 /etc/config/dropbear 缺或被写成
+# 匿名段 → config_load 拿不到实例 → 进程根本不启动。这里 enable + 当场跑。
+if [ -x /etc/init.d/dropbear ]; then
+    /etc/init.d/dropbear enable  2>/dev/null || true
+    /etc/init.d/dropbear restart 2>/dev/null || true
+    logger -t dropbear "首启：SSH 已显式 enable + restart（22/tcp，root/admin）" 2>/dev/null || true
+fi
+
+if [ -s /etc/init.d/bridge-netfix ]; then
+    chmod +x /etc/init.d/bridge-netfix 2>/dev/null || true
+    /etc/init.d/bridge-netfix enable 2>/dev/null || true
+    /etc/init.d/bridge-netfix start  2>/dev/null || true
+    logger -t bridge-ready "bridge-netfix 已启用（网络 / CGI / 无线三层开机兜底）" 2>/dev/null || true
+else
+    echo "  ::error:: /etc/init.d/bridge-netfix 缺失 —— 编译期文件没进 rootfs" >&2
+fi
+
+# ── 7b. 串口登录兜底（2026-11-22 第 2 次更新）──────────────────
+# 即使 devtmpfs 已开，也从 sysfs 兜一次节点，并复位 termios：
+#   -crtscts 关掉 tty 侧硬件流控（PC 侧不接 RTS/CTS 时发不进来的经典坑）
+#   sane / echo 防 preinit 的 `read -t` 或旧固件留下 -echo / raw 状态
+TTY=ttyMSM0
+if [ ! -e "/dev/$TTY" ] && [ -r "/sys/class/tty/$TTY/dev" ]; then
+    DEV=$(cat "/sys/class/tty/$TTY/dev")
+    MAJ=${DEV%%:*}; MIN=${DEV##*:}
+    [ -n "$MAJ" ] && [ -n "$MIN" ] && mknod "/dev/$TTY" c "$MAJ" "$MIN" 660 2>/dev/null || true
+fi
+if command -v stty >/dev/null 2>&1 && [ -e "/dev/$TTY" ]; then
+    stty -F "/dev/$TTY" 115200 sane echo -crtscts 2>/dev/null || true
+fi
+
+# ── 7c.【AP 模式】机器狗停用 ──────────────────────────────────────
+# AP 模式没有 5G WDS 链路，机器狗没有判据可盯。显式 stop + disable，
+# 专治 sysupgrade 勾了「保留配置」把旧 rc.d 链接带回来的情况。
+if [ -x /etc/init.d/bridge-watchdog ]; then
+    /etc/init.d/bridge-watchdog stop    2>/dev/null || true
+    /etc/init.d/bridge-watchdog disable 2>/dev/null || true
+    logger -t bridge-watchdog "AP 模式：无 WDS 链路，机器狗已停用" 2>/dev/null || true
+fi
+
+# ── 7d.【AP 模式】不做自动一主一备 ───────────────────────────────
+# 普通 AP 两个射频都固定是 ap，不需要按 MAC 收敛角色、不改管理 IP、
+# 不改 DHCP。显式 disable，防旧 overlay 的 rc.d 链接残留。
+if [ -x /etc/init.d/bridge-role ]; then
+    /etc/init.d/bridge-role stop    2>/dev/null || true
+    /etc/init.d/bridge-role disable 2>/dev/null || true
+    logger -t bridge-role "AP 模式：两个射频固定为普通 AP，角色收敛已停用" 2>/dev/null || true
+fi
+
+# ── 7e.【AP 模式】弱信号剔除守护（第 29 次校准）──────────────────
+# 低于 -90 拒绝关联 / 低于 -92 剔除。uci-defaults 只在首启跑一次，
+# 所以这里做 enable（建 rc.d 链接，以后每次开机都起）+ start 本次立即起。
+if [ -s /etc/init.d/ap-rssi-guard ] && [ -s /usr/sbin/ap-rssi-guard ]; then
+    chmod +x /etc/init.d/ap-rssi-guard /usr/sbin/ap-rssi-guard 2>/dev/null || true
+    /etc/init.d/ap-rssi-guard enable 2>/dev/null || true
+    /etc/init.d/ap-rssi-guard start  2>/dev/null || true
+    logger -t ap-rssi-guard "AP 首启：弱信号剔除守护已启用（拒绝 -90 / 剔除 -92）" 2>/dev/null || true
+else
+    logger -t ap-rssi-guard "AP 首启：守护文件缺失，弱信号剔除未启用" 2>/dev/null || true
+fi
+
+rm -f /etc/uci-defaults/99-bridge-ready
+exit 0

@@ -1,0 +1,32 @@
+# ============================================================================
+# 【AP 模式】普通无线接入点 —— 和 WDS 网桥版区分（第 19 次校准）
+# 上级路由的网线插任意 LAN 口；本机所有网口 + 2.4G + 5G 全部桥在 br-lan，
+# 不做 WDS、不做 4addr、不自动主备、不做无线回程。
+# 本机 DHCP 服务端关闭（见 dhcp），地址由上级路由分配；管理地址固定 .240，
+# 与 WDS 版主 .241 / 备 .242 错开，两台可以同插一台交换机不冲突。
+# ⚠ 若上级路由不是 192.168.1.0/24，把 lan 改成 option proto 'dhcp' 即可
+#    （或改成上级网段里没被占用的静态地址），刷完用上级路由的客户端列表找它。
+# ============================================================================
+
+config interface 'loopback'
+	option ifname 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+
+config interface 'lan'
+	option type 'bridge'
+	option ifname 'eth0 eth1'
+	option proto 'static'
+	option ipaddr '192.168.1.240'
+	option netmask '255.255.255.0'
+	option stp '1'
+	option force_link '1'
+	option ip6assign '0'
+
+config switch
+	option name 'switch1'
+	option reset '1'
+	option enable_vlan '0'

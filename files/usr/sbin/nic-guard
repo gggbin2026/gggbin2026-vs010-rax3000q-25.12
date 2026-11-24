@@ -1,0 +1,84 @@
+#!/bin/sh
+# nic-guard —— 网卡/交换芯片自检 + 开机自愈（双仓通用 · 2026-11-22 升级）
+#   本轮修掉两个真 bug：
+#   ① swconfig list 常有 "switch0 - QCA MP" 排在 "switch1 - QCA AR8337" 前面，
+#      旧版 head -1 取到 switch0，关 VLAN 全下到 MP 上，QCA8337 根本没动。
+#   ② 旧版 `if ip link show br-lan` 不成立就整段跳过自愈 —— 而 br-lan 建不出来
+#      恰恰是 22.03 语法错误的后果，等于最需要修的时候它不修。
+#   现在：先确保 br-lan 存在 → 选真正的 8337 → 关 VLAN → eth0/eth1 拉起并入桥。
+#   手动随时跑：nic-guard
+LOG=/tmp/nic-guard.log
+
+# ── 防火墙运行期兜底（第 12 次校准）────────────────────────────
+# firewall 包已编回（编译期依赖自洽），但服务必须始终禁用、配置文件不生成。
+# 99-bridge-ready 首启已做一遍；这里每次开机再兜底一次，专治 sysupgrade
+# 勾了「保留配置」把旧 /etc/config/firewall 与 rc.d 链接带回来的情况。
+rm -f /etc/config/firewall /etc/config/firewall.opkg 2>/dev/null || true
+[ -x /etc/init.d/firewall ] && { /etc/init.d/firewall stop 2>/dev/null || true; /etc/init.d/firewall disable 2>/dev/null || true; }
+
+if command -v swconfig >/dev/null 2>&1; then SWCMD=swconfig
+else SWCMD="echo [swconfig 未安装]"; fi
+
+{
+  echo "================ nic-guard $(date) ================"
+  echo "--- /sys/class/net ---";       ls /sys/class/net/ 2>&1
+  echo "--- ip link ---";               ip link 2>&1
+  echo "--- swconfig list ---";         $SWCMD list 2>&1
+  echo "--- uci network ---";           uci show network 2>&1 | head -40
+  echo "--- dmesg: ssdk / ess-switch / nss-dp / gmac ---"
+  dmesg | grep -iE 'ssdk|ess-switch|nss-dp|gmac|qca83|switch|phy|clock|probe' | tail -50
+} > "$LOG" 2>&1
+cat "$LOG" > /dev/console 2>/dev/null || true
+
+ETH=$(ls /sys/class/net/ 2>/dev/null | grep -E '^eth[0-9]+$' | head -1)
+
+# —— 选真正的 QCA8337，不写死 switch1、也不取列表第一个 ——
+SWLIST=$(swconfig list 2>/dev/null)
+SWX=$(printf '%s\n' "$SWLIST" | grep -iE 'AR8337|8337' \
+      | sed -n 's/^Found: \(switch[0-9]*\).*/\1/p' | head -1)
+[ -z "$SWX" ] && SWX=$(printf '%s\n' "$SWLIST" | grep -w 'switch1' \
+      | sed -n 's/^Found: \(switch[0-9]*\).*/\1/p' | head -1)
+[ -z "$SWX" ] && SWX=$(printf '%s\n' "$SWLIST" \
+      | sed -n 's/^Found: \(switch[0-9]*\).*/\1/p' | tail -1)
+
+if [ -z "$ETH" ]; then
+  echo "[nic-guard] !! 内核里没有任何 ethX —— 交换驱动没 probe（查 DTS 时钟/复位）" > /dev/console
+  echo "[nic-guard] !! 用户态救不了；TTL 能敲命令就没砖，U-Boot web 可重刷 factory.ubi" > /dev/console
+else
+  echo "[nic-guard] OK ethX=$ETH  8337=${SWX:-未注册}" > /dev/console
+  [ -z "$SWX" ] && echo "[nic-guard] !! switch 未注册，先跑 swconfig list 看真实名字" > /dev/console
+fi
+
+# —— 自愈：不管 br-lan 有没有，先保证它存在 ——
+if ! ip link show br-lan >/dev/null 2>&1; then
+  brctl addbr br-lan 2>/dev/null \
+    || ip link add name br-lan type bridge 2>/dev/null || true
+  echo "[nic-guard] 自愈: br-lan 原本不存在，已现场创建" > /dev/console
+fi
+ip link set br-lan up 2>/dev/null || true
+
+if [ -n "$SWX" ] && command -v swconfig >/dev/null 2>&1; then
+  swconfig dev "$SWX" set reset 1        2>/dev/null || true
+  swconfig dev "$SWX" set enable_vlan 0  2>/dev/null || true
+  swconfig dev "$SWX" set apply 1        2>/dev/null || true
+  echo "[nic-guard] 自愈: $SWX 关 VLAN（纯二层傻交换桥）" > /dev/console
+fi
+
+for e in eth0 eth1; do
+  [ -d "/sys/class/net/$e" ] || continue
+  ip link set "$e" up 2>/dev/null || true
+  brctl show br-lan 2>/dev/null | grep -qw "$e" \
+    || brctl addif br-lan "$e" 2>/dev/null \
+    || ip link set "$e" master br-lan 2>/dev/null || true
+done
+echo "[nic-guard] 自愈: eth0/eth1 已拉起并并入 br-lan" > /dev/console
+
+# 桥没管理地址时补上（不写 uci，重启即失效；正常情况编译期配置已带 .241）
+if ! ip addr show br-lan 2>/dev/null | grep -q '192.168.1.241'; then
+  ip addr add 192.168.1.241/24 dev br-lan 2>/dev/null || true
+  echo "[nic-guard] 自愈: br-lan 补 192.168.1.241/24（临时）" > /dev/console
+fi
+
+# STP 收敛约 30 秒；纯二层桥不需要 WAN/LAN 隔离
+echo "[nic-guard] 完成：电脑设 192.168.1.10/24 或自动 DHCP，访问 192.168.1.241" > /dev/console
+cat "$LOG"

@@ -1,0 +1,26 @@
+#!/bin/sh
+# 【最稳 · 关闭防火墙】纯二层桥 / 哑 AP 不做三层转发，不需要 firewall4。
+# 编译期 common.seed 已把 firewall4 设为 n；这里再兜运行期三层：
+#   1) stop + disable firewall / firewall4 服务（服务不存在就静默跳过）
+#   2) 清空 /etc/config/firewall，避免 LuCI 出现「网络→防火墙」菜单与规则链
+#   3) 关软件/硬件 flow offload（与 NSS/ECM 抢 conntrack，社区明确要求关）
+#   4) 只保留 l2-guard 那条独立二层规则，不 flush 全局 nft ruleset
+# 不删 /etc/config/network、不碰 br-lan、不碰 SSH/TTYD。
+[ -f /etc/config/firewall ] && : > /etc/config/firewall
+for s in firewall firewall4; do
+    [ -x "/etc/init.d/$s" ] || continue
+    "/etc/init.d/$s" stop    2>/dev/null || true
+    "/etc/init.d/$s" disable 2>/dev/null || true
+done
+# 关掉会抢包的软/硬 offload（NSS 基线下 ECM 才是加速器）
+for f in /etc/config/firewall /etc/config/firewall4; do
+    [ -f "$f" ] || continue
+    sed -i '/flow_offloading/d;/flowtable/d' "$f" 2>/dev/null || true
+done
+if command -v uci >/dev/null 2>&1; then
+    uci -q delete firewall.@defaults[0].flow_offloading 2>/dev/null || true
+    uci -q delete firewall.@defaults[0].flow_offloading_hw 2>/dev/null || true
+    uci commit firewall 2>/dev/null || true
+fi
+logger -t nwrt 'firewall4 已关闭，仅保留 l2-guard 二层 DHCP 防护'
+exit 0

@@ -1,0 +1,123 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════
+# wifi-heal —— 无线诊断 + 温和自愈（开机由 rc.local 后台调，也可串口手动跑）
+# 用法：sh /usr/sbin/wifi-heal
+#
+# 只做三件事，绝不碰 flash / ART / DTS / 驱动栈：
+#   ① 读真值：机型、BDF MD5、PHY 数、wlan 接口、disabled、dmesg 无线摘要
+#   ② 温和自愈：把 wifi-device / wifi-iface 的 disabled 全部置 0 再 wifi up
+#   ③ 给结论：PHY=0 / 有 PHY 无 wlan / wlan 已起 / 【刷错机型固件】
+#
+# ★ 诚实边界：VS010「无线满血」受限于驱动栈不兼容
+#    好固件 = 闭源 qca_ol/umac/wifi_3_0 + ipq_cnss2 + QMI WLFW
+#    本仓   = 开源 ath11k + board-2.bin
+#   改 DTS 数值 / 换 BDF / 切 ART 都修不好这个根因，脚本不会假装能修。
+#   它能修的是配置层（disabled=1）、加载时序（校准未完就 up）、机型错配。
+# ═══════════════════════════════════════════════════════════════════════
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+say(){ printf '%s\n' "$*"; }
+line(){ printf '%s\n' '──────────────────────────────────────────────────────────'; }
+
+MD5_VS010_2G=c7d89771464322ea39ca290249295af9
+MD5_VS010_5G=0aadbd42dc960aefdffe09177dd275b9
+
+MODEL=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
+MODE=$(cat /etc/firmware_mode 2>/dev/null || echo '?')
+PHY=$(ls /sys/class/ieee80211 2>/dev/null | tr '\n' ' ')
+PHY_N=$(ls /sys/class/ieee80211 2>/dev/null | wc -l)
+WLAN=$(ls /sys/class/net 2>/dev/null | grep '^wlan' | tr '\n' ' ')
+WLAN_N=$(ls /sys/class/net 2>/dev/null | grep -c '^wlan' || true)
+
+say "════ 无线自愈与诊断 · wifi-heal ════"
+line
+say "机型(DT)    : ${MODEL:-未读到}"
+say "固件模式    : $MODE"
+say "射频 PHY    : ${PHY_N} 个 ${PHY:-（无）}"
+say "wlan 接口   : ${WLAN_N} 个 ${WLAN:-（无）}"
+
+# ── BDF 与机型错配检测（解释「能起无线但信号差」）──
+B2=/lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin
+B5=/lib/firmware/ath11k/qcn6122/hw1.0/board-2.bin
+M2='—'; M5='—'
+[ -f "$B2" ] && M2=$(md5sum "$B2" 2>/dev/null | awk '{print $1}')
+[ -f "$B5" ] && M5=$(md5sum "$B5" 2>/dev/null | awk '{print $1}')
+say "BDF 2G MD5  : $M2"
+say "BDF 5G MD5  : $M5"
+case "$MODEL" in
+  *VS010*)
+    if [ "$M2" = "$MD5_VS010_2G" ] && [ "$M5" = "$MD5_VS010_5G" ]; then
+        say "  ✅ 两份都是 VS010 原厂 BDF（KCT8539S / 内置 FEM），机型与固件一致"
+    else
+        say "  ⚠⚠ 硬件是 VS010，但 BDF 不是原厂两份 ——【很可能刷了 RAX3000Q 的固件】"
+        say "     这正是「能起无线但信号差 / 甚至不注册」的直接来源：RAX 用 RTC66568 功放表"
+        say "     请刷 -vs010 结尾的固件；别把 RAX3000Q 固件刷进 VS010，反之亦然"
+    fi ;;
+  *RAX3000Q*|*RAX*)
+    if [ "$M2" = "$MD5_VS010_2G" ]; then
+        say "  ⚠ 硬件是 RAX3000Q，却装了 VS010 原厂 BDF —— 刷错固件，请刷 -rax3000q 结尾"
+    else
+        say "  ✅ 机型与 BDF 未发现 VS010 错配（RAX 用 ipq-wifi-cmcc_rax3000q）"
+    fi ;;
+  *) say "  · 机型未识别，BDF 错配判断跳过" ;;
+esac
+line
+
+# ── 温和自愈：解禁 + wifi up ──
+say "自愈动作："
+if command -v uci >/dev/null 2>&1 && [ -s /etc/config/wireless ]; then
+    n=0
+    for sec in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=.*/\1/p'); do
+        case "$sec" in
+          radio*|default_*)
+            d=$(uci -q get "wireless.$sec.disabled" 2>/dev/null || echo '')
+            if [ "$d" != '0' ]; then
+                uci -q set "wireless.$sec.disabled=0" 2>/dev/null || true
+                n=$((n+1))
+            fi ;;
+        esac
+    done
+    uci -q commit wireless 2>/dev/null || true
+    say "  · disabled 置 0：$n 个段已解禁（0=本来就是解禁的）"
+else
+    say "  · 无 uci / 无 /etc/config/wireless，跳过解禁"
+fi
+if [ -x /etc/init.d/network ]; then
+    /etc/init.d/network enable >/dev/null 2>&1 || true
+    say "  · netifd(network) 已 ensure enable（wifi up 的前提）"
+fi
+/sbin/wifi up >/dev/null 2>&1 || wifi up >/dev/null 2>&1 || true
+sleep 3
+WLAN_AFTER=$(ls /sys/class/net 2>/dev/null | grep '^wlan' | tr '\n' ' ')
+WLAN_AFTER_N=$(ls /sys/class/net 2>/dev/null | grep -c '^wlan' || true)
+say "  · wifi up 已执行；之后 wlan 接口 ${WLAN_AFTER_N} 个 ${WLAN_AFTER:-（仍无）}"
+line
+
+# ── dmesg 摘要 ──
+say "dmesg 无线相关（末 8 行，qdss_trace_config.bin 失败可忽略）:"
+dmesg 2>/dev/null | grep -iE 'ath11k|cnss|bdf|bdwlan|board.?id|caldata|qmi|wlfw|firmware load|probe' \
+  | tail -n 8 | sed 's/^/  /' || say "  （无匹配日志）"
+line
+
+# ── 结论 ──
+say "──── 结论 ────"
+if [ "$PHY_N" = '0' ]; then
+    say "[A] PHY 0 个：驱动根本没 probe。查 dmesg 的 BDF / board id 报错。"
+    say "    VS010 若走本仓 ath11k， PHY 正常应为 2 个；刷好固件后仍 0 个 = 驱动栈/固件错配。"
+    say "    换栈（好固件闭源 qca-wifi+cnss2）才是满血路线，改 DTS 数值无效。"
+elif [ "$WLAN_AFTER_N" = '0' ]; then
+    say "[B] PHY 已注册但 wlan 接口没起来：属配置/时序层，本脚本已解禁 + wifi up。"
+    say "    ath11k 双射频校准可能要 60~180 秒，等 2~3 分钟再跑一次；"
+    say "    仍无 wlan 就把本输出整段贴回来（含 dmesg）。"
+else
+    say "[C] wlan 接口已注册：射频起来了。"
+    say "    WDS 版单机刷完「未关联」是预期（5G WDS 要两台配对）；2.4G BRIDGE-SETUP 应能搜到。"
+    say "    AP 版搜 NwrtAP-2G / NwrtAP-5G（密码 admin12345）。"
+fi
+case "$MODEL" in
+  *VS010*)
+    [ "$M2" = "$MD5_VS010_2G" ] || say "[D] 但 BDF 不是 VS010 原厂 → 先刷对机型固件，否则信号一定差。" ;;
+esac
+say "完整页面诊断：/bridge/（WDS）或 /ap/（AP）的「无线诊断 · DIAG」面板。"
+say "只读取证：wifi-bdf-check   加速自检：accel-check"
+exit 0

@@ -1,0 +1,140 @@
+#!/bin/sh
+# luci-fix —— 修 dispatcher.lua:427，并让「系统 → 语言与样式」永远只列真实主题
+#
+# 两个根因，一次修掉：
+#  ① /etc/config/luci 是 conffile。sysupgrade 勾「保留配置」或 factory 刷后
+#     旧 overlay 残留会盖掉编译期文件；重建时若用 `uci set luci.main=...`，
+#     UCI extended lookup 会造出【匿名】config main 段，LuCI 按名字找 'main'
+#     找不到 → 427 "unable to find section 'main'"。
+#  ② 老仓库把 mediaurlbase 写死 /luci-static/argon、themes 段列 Argon/Footstrap，
+#     但官方 25.12 luci feed 里根本没有这两个包（社区主题，要额外加 feed）。
+#     defconfig 静默丢包后，主题目录是空气：直接白屏；在下拉里点一下就 500，
+#     之后再也进不去 LuCI —— 这就是「主题页面老是报错」的高概率根因。
+#
+# 本脚本每次冷启由 /etc/init.d/luci-fix(START=18) 与 bridge-netfix(START=21)
+# 各调用一次，也可串口手动跑 `luci-fix` / `health-fix`，不用重刷、不用重编。
+#
+# 做法：绝不靠 `uci set` 建段（元凶）；用 heredoc / awk 直接写文件。
+# 主题列表完全按 /www/luci-static/ 下【实际存在】的目录生成，不猜、不写死。
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+CFG=/etc/config/luci
+WWW=/www
+STATIC=/www/luci-static
+
+say() { echo "[luci-fix] $*"; logger -t luci-fix "$*" 2>/dev/null || true; }
+
+have_named_main() {
+    [ -s "$CFG" ] || return 1
+    grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+('main'|\"main\")" "$CFG" 2>/dev/null
+}
+
+# ── ① 探测真实存在的主题目录，优先级：社区主题 > 官方兜底 ───────────
+# 顺序即默认主题的优先级：编了 argon 就自动用 argon（观感与老仓库一致），
+# 没编就稳稳落到 bootstrap。绝不会指向不存在的目录。
+THEME=''
+THEMES_BLOCK=""
+for t in argon footstrap material bootstrap openwrt2020 openwrt; do
+    [ -d "$STATIC/$t" ] || continue
+    case "$t" in
+        argon)       L=Argon ;;
+        footstrap)   L=Footstrap ;;
+        material)    L=Material ;;
+        bootstrap)   L=Bootstrap ;;
+        openwrt2020) L=OpenWrt2020 ;;
+        openwrt)     L=OpenWrt ;;
+    esac
+    [ -z "$THEME" ] && THEME="/luci-static/$t"
+    THEMES_BLOCK=$(printf '%s\n\toption %s '\''/luci-static/%s'\''\n' \
+                   "$THEMES_BLOCK" "$L" "$t")
+done
+# 一个目录都没有（极端：luci-base 被裁掉了）也要给个合法值，且只列 bootstrap
+if [ -z "$THEME" ]; then
+    THEME='/luci-static/bootstrap'
+    THEMES_BLOCK="
+	option Bootstrap '/luci-static/bootstrap'
+"
+fi
+
+# ── ② 确保 named section core 'main' 在位 ─────────────────────────
+if ! have_named_main; then
+    say "坏文件/缺 named main（427 根因）：重建 /etc/config/luci"
+    rm -f "$CFG" "$CFG.opkg" "$CFG.apk-new" 2>/dev/null || true
+    mkdir -p /etc/config 2>/dev/null || true
+    cat > "$CFG" <<EOF
+# rebuilt by /usr/sbin/luci-fix —— 必须保留 named section core 'main'
+config core 'main'
+	option lang 'zh_cn'
+	option mediaurlbase '$THEME'
+	option resourcebase '/luci-static/resources'
+
+config internal 'sauth'
+	option sessionpath '/var/run/luci'
+	option sessiontime '3600'
+EOF
+    chmod 644 "$CFG" 2>/dev/null || true
+    if have_named_main; then
+        say "重建成功：默认主题 $THEME"
+    else
+        say "ERROR：重建后仍缺 named main，请检查 /etc/config 是否可写"
+        exit 1
+    fi
+else
+    say "OK：named section core 'main' 在位（427 不会复现）"
+fi
+
+# ── ③ 重写 themes 段：只列真实存在的主题，清掉旧 overlay 里的幽灵项 ──
+# 即使 named main 是好的，旧 /etc/config/luci 也可能残留 Argon/Footstrap，
+# 用户在「语言与样式」里一点就白屏。所以每次都刷这一段。
+TMP="${CFG}.luci-fix.$$"
+TBL="${CFG}.themes.$$"
+printf "config internal 'themes'\n" > "$TBL"
+printf '%s\n' "$THEMES_BLOCK" | grep -E "option " >> "$TBL" 2>/dev/null || true
+# 保证至少有一条，避免空段
+grep -q "option " "$TBL" || printf "\toption Bootstrap '/luci-static/bootstrap'\n" >> "$TBL"
+
+awk -v blk="$(cat "$TBL")" '
+BEGIN { skip=0 }
+{
+    # 命中旧的 themes 段：跳过它和它的 option 行，直到下一个 config 段
+    if ($0 ~ /^[[:space:]]*config[[:space:]]+internal[[:space:]]+/ && $0 ~ /themes/) { skip=1; next }
+    if (skip==1 && $0 ~ /^[[:space:]]*config[[:space:]]+/) { skip=0 }
+    if (skip==1) next
+    print
+}
+END { print blk }
+' "$CFG" > "$TMP" 2>/dev/null
+rm -f "$TBL" 2>/dev/null || true
+
+if [ -s "$TMP" ] && grep -q "config internal 'themes'" "$TMP"; then
+    mv "$TMP" "$CFG" 2>/dev/null || {
+        rm -f "$TMP" 2>/dev/null || true
+        say "WARN：themes 段写入失败（只读文件系统？），保持原文件不动"
+    }
+    chmod 644 "$CFG" 2>/dev/null || true
+else
+    rm -f "$TMP" 2>/dev/null || true
+    say "WARN：awk 处理失败，原文件未改动（不会因此报错）"
+fi
+
+# ── ④ mediaurlbase 必须指向真实目录 ───────────────────────────────
+# named main 已确认存在，此处 `uci set` 安全（不会造匿名段）。
+if command -v uci >/dev/null 2>&1; then
+    cur=$(uci -q get luci.main.mediaurlbase 2>/dev/null || echo '')
+    if [ -z "$cur" ] || { [ ! -d "$WWW${cur}" ] && [ ! -d "$cur" ]; }; then
+        uci -q set luci.main.mediaurlbase="$THEME" 2>/dev/null || true
+        uci commit luci 2>/dev/null || true
+        say "mediaurlbase 从 '${cur:-未设}' 修正为 '$THEME'"
+    else
+        say "mediaurlbase = $cur（目录存在，不动）"
+    fi
+fi
+say "可用主题：$(grep -oE "'/luci-static/[^']+'" "$CFG" 2>/dev/null | tr -d "'" \
+     | grep -v '/luci-static/resources' | sort -u | tr '\n' ' ')"
+
+# ── ⑤ 清 LuCI 索引/模块缓存，避免旧错误状态被缓存住 ────────────────
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache/* 2>/dev/null || true
+say "完成：刷新 http://<管理IP>/cgi-bin/luci/ 即可（root / admin）"
+say "提示：状态页 /bridge/ 与 /ap/ 是独立静态页，LuCI 挂了也能直接打开"
+exit 0

@@ -1,0 +1,123 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════
+# 第 33 次：开机兜底（不依赖 enable、不依赖 uci-defaults、不需要 +x）
+#
+# OpenWrt 21.02 的 /etc/init.d/done（procd 自带、START=95）在每次 boot 末尾用
+#   `sh /etc/rc.local` 执行本文件 —— 不是 exec，不需要执行位；也不像
+# uci-defaults 那样「首启跑一次就自删」。
+#
+# 为什么需要它：dispatcher.lua:427 的修复链本来是
+#   编译期 files/etc/config/luci → init.d/luci-fix(START=18) → bridge-netfix(21)
+# 但 luci-fix 与 bridge-netfix 的 `enable` 都只写在 99-bridge-ready 里。
+# 若「sysupgrade 保留配置」升级（99 不再执行）、或旧 overlay 里 rc.d 链接没建全，
+# 这两条自修路会同时断掉，427 就复现 —— 本文件专门补这个缺口。
+#
+# 全程幂等、只写 /etc/config 里被旧配置写坏的两个文件，不碰 flash / 不重启。
+# 边界：rc.local 自身是 base-files 的 conffile，极端「保留配置」下可能被旧版
+#       盖回；那时串口跑一行 `sh /usr/sbin/health-fix` 即可（该脚本在 /usr/sbin，
+#       不受保留配置影响）。
+# ═══════════════════════════════════════════════════════════════════════
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+log(){ logger -t rc-local "$*" 2>/dev/null || true; }
+
+# ① LuCI：named section core 'main' 必须在（427 的唯一根因）
+if [ -x /usr/sbin/luci-fix ]; then
+    /usr/sbin/luci-fix >/dev/null 2>&1 || true
+else
+    grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+'main'" /etc/config/luci 2>/dev/null || {
+        mkdir -p /etc/config
+        cat > /etc/config/luci <<'EOF'
+config core 'main'
+	option lang 'zh_cn'
+	option mediaurlbase '/luci-static/bootstrap'
+	option resourcebase '/luci-static/resources'
+
+config internal 'sauth'
+	option sessionpath '/var/run/luci'
+	option sessiontime '3600'
+EOF
+        chmod 644 /etc/config/luci
+        log "luci-fix 缺失，已就地重建 /etc/config/luci"
+    }
+fi
+
+# ② uhttpd：named main + cgi_prefix（CGI 404 / /cgi-bin/bridge 黄条的根因）
+if [ -f /etc/config/uhttpd ]; then
+    if ! grep -qE "^[[:space:]]*config[[:space:]]+uhttpd[[:space:]]+'main'" /etc/config/uhttpd 2>/dev/null \
+       || ! grep -q "cgi_prefix '/cgi-bin'" /etc/config/uhttpd 2>/dev/null; then
+        cat > /etc/config/uhttpd <<'EOF'
+config uhttpd 'main'
+	list listen_http '0.0.0.0:80'
+	option redirect_https '0'
+	option home '/www'
+	option rfc1918_filter '1'
+	option max_requests '3'
+	option max_connections '100'
+	option cgi_prefix '/cgi-bin'
+	option script_timeout '60'
+	option network_timeout '30'
+	option http_keepalive '20'
+	option tcp_keepalive '1'
+	option ubus_prefix '/ubus'
+
+config cert 'defaults'
+	option days '730'
+	option key_type 'ec'
+	option ec_curve 'P-256'
+	option country 'ZZ'
+	option state 'Somewhere'
+	option location 'Unknown'
+	option commonname 'ImmortalWrt'
+EOF
+        chmod 644 /etc/config/uhttpd
+        log "uhttpd 配置被旧 overlay 写坏，已重建 named main + cgi_prefix"
+    fi
+fi
+
+# ③ 把两条自修链彻底钉死（enable 幂等，以后每次开机都在）
+[ -x /etc/init.d/luci-fix ]     && /etc/init.d/luci-fix enable     2>/dev/null
+[ -x /etc/init.d/bridge-netfix ] && /etc/init.d/bridge-netfix enable 2>/dev/null
+
+# ④ SSH：dropbear 的 named section 缺了就补，并每次显式 enable + restart
+if [ -x /etc/init.d/dropbear ]; then
+    # ① 配置缺 named section：用【不带 Interface】的新版重建
+    grep -qE "^[[:space:]]*config[[:space:]]+dropbear[[:space:]]+" /etc/config/dropbear 2>/dev/null || {
+        mkdir -p /etc/config
+        cat > /etc/config/dropbear <<'EOF'
+config dropbear 'main'
+	option enable '1'
+	option PasswordAuth '1'
+	option RootPasswordAuth '1'
+	option RootLogin '1'
+	option Port '22'
+EOF
+        chmod 644 /etc/config/dropbear
+        log "dropbear 缺 named section，已按第 34 次版重建（不绑 Interface）"
+    }
+    # ② ★ 旧 overlay 残留的 `option Interface 'lan'` 是 SSH 连不上的真根因：
+    #    21.02 dropbear.init 在 BOOT 阶段遇到 Interface 会直接 return 0（不建实例），
+    #    且主备把 .241 改 .242 后不会自动重绑。这里就地清掉，不依赖编译期文件是否被盖。
+    if grep -qiE "^[[:space:]]*option[[:space:]]+Interface[[:space:]]" /etc/config/dropbear 2>/dev/null; then
+        sed -i '/^[[:space:]]*option[[:space:]]*Interface[[:space:]]/d' /etc/config/dropbear 2>/dev/null
+        log "已清除旧 overlay 的 dropbear Interface 绑定（改为监听 0.0.0.0:22）"
+    fi
+    # ③ 非 schema 的 keyfile 选项一并清掉，避免 validation failed
+    sed -i '/^[[:space:]]*option[[:space:]]*\(dsskeyfile\|ecdsakeyfile\|ed25519keyfile\)[[:space:]]/d' \
+        /etc/config/dropbear 2>/dev/null || true
+    /etc/init.d/dropbear enable  2>/dev/null
+    /etc/init.d/dropbear restart 2>/dev/null
+    log "SSH 已 ensure：0.0.0.0:22（不受主备 IP 切换影响）"
+fi
+
+# ⑤ 无线自愈放后台，不阻塞 rcS（ath11k 双射频校准 60~180s）
+if [ -f /usr/sbin/wifi-heal ]; then
+    chmod +x /usr/sbin/wifi-heal /usr/sbin/health-fix /usr/sbin/dhcp-guard 2>/dev/null || true
+    # 无线自愈先跑（注册 wlan*），再上 DHCP 私设防护；都放后台，不阻塞 rcS
+    ( sleep 25
+      sh /usr/sbin/wifi-heal   >/dev/null 2>&1
+      sh /usr/sbin/dhcp-guard  >/dev/null 2>&1 ) &
+fi
+
+log "开机兜底完成：LuCI / uhttpd / SSH 已校验，无线自愈 + DHCP 防护已排入后台"
+exit 0

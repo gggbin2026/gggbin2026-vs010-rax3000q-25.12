@@ -1,0 +1,159 @@
+#!/bin/sh
+# ═══════════════════════════════════════════════════════════════════════
+# health-fix —— 串口一键自检修（LuCI 主题 / CGI / SSH / 无线）
+# 用法：sh /usr/sbin/health-fix        （或 health-fix，若已 chmod +x）
+#
+# 什么时候用：刷完固件发现
+#   · /cgi-bin/luci/ 报 dispatcher.lua:427 "unable to find section 'main'"
+#   · /bridge/ 能开但 CGI 黄条「未返回数据」
+#   · SSH 连不上
+#   · 无线不注册
+# 不用重编、不用重刷；跑完立刻刷新浏览器。
+#
+# 放在 /usr/sbin（不在 /etc），所以「sysupgrade 保留配置」不会把它盖掉。
+# 只读判断 + 就地修两个被写坏的 /etc/config 文件，不碰 flash / 不重启。
+# ═══════════════════════════════════════════════════════════════════════
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+say(){ printf '%s\n' "$*"; }
+line(){ printf '%s\n' '──────────────────────────────────────────────────────────'; }
+
+say "════ 整机自检 · health-fix · $(date '+%Y-%m-%d %H:%M:%S') ════"
+line
+say "机型(DT) : $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo '未读到')"
+say "固件模式 : $(cat /etc/firmware_mode 2>/dev/null || echo '未知')"
+say "主机名   : $(cat /proc/sys/kernel/hostname 2>/dev/null || echo '—')"
+line
+
+# ① LuCI
+say "[1/7] LuCI 主题配置 /etc/config/luci"
+if grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+('main'|\"main\")" /etc/config/luci 2>/dev/null; then
+    say "  ✓ named section core 'main' 在位（427 不会复现）"
+else
+    say "  ✗ 缺 named main → 这是 dispatcher.lua:427 的根因，正在修"
+    if [ -x /usr/sbin/luci-fix ]; then
+        /usr/sbin/luci-fix && say "  ✓ luci-fix 已重建" || say "  ✗ luci-fix 失败，把上面输出贴回来"
+    else
+        say "  ✗ /usr/sbin/luci-fix 缺失（固件不是本仓版本？）"
+    fi
+fi
+if command -v uci >/dev/null 2>&1; then
+    m=$(uci -q get luci.main.mediaurlbase 2>/dev/null || echo '')
+    say "  主题 mediaurlbase : ${m:-（未设）}"
+    [ -n "$m" ] && [ ! -d "/www$m" ] && [ ! -d "$m" ] \
+        && say "  ⚠ 主题目录不存在会白屏（不是 427）；luci-fix 会自动回落 bootstrap"
+fi
+# 主题下拉里若列了不存在的目录，用户在「系统 → 语言与样式」点一下就 500，
+# 之后再也进不去 LuCI。逐项核对目录是否真的存在（luci-fix 会清理幽灵项）。
+# 只认 option 里带引号的真实路径：注释里的示例 /luci-static/argon、
+# 以及 resourcebase '/luci-static/resources' 都不算主题，避免误报
+for t in $(grep -oE "'/luci-static/[^']+'" /etc/config/luci 2>/dev/null | tr -d "'" \
+           | grep -v '/luci-static/resources' | sort -u); do
+    if [ -d "/www$t" ]; then
+        say "  ✓ 主题目录 $t 存在"
+    else
+        say "  ✗ 主题 $t 目录不存在 → 选它会白屏/500，跑 luci-fix 清理"
+    fi
+done
+line
+
+# ② uhttpd / CGI
+say "[2/7] uhttpd 与 CGI"
+if grep -qE "^[[:space:]]*config[[:space:]]+uhttpd[[:space:]]+'main'" /etc/config/uhttpd 2>/dev/null; then
+    say "  ✓ uhttpd named main 在位"
+else
+    say "  ✗ uhttpd 缺 named main（同款 UCI 匿名段坑）"
+fi
+say "  cgi_prefix : $(uci -q get uhttpd.main.cgi_prefix 2>/dev/null || echo '未读到')"
+say "  home       : $(uci -q get uhttpd.main.home 2>/dev/null || echo '未读到')"
+for p in /www/cgi-bin/luci /www/cgi-bin/bridge /www/cgi-bin/apstatus /www/bridge/index.html /www/ap/index.html; do
+    [ -e "$p" ] && say "  ✓ $p" || say "  · $p 不在（按固件模式属正常）"
+done
+line
+
+# ③ SSH
+say "[3/7] SSH / dropbear"
+if grep -qE "^[[:space:]]*config[[:space:]]+dropbear[[:space:]]+" /etc/config/dropbear 2>/dev/null; then
+    say "  ✓ dropbear named section 在位"
+else
+    say "  ✗ 缺 named section（config_load 取不到实例 → 进程不启动），正在重建"
+    mkdir -p /etc/config
+    cat > /etc/config/dropbear <<'EOF'
+config dropbear 'main'
+	option enable '1'
+	option PasswordAuth '1'
+	option RootPasswordAuth '1'
+	option RootLogin '1'
+	option Port '22'
+EOF
+    chmod 644 /etc/config/dropbear
+fi
+# ★ 真根因：21.02 dropbear.init 在 BOOT 阶段遇到 Interface 直接 return 0（不建实例），
+#   network_get_ipaddrs_all 失败也 return 1；主备把 .241 改 .242 后不会自动重绑。
+if grep -qiE "^[[:space:]]*option[[:space:]]+Interface[[:space:]]" /etc/config/dropbear 2>/dev/null; then
+    say "  ✗ 发现 option Interface（这就是 22 连不上的根因）→ 就地删除，改监听 0.0.0.0:22"
+    sed -i '/^[[:space:]]*option[[:space:]]*Interface[[:space:]]/d' /etc/config/dropbear 2>/dev/null || true
+else
+    say "  ✓ 无 Interface 绑定（监听 0.0.0.0:22，不受主备 IP 切换影响）"
+fi
+sed -i '/^[[:space:]]*option[[:space:]]*\(dsskeyfile\|ecdsakeyfile\|ed25519keyfile\)[[:space:]]/d' \
+    /etc/config/dropbear 2>/dev/null || true
+if [ -x /etc/init.d/dropbear ]; then
+    /etc/init.d/dropbear enable  >/dev/null 2>&1
+    /etc/init.d/dropbear restart >/dev/null 2>&1
+    say "  ✓ 已 enable + restart"
+fi
+if command -v netstat >/dev/null 2>&1; then
+    listen=$(netstat -lnt 2>/dev/null | grep ':22 ' | awk '{print $4}' | tr '\n' ' ')
+    n=$(printf '%s' "$listen" | grep -c . || true)
+else
+    listen=$(grep ':0016 ' /proc/net/tcp 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+    n=$(printf '%s' "$listen" | grep -c . || true)
+fi
+say "  22/tcp 监听 : ${listen:-（无）}  （${n:-0} 条；0=仍未起，把本输出贴回来）"
+ip=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '192.168.1.241')
+role=$(cat /etc/bridge_role_mode 2>/dev/null || echo '')
+fmode=$(cat /etc/firmware_mode 2>/dev/null || echo '')
+say "  当前管理 IP : $ip ${role:+· 角色 $role} · 模式 $fmode"
+say "  ★ 请用：ssh root@$ip   （WDS 主 .241 / 备 .242 / AP .240，连错 IP 也会像「连不上」）"
+say "  密码 admin（首启 hash 已校验）；仍失败把本段输出整段贴回来"
+line
+
+say "[4/7] DHCP 私设防护（无线侧）"
+if [ -f /usr/sbin/dhcp-guard ]; then
+    sh /usr/sbin/dhcp-guard --status 2>/dev/null | sed 's/^/  /'
+    say "  应用/重下规则：sh /usr/sbin/dhcp-guard"
+else
+    say "  ⚠ /usr/sbin/dhcp-guard 缺失（固件不含本包？）"
+fi
+line
+
+# ④ 无线
+say "[5/7] 无线（完整诊断见 wifi-heal）"
+if [ -f /usr/sbin/wifi-heal ]; then
+    sh /usr/sbin/wifi-heal
+else
+    say "  ⚠ /usr/sbin/wifi-heal 缺失，只做最小检查"
+    say "  PHY : $(ls /sys/class/ieee80211 2>/dev/null | tr '\n' ' ' || echo '无')"
+    say "  wlan: $(ls /sys/class/net 2>/dev/null | grep '^wlan' | tr '\n' ' ' || echo '无')"
+fi
+line
+
+say "[6/7] ART / 本机校准（只读，不改 flash）"
+if [ -x /usr/sbin/art-check ]; then
+    sh /usr/sbin/art-check 2>/dev/null | grep -E '分区|大小|整片MD5|机型判定|MAC@|2G @|5G @|Caldata|默认' | sed 's/^/  /'
+else
+    say "  · /usr/sbin/art-check 缺失（固件不是本仓版本？）"
+fi
+line
+
+say "[7/7] OEM QSDK 栈对照（只读，第 41 次新增）"
+if [ -x /usr/sbin/oem-stack-check ]; then
+    sh /usr/sbin/oem-stack-check 2>/dev/null | grep -E '内核|好固件内核|QSDK 闭源|QSDK 残留|NSS/ECM|ECM debugfs|结论|不能|判速|可迁移|现实路径' | sed 's/^/  /'
+else
+    say "  · /usr/sbin/oem-stack-check 缺失（固件不是本仓版本？）"
+fi
+line
+say "完成。浏览器强刷 http://$(uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.1.241)/cgi-bin/luci/"
+say "状态页：/bridge/（WDS）或 /ap/（AP）。把本输出整段贴回来即可定位剩余问题。"
+exit 0

@@ -1,0 +1,199 @@
+#!/bin/sh
+# 【AP 模式专用】弱信号剔除守护 + 命令行工具（第 29 次校准）
+#
+# 语义（默认阈值见 /etc/config/ap-rssi-guard）：
+#   RSSI < reject_dbm(-90)  → 拒绝关联：新终端连上后 1 个周期内断链，不让它留在 AP 上
+#   RSSI < kick_dbm(-92)    → 剔除：连续 consecutive 次确认后 deauth / station del
+# 两道拦截：hostapd 的 rssi_reject_assoc_rssi（若支持，瞬间拒绝）+ 本脚本兜底。
+#
+# 数据源：iw dev <if> station dump（mac80211/ath11k）；为空时回退 iwinfo <if> assoclist
+#         （NSS offload / 闭源 qca-wifi 常见）。缺 signal 的终端一律跳过，绝不误踢。
+# 动作：优先 iw dev <if> station del <MAC>；失败回退 hostapd_cli deauthenticate。
+# 安全：CGI 只读 /tmp 状态文件，不接收网页参数；本脚本不 eval、不写 flash 配置以外内容。
+#
+# 用法：
+#   ap-rssi-guard status                 # 阈值 / 开关 / 统计 / 最近动作
+#   ap-rssi-guard run                   # 单次扫描（调试用，不启守护）
+#   ap-rssi-guard loop                  # 常驻循环（由 init.d 调，别手敲）
+#   ap-rssi-guard on | off
+#   ap-rssi-guard dryrun on | off       # 只记日志不真踢，建议先这样验证
+#   ap-rssi-guard set reject -90 | set kick -92 | set interval 3 | set consecutive 3
+#
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+CONF=/etc/config/ap-rssi-guard
+STATE=/tmp/ap-rssi-guard.state
+LOG=/tmp/ap-rssi-guard.log
+MARKS=/tmp/ap-rssi-guard.marks
+HITS=/tmp/ap-rssi-guard.hits
+
+g(){ uci -q get "ap-rssi-guard.main.$1" 2>/dev/null; }
+getv(){ v=$(g "$1"); [ -n "$v" ] && printf '%s' "$v" || printf '%s' "$2"; }
+ENABLED=$(getv enabled 0)
+REJECT=$(getv reject_dbm -90)
+KICK=$(getv kick_dbm -92)
+INTERVAL=$(getv interval 3)
+CONSEC=$(getv consecutive 3)
+DRY=$(getv dryrun 0)
+GRACE=$(getv grace_sec 10)
+for x in "$REJECT" "$KICK" "$INTERVAL" "$CONSEC" "$GRACE"; do
+  case "$x" in -[0-9]*|[0-9]*) ;; *) echo "::error::阈值非法：$x"; exit 1 ;; esac
+done
+[ "$INTERVAL" -ge 1 ] 2>/dev/null || INTERVAL=3
+[ "$CONSEC" -ge 1 ] 2>/dev/null || CONSEC=3
+[ "$CONSEC" -le 20 ] 2>/dev/null || CONSEC=20
+
+now(){ date '+%H:%M:%S' 2>/dev/null || echo '?'; }
+logline(){
+  printf '%s %s\n' "$(now)" "$*" >> "$LOG" 2>/dev/null
+  tail -n 30 "$LOG" 2>/dev/null > "$LOG.tmp" && mv "$LOG.tmp" "$LOG" 2>/dev/null
+  logger -t ap-rssi-guard "$*" 2>/dev/null || true
+}
+stat_inc(){ # 统计计数持久化到 state（KEY=VALUE 逐行）
+  k=$1; v=$(sed -n "s/^$k=//p" "$STATE" 2>/dev/null | head -1); [ -z "$v" ] && v=0
+  v=$((v+1))
+  if grep -q "^$k=" "$STATE" 2>/dev/null; then
+    sed -i "s/^$k=.*/$k=$v/" "$STATE" 2>/dev/null
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$STATE" 2>/dev/null
+  fi
+}
+
+interfaces(){
+  iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep '^wlan' | sort -u
+}
+
+# 一个接口的 station 列表：MAC|RSSI（无 RSSI 输出 '-'）
+stations(){
+  ifn=$1
+  dump=$(iw dev "$ifn" station dump 2>/dev/null)
+  if [ -z "$(printf '%s\n' "$dump" | grep '^Station ')" ] && command -v iwinfo >/dev/null 2>&1; then
+    dump=$(iwinfo "$ifn" assoclist 2>/dev/null | \
+           awk '/^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{print "Station " $1; print "\tsignal: " $2}')
+  fi
+  printf '%s\n' "$dump" | awk '
+    /^Station /{if(mac!="")printf "%s|%s\n",mac,sig; mac=$2; sig="-"; next}
+    /signal:/{sig=$2}
+    END{if(mac!="")printf "%s|%s\n",mac,sig}
+  '
+}
+
+hits_get(){ sed -n "s/^$1|//p" "$HITS" 2>/dev/null | head -1; }
+hits_set(){
+  [ -f "$HITS" ] || : > "$HITS"
+  sed -i "/^$1|/d" "$HITS" 2>/dev/null
+  printf '%s|%s\n' "$1" "$2" >> "$HITS" 2>/dev/null
+}
+hits_del(){ sed -i "/^$1|/d" "$HITS" 2>/dev/null; }
+
+disconnect(){ # MAC IFACE
+  mac=$1; ifn=$2; ok=0
+  if command -v iw >/dev/null 2>&1; then
+    iw dev "$ifn" station del "$mac" >/dev/null 2>&1 && ok=1
+  fi
+  if [ "$ok" != 1 ] && command -v hostapd_cli >/dev/null 2>&1; then
+    hostapd_cli -i "$ifn" deauthenticate "$mac" >/dev/null 2>&1 && ok=1
+    [ "$ok" != 1 ] && hostapd_cli -i "$ifn" disassociate "$mac" >/dev/null 2>&1 && ok=1
+  fi
+  return $((1-ok))
+}
+
+mark(){ # MAC STATE RSSI IFACE
+  [ -f "$MARKS" ] || : > "$MARKS"
+  sed -i "/^$1|/d" "$MARKS" 2>/dev/null
+  printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >> "$MARKS" 2>/dev/null
+  # marks 只保留最近 60 条
+  tail -n 60 "$MARKS" 2>/dev/null > "$MARKS.tmp" && mv "$MARKS.tmp" "$MARKS" 2>/dev/null
+}
+
+scan_once(){
+  up=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+  [ "$up" -lt "$GRACE" ] 2>/dev/null && { echo "开机宽限 ${GRACE}s 内不动作"; return 0; }
+  n=0; nrej=0; nkick=0
+  : > "$MARKS.tmp" 2>/dev/null && mv "$MARKS.tmp" "$MARKS" 2>/dev/null
+  for ifn in $(interfaces); do
+    stations "$ifn" | while IFS='|' read -r mac rssi; do
+      [ -z "$mac" ] && continue
+      case "$rssi" in -[0-9]*|[0-9]*) ;; *) continue ;; esac
+      n=$((n+1))
+      # 数值比较：全部用负整数，避免浮点
+      if [ "$rssi" -lt "$KICK" ]; then
+        h=$(hits_get "$mac"); [ -z "$h" ] && h=0; h=$((h+1)); hits_set "$mac" "$h"
+        if [ "$h" -ge "$CONSEC" ]; then
+          if [ "$DRY" = '1' ]; then
+            logline "DRYRUN 剔除 $mac $rssi dBm $ifn（连续 $h 次 < $KICK）"
+          elif disconnect "$mac" "$ifn"; then
+            logline "剔除 $mac $rssi dBm $ifn（连续 $h 次 < $KICK）"
+            stat_inc kicked
+          else
+            logline "剔除失败 $mac $rssi dBm $ifn（驱动/命令不支持，请查 hostapd_cli）"
+          fi
+          mark "$mac" '已剔除' "$rssi" "$ifn"
+          hits_del "$mac"
+        else
+          mark "$mac" '待剔除' "$rssi" "$ifn"
+        fi
+      elif [ "$rssi" -lt "$REJECT" ]; then
+        # 比 -90 弱但还没到 -92：按「不让联」立即断链（1 次确认）
+        if [ "$DRY" = '1' ]; then
+          logline "DRYRUN 拒绝关联 $mac $rssi dBm $ifn（< $REJECT）"
+        elif disconnect "$mac" "$ifn"; then
+          logline "拒绝关联 $mac $rssi dBm $ifn（< $REJECT）"
+          stat_inc rejected
+        else
+          logline "拒绝关联失败 $mac $rssi dBm $ifn（驱动/命令不支持）"
+        fi
+        mark "$mac" '拒绝关联' "$rssi" "$ifn"
+        hits_del "$mac"
+      else
+        hits_del "$mac"
+        mark "$mac" '正常' "$rssi" "$ifn"
+      fi
+    done
+  done
+  # state 简易键值（供 CGI 只读）
+  printf 'last_scan=%s\nscanned=%s\nenabled=%s\nreject_dbm=%s\nkick_dbm=%s\ndryrun=%s\n' \
+         "$(now)" "$n" "$ENABLED" "$REJECT" "$KICK" "$DRY" > "$STATE.tmp" 2>/dev/null \
+    && mv "$STATE.tmp" "$STATE" 2>/dev/null
+  echo "扫描完成：终端 $n 个 / 拒绝 $nrej / 剔除 $nkick（阈值 $REJECT / $KICK，dryrun=$DRY）"
+}
+
+case "${1:-status}" in
+  status)
+    echo "弱信号剔除守护 · enabled=$ENABLED dryrun=$DRY"
+    echo "  拒绝关联 < ${REJECT} dBm   /   剔除 < ${KICK} dBm（连续 ${CONSEC} 次确认）"
+    echo "  扫描周期 ${INTERVAL}s  ·  开机宽限 ${GRACE}s"
+    [ -r "$STATE" ] && grep -E '^(last_scan|scanned|rejected|kicked)=' "$STATE" 2>/dev/null
+    echo "  最近动作："; tail -n 6 "$LOG" 2>/dev/null || echo '  （暂无）'
+    [ -r "$MARKS" ] && { echo "  当前标记："; sed 's/^/    /' "$MARKS" 2>/dev/null | tail -n 10; }
+    ;;
+  run)   ENABLED=1 scan_once ;;
+  loop)
+    [ "$ENABLED" = '1' ] || { echo "ap-rssi-guard 已停用（on 启用）"; exit 0; }
+    logline "守护启动：拒绝 < $REJECT / 剔除 < $KICK / 周期 ${INTERVAL}s"
+    while true; do scan_once >/dev/null 2>&1; sleep "$INTERVAL"; done
+    ;;
+  on)  uci -q set ap-rssi-guard.main.enabled='1'; uci -q commit ap-rssi-guard
+       /etc/init.d/ap-rssi-guard enable 2>/dev/null || true
+       /etc/init.d/ap-rssi-guard restart 2>/dev/null || true
+       echo "已启用（阈值 $REJECT / $KICK）" ;;
+  off) uci -q set ap-rssi-guard.main.enabled='0'; uci -q commit ap-rssi-guard
+       /etc/init.d/ap-rssi-guard stop 2>/dev/null || true
+       /etc/init.d/ap-rssi-guard disable 2>/dev/null || true
+       echo "已停用" ;;
+  dryrun)
+    case "${2:-}" in on|1) v=1 ;; off|0) v=0 ;; *) echo "用法: ap-rssi-guard dryrun on|off"; exit 1 ;; esac
+    uci -q set ap-rssi-guard.main.dryrun="$v"; uci -q commit ap-rssi-guard
+    /etc/init.d/ap-rssi-guard restart 2>/dev/null || true
+    echo "dryrun=$v（只记日志不真踢）" ;;
+  set)
+    k=${2:-}; v=${3:-}
+    case "$k" in reject|kick|interval|consecutive|grace) ;; *) echo "用法: ap-rssi-guard set reject|kick|interval|consecutive|grace <值>"; exit 1 ;; esac
+    case "$v" in -[0-9]*|[0-9]*) ;; *) echo "::error::值必须是整数（负数用 -90 这种写法）"; exit 1 ;; esac
+    case "$k" in reject) key=reject_dbm ;; kick) key=kick_dbm ;; grace) key=grace_sec ;; *) key=$k ;; esac
+    uci -q set "ap-rssi-guard.main.$key=$v"; uci -q commit ap-rssi-guard
+    /etc/init.d/ap-rssi-guard restart 2>/dev/null || true
+    echo "$key=$v（已生效）" ;;
+  *) echo "用法: ap-rssi-guard status|run|loop|on|off|dryrun on|off|set reject|kick|interval|consecutive|grace <值>"; exit 1 ;;
+esac
+exit 0

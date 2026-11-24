@@ -1,0 +1,68 @@
+#!/bin/sh
+# 99-bridge-status —— 网桥状态页首次开机兜底（2026-11-22 第 7 次更新 · 重建版适配）
+#
+# 本版界面已按那个 README 重写并直接编进 files/（不再依赖 bridge.zip）。
+# 原包自带的 99-bridge-status 只做一件事：chmod 755 /www/cgi-bin/bridge。
+# 本固件环境有 4 处不同，所以这里用适配版（导入脚本不会覆盖本文件）：
+#   ① zip 解压后执行位常丢 → 补 chmod 755 CGI + 目录
+#   ② uhttpd 的 cgi_prefix 若被改过，页面里 ../cgi-bin/bridge 会 404 → 兜底写回 /cgi-bin
+#   ③ 原 bridge.conf 写的是 switch0；本机实测：
+#        Found: switch0 - QCA MP
+#        Found: switch1 - QCA AR8337   ← 真正的 QCA8337 是 switch1
+#      自动把 switch0 改成 switch1，否则端口四宫格读不到 link/speed
+#   ④ 本固件已整体删除 firewall、network/wireless 是编译期写死的，
+#      这里绝不碰 /etc/config/network、wireless、firewall
+#
+# 幂等；跑完自删（uci-defaults 标准行为）。
+
+CGI=/www/cgi-bin/bridge
+CONF=/etc/bridge.conf
+PAGE=/www/bridge/index.html
+# 管理 IP 优先读编译期写死的 network.lan.ipaddr，回落 .241
+UCI_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+[ -z "$UCI_IP" ] && UCI_IP=192.168.1.241
+
+if [ ! -f "$CGI" ] || [ ! -f "$PAGE" ]; then
+    logger -t bridge-status '网桥状态页文件缺失，跳过（检查 files/ 是否随镜像打包）' 2>/dev/null || true
+    rm -f "$0"
+    exit 0
+fi
+
+# ① 执行位
+chmod 755 "$CGI" 2>/dev/null || true
+chmod 755 /www/bridge /www/cgi-bin 2>/dev/null || true
+# 【第 21 次校准】AP 专用控制台（仅 AP 版有这两个文件，wds 版 || true 无害）
+chmod 755 /www/cgi-bin/apstatus /www/ap /www/ap/index.html 2>/dev/null || true
+chmod 644 "$PAGE" "$CONF" 2>/dev/null || true
+
+# ② uhttpd cgi_prefix 兜底（README 五个坑之 2）
+# 【第 18 次校准】先确保 named section `config uhttpd 'main'` 存在：
+#   旧版直接 `uci set uhttpd.main.cgi_prefix=...`，若 main 段不存在（conffile 缺失 /
+#   首启配置目录不完整），UCI extended lookup 会造出【匿名 config uhttpd】，
+#   uhttpd init 读不到 named main → cgi_prefix 回落为空 → /cgi-bin/bridge 404/403。
+#   这和上一轮 LuCI dispatcher.lua:427 是同一个坑。编译期已打包标准
+#   files/etc/config/uhttpd，正常路径不会进这个分支；这里是双保险。
+if command -v uci >/dev/null 2>&1; then
+    uci -q get uhttpd.main >/dev/null 2>&1 \
+      || uci -q set uhttpd.main='uhttpd' 2>/dev/null || true
+    cur=$(uci -q get uhttpd.main.cgi_prefix 2>/dev/null)
+    if [ "$cur" != "/cgi-bin" ]; then
+        uci -q set uhttpd.main.cgi_prefix='/cgi-bin' 2>/dev/null || true
+        uci -q set uhttpd.main.home='/www' 2>/dev/null || true
+        uci commit uhttpd 2>/dev/null || true
+        logger -t bridge-status "uhttpd cgi_prefix 兜底为 /cgi-bin（原值 '${cur:-空}'）" 2>/dev/null || true
+    fi
+    # reload 在有匿名段残留时不彻底，统一 restart
+    /etc/init.d/uhttpd restart 2>/dev/null || true
+fi
+
+# ③ switch0 → switch1（README 五个坑之 3）
+if [ -f "$CONF" ] && grep -q 'switch0' "$CONF" 2>/dev/null; then
+    sed -i 's/switch0/switch1/g' "$CONF" 2>/dev/null || true
+    logger -t bridge-status 'bridge.conf: switch0 → switch1 (QCA AR8337)' 2>/dev/null || true
+fi
+
+# ④ 不碰 network / wireless / firewall —— 本固件 firewall 已不存在，纯二层 br-lan
+logger -t bridge-status "网桥状态页(重建版)就绪: http://${UCI_IP}/bridge/ · CGI /cgi-bin/bridge · LuCI 仍在 /cgi-bin/luci" 2>/dev/null || true
+rm -f "$0"
+exit 0

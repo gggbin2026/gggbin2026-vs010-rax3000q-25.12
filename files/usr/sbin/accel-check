@@ -1,0 +1,95 @@
+#!/bin/sh
+# accel-check —— 「无线/有线加速」状态自检（第 25 次校准）
+#
+# 纯只读：不 insmod、不 rmmod、不 uci set、不改 /etc、不新增任何编译包。
+# 串口直接跑可看人读报告；`accel-check --json` 输出状态页用的 JSON。
+#
+# ★ 先说清楚设计结论（别把它当成「把加速弄上去了」）：
+#   本固件是【纯二层 WDS / 哑 AP 桥】，无 WAN、无 NAT、不做三层转发。
+#   QSDK 的 NSS / ECM / SFE 主要 offload IPv4/IPv6 路由转发与 NAT，
+#   二层桥转发由交换芯片 + 内核 bridge 完成，这些规则用不上。
+#   qca-nss-ecm 编进依赖图只为 Kconfig 自洽（第 13 次校准），运行期不加载
+#   加速规则、不注册 ecm rule。要在 WDS/AP 上硬开 bridge fastpath，需要
+#   NSS 固件 + nss-drv + qca-nss-wifi/sfe 接管 wlan↔eth 流量，会掀翻编译
+#   依赖图且真机未验证 —— 本脚本不碰，只如实报告「有没有、能不能用」。
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+
+MODS=$(awk '{print $1}' /proc/modules 2>/dev/null | tr '\n' ' ')
+has() { case " $MODS " in *" $1 "*) return 0 ;; *) return 1 ;; esac }
+
+NSS_DRV=0; NSS_ECM=0; NSS_SFE=0; NSS_DP=0; QCA_WIFI=0; ATH11K=0; CNSS2=0
+has qca_nss_drv   && NSS_DRV=1
+has qca_nss_ecm   && NSS_ECM=1
+has qca_nss_sfe   && NSS_SFE=1
+has shortcut_fe   && NSS_SFE=1
+has qca_nss_dp    && NSS_DP=1
+has qca_wifi      && QCA_WIFI=1
+has ath11k        && ATH11K=1
+has cnss2         && CNSS2=1
+
+# 列出所有名字里带 nss/ecm/sfe/shortcut/qca-wifi 的模块
+ACC_MODS=$(printf '%s\n' $MODS | grep -iE 'nss|ecm|sfe|shortcut|qca.wifi' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+[ -z "$ACC_MODS" ] && ACC_MODS='（无）'
+
+# 内核日志里的 NSS 固件 / 规则注册
+DM=$(dmesg 2>/dev/null | grep -iE 'nss|ecm|sfe|shortcut|qca-nss|NSS firmware' \
+     | tail -n 5 | tr '\n' ' ' | cut -c1-320)
+[ -z "$DM" ] && DM='（无匹配日志）'
+
+# 运行期规则 / debugfs（21.02 通常没有，读到才算真启用）
+RULE_FILES=''
+for f in /sys/kernel/debug/qca-nss-drv/stats /sys/kernel/debug/ecm/ecm_nss_ipv4 \
+         /proc/sys/net/nss /sys/module/qca_nss_ecm/parameters/enable; do
+    [ -e "$f" ] && RULE_FILES="$RULE_FILES $f"
+done
+[ -z "$RULE_FILES" ] && RULE_FILES='（无）'
+
+if [ "$NSS_DRV" = '0' ] && [ "$NSS_ECM" = '0' ]; then
+    STATE='未启用'
+    HINT='未检测到 NSS/ECM 模块。纯二层桥本来就不走三层 offload，属预期；无线不注册请查 BDF/board_id，与加速无关。'
+elif [ "$NSS_ECM" = '1' ] && [ "$RULE_FILES" = '（无）' ]; then
+    STATE='模块在但未注册规则'
+    HINT='qca-nss-ecm 已编入（依赖自洽），但没有 ECM rule / debugfs 节点。纯二层桥不产生三层流，属预期。'
+else
+    STATE='已加载'
+    HINT='检测到 NSS 相关模块与规则节点；若跑的是路由/NAT 场景才可能生效，WDS/AP 桥仍按二层转发。'
+fi
+
+MODE=$(cat /etc/firmware_mode 2>/dev/null || echo 'wds')
+
+if [ "$1" = '--json' ]; then
+    printf '{"nss_drv":%d,"nss_ecm":%d,"nss_sfe":%d,"nss_dp":%d,"qca_wifi":%d,"ath11k":%d,"cnss2":%d,"state":"%s","mode":"%s"}\n' \
+      "$NSS_DRV" "$NSS_ECM" "$NSS_SFE" "$NSS_DP" "$QCA_WIFI" "$ATH11K" "$CNSS2" "$STATE" "$MODE"
+    exit 0
+fi
+
+cat <<EOF
+═══ 无线/有线加速状态自检 · accel-check ═══
+固件模式        : $MODE（wds=纯二层 WDS 桥 / ap=哑 AP）
+状态            : $STATE
+
+模块检测
+  qca_nss_drv   : $NSS_DRV
+  qca_nss_ecm   : $NSS_ECM
+  qca_nss_sfe   : $NSS_SFE  (含 shortcut_fe)
+  qca_nss_dp    : $NSS_DP
+  qca_wifi      : $QCA_WIFI   ath11k: $ATH11K   cnss2: $CNSS2
+  名称匹配模块  : $ACC_MODS
+
+规则 / debugfs 节点
+  $RULE_FILES
+
+dmesg 摘要
+  $DM
+
+结论
+  $HINT
+
+⚠ 本固件无 WAN / 无 NAT / 不做三层转发，NSS·ECM·SFE 的 IPv4/IPv6 offload
+  用不上；硬开 bridge fastpath 需要 NSS 固件 + qca-nss-wifi 接管 wlan↔eth，
+  会掀翻编译依赖图且真机未验证 —— 本脚本只报告，不启用、不改配置。
+  想看完整依赖链：串口跑  wifi-bdf-check  （BDF / 校准 / 功率）
+EOF
+exit 0

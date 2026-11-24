@@ -1,0 +1,163 @@
+#!/bin/sh /etc/rc.common
+# bridge-netfix —— 每次开机综合兜底（编译期文件，第 18 次校准）
+# 由 99-bridge-ready 首启 enable；之后每次冷启都跑一遍。
+#
+# 实机一串同源故障：配置写对了但服务链没跑完 →
+#   · netifd 没起        → br-lan 建不出来、要手工 nic-guard
+#   · netifd 没起        → /sbin/wifi up 无效 → wlan1 未注册、5G WDS 未关联
+#   · uhttpd cgi_prefix  → /bridge/ 静态页能开，/cgi-bin/bridge 两条路径都 404/403
+#   · LuCI /etc/config/luci 被 UCI 写成匿名段 → dispatcher.lua:427（已单独修）
+# 这里把四层一次性兜住，不依赖 uci-defaults（它只在首次开机跑且会自删）。
+START=21
+STOP=10
+
+logfix() { logger -t bridge-netfix "$*" 2>/dev/null || true; }
+
+start() {
+    # 【第 19 次校准】管理地址从 UCI 读，WDS 版 = .241、AP 版 = .240，
+    # 两种模式共用本文件，不再各写一份。读不到才回落 WDS 默认。
+    IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+    [ -z "$IP" ] && IP=192.168.1.241
+    # ── ① 网络服务链：netifd 是 br-lan 与 wifi up 的共同前提 ──────────
+    [ -x /etc/init.d/network ] && {
+        /etc/init.d/network enable  2>/dev/null || true
+        /etc/init.d/network restart 2>/dev/null || true
+    }
+    sleep 3
+
+    # ── ② 纯手工把桥和管理地址兜住（netifd 仍没起来也不影响管理页）──
+    if ! ip link show br-lan >/dev/null 2>&1; then
+        ip link add name br-lan type bridge 2>/dev/null \
+          || brctl addbr br-lan 2>/dev/null || true
+    fi
+    for e in eth0 eth1; do
+        [ -d "/sys/class/net/$e" ] || continue
+        ip link set "$e" up 2>/dev/null || true
+        ip link set "$e" master br-lan 2>/dev/null \
+          || brctl addif br-lan "$e" 2>/dev/null || true
+    done
+    ip link set br-lan up 2>/dev/null || true
+    ip addr show br-lan 2>/dev/null | grep -qF "$IP" \
+      || ip addr add "$IP/24" dev br-lan 2>/dev/null || true
+    # 【第 21 次校准】AP 模式：本机 DHCP 关，上级网段可能不是 192.168.1.0/24。
+    # 额外挂一个链路本地别名 169.254.240.1/16 —— PC 设 169.254.240.2/16
+    # 就能直连管理页，任何上级网段都不会冲突，也不需要 DHCP。
+    # 只对 ap 生效；WDS 版完全不动（用 /etc/firmware_mode 判定）。
+    if [ "$(cat /etc/firmware_mode 2>/dev/null)" = 'ap' ]; then
+        ip addr show br-lan 2>/dev/null | grep -q '169\.254\.240\.1' \
+          || ip addr add 169.254.240.1/16 dev br-lan 2>/dev/null || true
+        logfix "AP 调试别名 169.254.240.1/16 已挂载（无 DHCP 也能连）"
+    fi
+    logfix "br-lan / eth0+eth1 / $IP 已兜底"
+
+    # ── ②b 【第 22 次校准】LuCI 配置：每次开机校验 + 重建 ──────────
+    # dispatcher.lua:427 "/etc/config/luci seems to be corrupt, unable to find
+    # section 'main'" 的根因：/etc/config/luci 是 conffile，sysupgrade 保留配置
+    # 会用旧 overlay 里的坏文件盖掉编译期 files/etc/config/luci；而重建逻辑
+    # 原先只在 uci-defaults（首启跑一次、跑完自删），保留配置升级时根本不执行。
+    # 这里每次冷启都调用独立脚本 luci-fix（串口也能手动跑），不再赌首启。
+    if [ -x /usr/sbin/luci-fix ]; then
+        /usr/sbin/luci-fix >/dev/null 2>&1 || true
+    else
+        # 兜底：脚本没进 rootfs 时至少把 named main 段补上
+        grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+'main'" /etc/config/luci 2>/dev/null || {
+            rm -f /etc/config/luci /etc/config/luci.opkg 2>/dev/null || true
+            cat > /etc/config/luci <<'EOF'
+config core 'main'
+	option lang 'zh_cn'
+	option mediaurlbase '/luci-static/bootstrap'
+	option resourcebase '/luci-static/resources'
+EOF
+            logfix "luci-fix 缺失，已就地补建 /etc/config/luci"
+        }
+    fi
+
+    # ── ③ uhttpd CGI：确保 config uhttpd 'main' 与 cgi_prefix 都在 ────
+    # 关键：先判断 named section，缺失时【显式 uci set uhttpd.main='uhttpd'】
+    # 重建，不能直接 set uhttpd.main.cgi_prefix（否则造匿名段，和 LuCI 427 同坑）。
+    if command -v uci >/dev/null 2>&1; then
+        uci -q get uhttpd.main >/dev/null 2>&1 \
+          || uci -q set uhttpd.main='uhttpd' 2>/dev/null || true
+        cur=$(uci -q get uhttpd.main.cgi_prefix 2>/dev/null)
+        if [ "$cur" != "/cgi-bin" ]; then
+            uci -q set uhttpd.main.cgi_prefix='/cgi-bin' 2>/dev/null || true
+            uci -q set uhttpd.main.home='/www' 2>/dev/null || true
+            uci commit uhttpd 2>/dev/null || true
+            logfix "uhttpd cgi_prefix 兜底为 /cgi-bin（原值 '${cur:-空}'）"
+        fi
+    fi
+    chmod 755 /www/cgi-bin/bridge /www/cgi-bin /www/bridge 2>/dev/null || true
+    # AP 专用控制台的执行位（WDS 版没有这两个文件，|| true 无害）
+    chmod 755 /www/cgi-bin/apstatus /www/ap 2>/dev/null || true
+    [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd restart 2>/dev/null || true
+    logfix "uhttpd 已重启，CGI /cgi-bin/bridge 与 LuCI /cgi-bin/luci 就绪"
+
+    # ── ③a 【第 30 次】SSH / dropbear：每次冷启都显式 enable + restart ──
+    # 实机「SSH 连不上」：包在、但服务没被 enable，或 /etc/config/dropbear
+    # 缺 named section → config_load 取不到实例 → 进程不启动。
+    if [ -x /etc/init.d/dropbear ]; then
+        # 配置文件被旧 overlay 写坏时也补一次（与 luci-fix 同一思路）
+        grep -qE "^[[:space:]]*config[[:space:]]+dropbear[[:space:]]+" /etc/config/dropbear 2>/dev/null || {
+            mkdir -p /etc/config 2>/dev/null || true
+            cat > /etc/config/dropbear <<'EOF'
+config dropbear 'main'
+	option enable '1'
+	option PasswordAuth 'on'
+	option RootPasswordAuth 'on'
+	option RootLogin '1'
+	option Port '22'
+	option Interface 'lan'
+EOF
+            logfix "/etc/config/dropbear 缺 named section，已就地重建"
+        }
+        /etc/init.d/dropbear enable  2>/dev/null || true
+        /etc/init.d/dropbear restart 2>/dev/null || true
+        logfix "SSH(dropbear) 已 enable + restart：22/tcp · root / admin"
+    fi
+    # ── ③b 【第 24 次校准】把状态页入口注入 LuCI ARGON 主题 ──────────
+    # 不新增任何 luci-app-* 包、不改主题包源码、不碰 .config；只由本脚本
+    # 往已安装的 footer 模板插一个带标记的纯 HTML 块，开机幂等重跑。
+    chmod 755 /usr/sbin/luci-entry /www/cgi-bin/bridge /www/cgi-bin/apstatus 2>/dev/null || true
+    if [ -x /usr/sbin/luci-entry ]; then
+        /usr/sbin/luci-entry >/dev/null 2>&1 || true
+    else
+        logfix "luci-entry 缺失，LuCI 主题入口跳过（状态页仍可直接访问）"
+    fi
+
+    # ── ④ 无线：模块 → netifd → wifi up（带重试，后台不阻塞 rcS）──────
+    # ath11k 双射频校准 60~180 秒，且 wifi up 依赖 netifd 的 network.wireless，
+    # 首启那一句一次性 `( sleep 3; wifi up ) &` 在 netifd 未起时静默失败、
+    # 永不重试 —— 这就是实机「wlan1 未注册 / 5G WDS 未关联」的直接原因。
+    (
+        PHY=$(ls /sys/class/ieee80211 2>/dev/null | head -1)
+        if [ -z "$PHY" ]; then
+            logfix "无 ieee80211 phy，尝试加载 ath11k 模块"
+            kmodloader /etc/modules.d 2>/dev/null || true
+            modprobe cfg80211   2>/dev/null || true
+            modprobe mac80211   2>/dev/null || true
+            modprobe ath11k     2>/dev/null || true
+            modprobe ath11k_ahb 2>/dev/null || true
+            [ -x /usr/sbin/rfkill ] && rfkill unblock all 2>/dev/null || true
+            sleep 5
+        fi
+        # 【第 30 次】实机 dmesg 显示 phy0/phy1 都已注册（ath11k probe 成功），
+        # 但 wlan* 没起来 / SSID 搜不到 —— 多半是 wifi-iface 被设回 disabled=1，
+        # 或 wifi up 在 ath11k 双射频校准（60~180s）完成前就跑完了。
+        # 这里每次重试前都显式解禁 device + iface 并 commit，再 up。
+        for k in 1 2 3 4 5 6; do
+            if command -v uci >/dev/null 2>&1 && [ -s /etc/config/wireless ]; then
+                for sec in $(uci -q show wireless 2>/dev/null | sed -n 's/^wireless\.\([^.=]*\)=.*/\1/p'); do
+                    case "$sec" in radio*|default_*) uci -q set "wireless.$sec.disabled=0" 2>/dev/null || true ;; esac
+                done
+                uci -q commit wireless 2>/dev/null || true
+            fi
+            /sbin/wifi up 2>/dev/null || wifi up 2>/dev/null || true
+            if ls /sys/class/net 2>/dev/null | grep -q '^wlan'; then
+                logfix "wifi up 第 ${k} 次成功，无线接口已注册（iface 已解禁）"
+                break
+            fi
+            logfix "wifi up 第 ${k} 次未注册 wlan*，20 秒后重试"
+            sleep 20
+        done
+    ) >/dev/null 2>&1 &
+}

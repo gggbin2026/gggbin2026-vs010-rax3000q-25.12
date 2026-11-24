@@ -1,0 +1,11 @@
+# WDS 无线看门狗（机器狗）默认配置 —— 2026-11-22 第 5 次更新
+# 改完不用重编：uci commit wdsdog && /etc/init.d/bridge-watchdog restart
+# 或者直接：bridge-watchdog set-delay 10
+config wdsdog 'main'
+	option enabled '1'       # 1=开机自启；0=完全停用（刷机/TTL 调试时先 off）
+	option delay '5'         # ★ 连续「无线不通」多少分钟才重启，可自定义（0~120，单位分钟）
+	option grace '6'         # ★ 开机宽限 6 分钟：等 ath11k 校准 + bridge-role 自动收敛，期间不计失败
+	option interval '30'     # 每多少秒检查一次
+	option iface 'auto'      # 只盯 WDS 那个 5G 接口；auto=自动挑 wlan1，也可手填 wlan0/wlan1
+	option peer ''           # 可选：对端管理 IP。填了就以 ping 对端为准（最贴近「桥通不通」）
+	option dryrun '0'        # 1=只写日志不真重启，先跑一两天确认不会误重启再设回 0

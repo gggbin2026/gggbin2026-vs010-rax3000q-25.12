@@ -1,0 +1,14 @@
+config system
+	option hostname 'WDS-Bridge'
+	option timezone 'CST-8'
+	option zonename 'Asia/Shanghai'
+	option log_size '64'
+	option ttylogin '0'
+	option urandom_seed '0'
+
+config timeserver 'ntp'
+	option enabled '1'
+	option enable_server '0'
+	list server 'ntp.aliyun.com'
+	list server 'time1.cloud.tencent.com'
+	list server 'cn.pool.ntp.org'
