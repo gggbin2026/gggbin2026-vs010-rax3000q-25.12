@@ -1,0 +1,9 @@
+#!/bin/sh /etc/rc.common
+# 第 44 次 · 每次开机跑一次网口/服务链自愈（等 ssdk / cnss2 probe 完）
+# 后台 sleep 12，不阻塞 rcS；由 oem54-firstboot 自动 enable。
+START=99
+STOP=10
+start() {
+    ( sleep 12; /usr/sbin/qsdk-nic-guard >/dev/null 2>&1 ) &
+}
+stop() { :; }

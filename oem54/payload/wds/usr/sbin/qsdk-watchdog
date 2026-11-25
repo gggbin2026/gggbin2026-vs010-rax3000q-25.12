@@ -1,0 +1,191 @@
+#!/bin/sh
+# ───────────────────────────────────────────────────────────────────────
+# qsdk-watchdog · 第 53 次 · WDS 无线看门狗（官方 5.4.213 闭源栈适配）
+#
+#   只盯 5G WDS 链路：连续「不通」达到 delay 分钟就 sync + reboot -f。
+#   中间恢复立刻清零重新计时（连续，不是累计）。
+#   ★ 计时用 /proc/uptime 单调时钟：这板子没 RTC，NTP 一跳会误判。
+#
+#   ★ 第 53 次：恢复启用（enabled=1 / delay=5 / dryrun=0），三道防误重启：
+#       ① 开机宽限 grace 分钟内不判故障
+#       ② ★ ever_ok：从未成功关联过 = 单机/未配对/无线没起来 → 只记日志，绝不重启
+#       ③ 本机管理 IP 变化 → 重置计时 + 重新发现对端，不重启
+#     peer=auto 从 WDS 对端 MAC 反查 IP，自动排除本机地址（第 52 次所有
+#     设备统一 172.10.10.241，ping 自己会永远通）；查不到就退回关联判据。
+#
+#   qsdk-watchdog loop                 procd 调用
+#   qsdk-watchdog status              看当前状态 / 判据 / 对端
+#   qsdk-watchdog on|off              刷机 / TTL 调试前务必先 off
+#   qsdk-watchdog dryrun on|off       只记日志不真重启
+#   qsdk-watchdog set-delay N         ★ 自定义：连续不通 N 分钟才重启（0~120，默认 5）
+#   qsdk-watchdog set-interval N      每 N 秒检查一次（默认 30）
+#   qsdk-watchdog set-grace N         开机宽限 N 分钟（默认 6）
+#   qsdk-watchdog set-peer auto|IP|'' 自动发现 / 手工 ping / 只查关联
+#   qsdk-watchdog rebind              立刻重新发现对端
+# ───────────────────────────────────────────────────────────────────────
+. /usr/lib/oem54/qsdk-wifi.sh 2>/dev/null || true
+CONF=wdsdog
+STATE=/tmp/qsdk-watchdog.state
+LOG=/tmp/qsdk-watchdog.log
+say(){ echo "[watchdog] $*"; logger -t qsdk-watchdog "$*" 2>/dev/null || true; }
+
+_cfg(){ v=$(uci -q get "$CONF.main.$1" 2>/dev/null); [ -n "$v" ] && { echo "$v"; return; }; echo "$2"; }
+_local_ip_main(){ uci -q get network.lan.ipaddr 2>/dev/null; }
+_local_ips(){
+    ip -4 addr show 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2}'
+    _local_ip_main
+}
+# 从 5G WDS 接口拿对端 MAC（开源/闭源两套命令都试），再反查邻居表拿 IP
+_resolve_peer(){
+    [ -n "$IFACE" ] || return 0
+    mac=$(iw dev "$IFACE" station dump 2>/dev/null | awk '$1=="Station"{print $2; exit}')
+    [ -z "$mac" ] && mac=$(iw dev "$IFACE" link 2>/dev/null | awk '/Connected to/{print $3; exit}')
+    [ -z "$mac" ] && mac=$(wlanconfig "$IFACE" list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9a-fA-F:]+$/ && length($1)==17 {print $1; exit}')
+    [ -z "$mac" ] && return 0
+    for cand in $(ip -4 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}') \
+                $(awk -v m="$mac" 'tolower($4)==tolower(m){print $1}' /proc/net/arp 2>/dev/null); do
+        _local_ips 2>/dev/null | grep -qx "$cand" && continue
+        case "$cand" in *.*.*.*) echo "$cand"; return 0 ;; esac
+    done
+    return 0
+}
+_refresh_peer(){
+    case "$PEER_CFG" in
+      auto) PEER=$(_resolve_peer) ;;
+      '')   PEER='' ;;
+      *)    PEER="$PEER_CFG"
+            _local_ips 2>/dev/null | grep -qx "$PEER" && PEER='' ;;
+    esac
+}
+load(){
+    ENABLED=$(_cfg enabled 1)
+    DELAY=$(_cfg delay 5)
+    GRACE=$(_cfg grace 6)
+    INTERVAL=$(_cfg interval 30)
+    PEER_CFG=$(_cfg peer auto)
+    DRYRUN=$(_cfg dryrun 0)
+    IFACE=$(_cfg iface auto)
+    for k in DELAY GRACE INTERVAL; do
+        eval "v=\$$k"
+        case "$v" in ''|*[!0-9]*) eval "$k=5" ;; esac
+    done
+    [ "$INTERVAL" -lt 5 ] && INTERVAL=5
+    [ "$DELAY" -gt 120 ] && DELAY=120
+    [ "$IFACE" = auto ] && IFACE=$(qwifi_5g 2>/dev/null)
+    PEER=''
+    _refresh_peer
+}
+uptime_s(){ cut -d' ' -f1 /proc/uptime 2>/dev/null | cut -d. -f1; }
+
+link_ok(){
+    if [ -n "$PEER" ]; then
+        ping -q -c 1 -W 2 "$PEER" >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    [ -n "$IFACE" ] || return 1
+    qwifi_assoc "$IFACE" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+loop(){
+    load
+    [ "$ENABLED" = 1 ] || { say 'enabled=0，看门狗不启动'; exit 0; }
+    B=$(uptime_s); [ -n "$B" ] || B=0
+    GEND=$((B + GRACE*60))
+    BAD=0; BAD_SINCE=0; EVER_OK=0
+    LAST_LOCAL=$(_local_ip_main)
+    say "启动 enabled=1 delay=${DELAY}m grace=${GRACE}m interval=${INTERVAL}s peer_cfg=${PEER_CFG} peer=${PEER:-关联判据} iface=$IFACE dryrun=$DRYRUN"
+    while :; do
+        sleep "$INTERVAL"
+        NOW=$(uptime_s); [ -n "$NOW" ] || NOW=$((BAD+1))
+        # ★ 本机管理 IP 变化 → 重置计时 + 重新发现对端，绝不误重启
+        CUR_LOCAL=$(_local_ip_main)
+        if [ "$CUR_LOCAL" != "$LAST_LOCAL" ]; then
+            say "本机管理 IP 变化 ${LAST_LOCAL:-空} → ${CUR_LOCAL:-空}：重置计时并重新发现对端（不重启）"
+            LAST_LOCAL=$CUR_LOCAL
+            BAD=0; BAD_SINCE=0
+            _refresh_peer
+            printf 'ok=1 bad=0 uptime=%s\n' "$NOW" > "$STATE"
+            continue
+        fi
+        _refresh_peer
+        if [ "$NOW" -lt "$GEND" ]; then
+            echo "grace $(( (GEND-NOW)/60 ))m 剩余，未开始计时" >> "$LOG"
+            continue
+        fi
+        if link_ok; then
+            [ "$BAD" -gt 0 ] && say '链路恢复，失败计时清零'
+            EVER_OK=1
+            BAD=0; BAD_SINCE=0
+            printf 'ok=1 bad=0 uptime=%s\n' "$NOW" > "$STATE"
+            continue
+        fi
+        # ★ 从未成功关联过：单机 / 未配对 / 无线没起来 → 只记日志，绝不重启
+        if [ "$EVER_OK" != 1 ]; then
+            [ "$BAD_SINCE" -eq 0 ] && say 'WDS 从未成功关联（单机/未配对/无线未就绪）：只计日志，不重启'
+            printf 'ok=0 bad=0 ever_ok=0 uptime=%s\n' "$NOW" > "$STATE"
+            continue
+        fi
+        [ "$BAD_SINCE" -eq 0 ] && BAD_SINCE=$NOW
+        BAD=$((NOW - BAD_SINCE))
+        printf 'ok=0 bad=%s need=%s uptime=%s\n' "$BAD" "$((DELAY*60))" "$NOW" > "$STATE"
+        say "不通 ${BAD}s / 需要 $((DELAY*60))s（peer=${PEER:-关联判据}）"
+        if [ "$BAD" -ge "$((DELAY*60))" ]; then
+            if [ "$DRYRUN" = 1 ]; then
+                say 'DRYRUN：达到阈值，只记日志不重启'; BAD_SINCE=$NOW; BAD=0
+            else
+                say "连续不通达 ${DELAY} 分钟，执行 sync + reboot -f"
+                sync
+                reboot -f
+                exit 0
+            fi
+        fi
+    done
+}
+
+status(){
+    load
+    echo "========== WDS 机器狗 · QSDK 5.4.213 · 第 53 次 =========="
+    printf '  启用 / 演练    : %s / %s\n' "$ENABLED" "$DRYRUN"
+    printf '  重启延时      : %s 分钟  ★ set-delay N 自定义（0~120）\n' "$DELAY"
+    printf '  宽限 / 检查    : %s 分钟 / %s 秒\n' "$GRACE" "$INTERVAL"
+    printf '  对端配置      : %s\n' "$PEER_CFG"
+    printf '  对端实际      : %s\n' "${PEER:-（未解析到，退回关联判据）}"
+    printf '  判据          : %s\n' "$( [ -n "$PEER" ] && echo "ping $PEER" || echo "关联探测 $IFACE" )"
+    printf '  本机管理 IP   : %s\n' "$(_local_ip_main 2>/dev/null || echo '-')"
+    printf '  当前          : %s\n' "$(cat "$STATE" 2>/dev/null || echo '未运行')"
+    echo
+    echo '  ★ 不会误重启：宽限期 + 从未关联不重启 + IP 变化重置计时 + 连续计时'
+    echo '  改 IP 前先 off，改完 set-peer auto（或填对端新 IP）再 on'
+    echo '  刷机/调试前：qsdk-watchdog off'
+}
+_set(){ uci -q set "wdsdog.main.$1=$2" 2>/dev/null; uci commit wdsdog 2>/dev/null; /etc/init.d/qsdk-watchdog restart 2>/dev/null || true; }
+
+case "${1:-status}" in
+    loop) loop ;;
+    status) status ;;
+    on)   _set enabled 1; echo '已启用机器狗（连续不通达到延时会重启）' ;;
+    off)  _set enabled 0; echo '已停用（不会重启设备）'; /etc/init.d/qsdk-watchdog stop 2>/dev/null || true ;;
+    dryrun) case "${2:-}" in
+              on)  _set dryrun 1; echo 'DRYRUN 开：只记日志' ;;
+              off) _set dryrun 0; echo 'DRYRUN 关：会真重启' ;;
+              *) echo '用法: qsdk-watchdog dryrun on|off'; exit 1 ;; esac ;;
+    set-delay) d=${2:-}; case "$d" in ''|*[!0-9]*) echo '用法: qsdk-watchdog set-delay 0..120'; exit 1;; esac
+            [ "$d" -gt 120 ] && d=120
+            _set delay "$d"; echo "已设：连续不通 $d 分钟后重启（立即生效，不用重编）" ;;
+    set-interval) n=${2:-}; case "$n" in ''|*[!0-9]*) echo '用法: qsdk-watchdog set-interval 秒数(≥5)'; exit 1;; esac
+            [ "$n" -lt 5 ] && n=5
+            _set interval "$n"; echo "已设：每 $n 秒检查一次" ;;
+    set-grace) n=${2:-}; case "$n" in ''|*[!0-9]*) echo '用法: qsdk-watchdog set-grace 分钟'; exit 1;; esac
+            _set grace "$n"; echo "已设：开机宽限 $n 分钟" ;;
+    set-peer) v=${2:-auto}
+            _set peer "$v"; load
+            [ "$v" = auto ] && echo "已设：自动发现对端 → ${PEER:-（未解析到，退回关联判据）}" \
+                            || echo "已设 peer='$v'（若是本机地址会被自动忽略）" ;;
+    rebind) load
+            echo "peer 配置 = $PEER_CFG"
+            echo "解析结果 = ${PEER:-（未解析到，退回关联判据）}"
+            echo "本机管理 IP = $(_local_ip_main 2>/dev/null || echo '-')" ;;
+    *) echo '用法: qsdk-watchdog loop|status|on|off|dryrun on|off|set-delay N|set-interval N|set-grace N|set-peer auto|IP|rebind'; exit 1 ;;
+esac
+exit 0

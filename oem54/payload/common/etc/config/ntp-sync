@@ -1,0 +1,8 @@
+# 第 53 次 · NTP 客户端固定间隔同步配置
+# sysntpd 常驻负责平滑校时，本服务每 interval 秒强制同步一次。
+# 自定义：ntp-sync set-interval N（秒，最小 60）；改完立即生效，不用重编。
+# 服务器读自 system.ntp.server（第 51 次：192.168.1.254 / 172.10.10.254）。
+config ntp-sync 'main'
+	option enabled '1'
+	option interval '300'    # ★ 5 分钟同步一次
+	option timeout '25'      # 单次同步超时保护，服务器不可达不挂死

@@ -1,0 +1,29 @@
+#!/bin/sh
+# qsdk-bridge-dhcp · 第 44 次 · 管本机 dnsmasq 开关与租期（纯 UCI 增量）
+#   qsdk-bridge-dhcp on | off | lease 30m|1h|2h | status
+# 只改 dhcp.lan 的几个 option，绝不重建 dhcp 配置、不动官方其它段。
+case "${1:-status}" in
+  on)
+      uci -q set dhcp.lan.ignore='0'
+      uci -q set dhcp.lan.start='100'
+      uci -q set dhcp.lan.limit='100'
+      uci -q get dhcp.lan.leasetime >/dev/null 2>&1 || uci -q set dhcp.lan.leasetime='1h'
+      echo "  DHCP 已开（租期 $(uci -q get dhcp.lan.leasetime)）" ;;
+  off)
+      uci -q set dhcp.lan.ignore='1'
+      echo "  DHCP 已关（纯透传，由上级分配）" ;;
+  lease)
+      t="${2:-}"
+      [ -n "$t" ] || { echo "用法: qsdk-bridge-dhcp lease 30m|1h|2h|12h"; exit 1; }
+      uci -q set dhcp.lan.leasetime="$t"
+      echo "  租期已改 $t" ;;
+  status)
+      echo "  ignore    : $(uci -q get dhcp.lan.ignore 2>/dev/null || echo 0)"
+      echo "  租期      : $(uci -q get dhcp.lan.leasetime 2>/dev/null || echo 未设)"
+      echo "  地址池    : $(uci -q get dhcp.lan.start 2>/dev/null)~+$(( $(uci -q get dhcp.lan.limit 2>/dev/null || echo 100) - 1 ))"
+      exit 0 ;;
+  *) echo "用法: qsdk-bridge-dhcp on|off|lease <time>|status"; exit 1 ;;
+esac
+uci commit dhcp
+[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart 2>/dev/null || true
+exit 0

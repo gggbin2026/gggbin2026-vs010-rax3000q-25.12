@@ -1,0 +1,102 @@
+#!/bin/sh
+# ───────────────────────────────────────────────────────────────────────
+# qsdk-link-rate · 第 45 次 · 网口速率自检（官方 5.4.213 闭源 NSS 栈）
+#
+#   qsdk-link-rate              人读表：链路 / 驱动上报 / 实测吞吐 / 结论
+#   qsdk-link-rate --json       JSON，供脚本与 CGI 同源核对
+#
+# 背景：官方闭源 qca-nss-dp 的 netdev->phydev 为 NULL，
+#   .get_link_ksettings 直连 phy_ethtool_get_link_ksettings 返回 -ENODEV，
+#   /sys/class/net/ethX/speed 常报 -1 或 10M/Half，LuCI 显示「10M 半双工」。
+#   实际是固定链路 1000M Full、NSS 满速转发，显示错不影响数据面。
+#   本仓自编译版用编译期补丁修；融合固件 kernel FIT 逐字节原样（保住满血
+#   无线/NSS 的前提），闭源 .ko 无源码可打补丁 —— 所以这里只做【如实判定】，
+#   不修改内核、不修改驱动、不 ethtool -s 硬改。
+# ───────────────────────────────────────────────────────────────────────
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+JSON=0; [ "${1:-}" = '--json' ] && JSON=1
+
+STACK=closed
+case "$(uname -r 2>/dev/null)" in *5.4.213*) ;; *) STACK=unknown ;; esac
+num(){ v=$(printf '%s' "${1:-}" | tr -cd '0-9'); [ -n "$v" ] || v=0; echo "$v"; }
+rd(){ [ -r "$1" ] && head -n 1 "$1" 2>/dev/null || echo ''; }
+
+# 第 47 次：netdev 不上报时，改读交换芯片 PHY 的真实协商速率（真值，不写死）
+PHY_SPEED=''; PHY_DUPLEX=''; PHY_SRC=''
+phy_probe(){
+  SW=$(command -v swconfig 2>/dev/null); [ -z "$SW" ] && SW=/sbin/swconfig
+  [ -x "$SW" ] || return 0
+  DEVS=$("$SW" list 2>/dev/null | sed -n 's/.*Found:[[:space:]]*\([^[:space:],]*\).*/\1/p' | tr '\n' ' ')
+  for d in $DEVS; do
+    [ -n "$d" ] || continue
+    O=$("$SW" dev "$d" show 2>/dev/null) || continue
+    S=$(printf '%s\n' "$O" | grep -oE 'speed:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -n 1)
+    U=$(printf '%s\n' "$O" | grep -oE 'duplex:[[:space:]]*(full|half)' | head -n 1 | sed 's/.*://;s/[[:space:]]//g')
+    case "$S" in ''|*[!0-9]*) continue ;; esac
+    [ "$S" -gt 0 ] 2>/dev/null || continue
+    PHY_SPEED=$S; PHY_DUPLEX=${U:-full}; PHY_SRC="交换芯片 PHY 实测（$d / swconfig）"
+    return 0
+  done
+  return 0
+}
+[ "$STACK" = closed ] && phy_probe
+
+IFACES=$(ls /sys/class/net 2>/dev/null | grep -E '^(eth|br-)' | sort)
+[ -z "$IFACES" ] && IFACES='eth0 eth1'
+
+# 采样两次，间隔 1 秒，得实测吞吐（手动工具，sleep 无妨）
+snap(){ for i in $IFACES; do
+  printf '%s %s %s\n' "$i" "$(num "$(rd /sys/class/net/$i/statistics/tx_bytes)")" "$(num "$(rd /sys/class/net/$i/statistics/rx_bytes)")"
+done; }
+A=$(snap); sleep 1; B=$(snap)
+
+OUT=''
+for i in $IFACES; do
+  d=/sys/class/net/$i
+  oper=$(rd "$d/operstate"); car=$(rd "$d/carrier")
+  [ "$oper" = up ] || [ "$car" = 1 ] && link=up || link=down
+  sp=$(rd "$d/speed"); du=$(rd "$d/duplex")
+  case "$sp" in ''|*[!0-9]*|'-1'|'0') sp='-' ;; esac
+  [ -z "$du" ] && du='-'
+  a=$(echo "$A" | awk -v x="$i" '$1==x{print $2" "$3}')
+  b=$(echo "$B" | awk -v x="$i" '$1==x{print $2" "$3}')
+  rate=$(echo "$a $b" | awk '{v=(($3-$1)+($4-$2))*8/1000000; if(v<0)v=0; printf "%.2f",v}')
+  trusted=1; note=''; src='netdev'
+  if [ "$STACK" = closed ] && [ "$link" = up ] && \
+     { [ "$sp" = '-' ] || { [ "$sp" -le 10 ] 2>/dev/null && [ "$du" = half ]; }; }; then
+      if [ -n "$PHY_SPEED" ]; then
+          sp="$PHY_SPEED"; du="$PHY_DUPLEX"; src='phy'
+          note="$PHY_SRC（netdev ethtool 不上报）"
+      else
+          trusted=0
+          note='NSS 固定链路：驱动不上报协商速率（旧显示 10M/Half 是误报），实际链路正常'
+          sp='-'; du='未上报'
+      fi
+  fi
+  [ "$trusted" = 1 ] && [ "$src" != phy ] && note='协商速率上报正常'
+  if [ "$JSON" = 1 ]; then
+    [ -n "$OUT" ] && OUT="$OUT,"
+    OUT="$OUT{\"iface\":\"$i\",\"link\":\"$link\",\"speed\":\"$sp\",\"duplex\":\"$du\",\"rate_mbps\":\"$rate\",\"trusted\":$trusted,\"speed_src\":\"$src\",\"note\":\"$note\"}"
+  else
+    printf '  %-8s 链路=%-4s 上报=%-6s %-6s 实测吞吐=%8s Mbps  %s\n' \
+      "$i" "$link" "$sp" "$du" "$rate" "$note"
+  fi
+done
+
+if [ "$JSON" = 1 ]; then
+  printf '{"ok":1,"kernel":"%s","stack":"%s","ports":[%s],"note":"实测吞吐为 1 秒采样，非协商速率；闭源 NSS 固定链路不上报速率，显示错不影响数据面"}\n' \
+    "$(uname -r)" "$STACK" "$OUT"
+else
+  echo
+  echo '  ─────────────────────────────────────────────────────────────'
+  echo '  结论：netdev 的 ethtool 显示错是【上报层】问题，不是链路故障。'
+  if [ -n "$PHY_SPEED" ]; then
+    echo "  已从交换芯片 PHY 读到真实协商速率 ${PHY_SPEED} Mbps / ${PHY_DUPLEX}，页面显示正常。"
+  else
+    echo '  交换芯片 PHY 也未读到，页面显示「未上报 + 实测吞吐」，不用 10M/半双工误导。'
+  fi
+  echo '  要连 `ethtool ethX` 命令本身都显示 1000M，需改闭源 qca-nss-dp 驱动或'
+  echo '  给 FIT 内 dtb 补 fixed-link（实验工具 patch-fdt-fixed-link.py，未实机验证）。'
+  echo '  本仓自编译版（5.4.164）走编译期源码补丁 inject-ethtool-patch.sh，那边本来就正常。'
+fi
+exit 0

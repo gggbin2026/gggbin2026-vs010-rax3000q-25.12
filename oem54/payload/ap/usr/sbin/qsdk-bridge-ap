@@ -1,0 +1,81 @@
+#!/bin/sh
+
+# 【第 53 次】改管理 IP → 提示同步机器狗 peer，并把旧 peer 迁到 auto，避免误重启
+_wd_ip_changed(){
+    NEW=${1:-$(uci -q get network.lan.ipaddr 2>/dev/null)}
+    P=$(uci -q get wdsdog.main.peer 2>/dev/null)
+    say "⚠ 管理 IP 已改为 $NEW：机器狗循环会自动重置连续计时并重新发现对端，不会误重启"
+    say "  若要互相 ping：qsdk-watchdog set-peer <对端新IP>；或用 set-peer auto 自动发现"
+    say "  改 IP 前建议先 qsdk-watchdog off，改完再 on"
+    if [ -n "$P" ] && [ "$P" != auto ]; then
+        uci -q set wdsdog.main.peer='auto' 2>/dev/null
+        uci -q commit wdsdog 2>/dev/null
+        say "  ✓ 旧 peer '$P' 已自动改为 auto"
+    fi
+}
+# ───────────────────────────────────────────────────────────────────────
+# qsdk-bridge-ap · 第 44 次 · AP 模式现场配置工具（官方 5.4.213 栈）
+#
+#   出厂「哑 AP」：官方 network 原样保留（lan 从上级 DHCP 拿地址），
+#   本机 dnsmasq 关，终端地址由上级路由分配。
+#   上级不是 172.10.8.0/22 网段时，用本工具切静态 / 改 DHCP 客户端。
+#
+#   qsdk-bridge-ap status
+#   qsdk-bridge-ap static 172.10.10.241 255.255.252.0 [网关] [DNS]
+#   qsdk-bridge-ap dhcp                 改回 DHCP 客户端
+#   qsdk-bridge-ap lan-dhcp on|off      本机 DHCP 服务端开关
+#
+#   纯 UCI 增量，不碰无线 / 防火墙 / 机器狗。串口逐行敲，别整段粘贴。
+# ───────────────────────────────────────────────────────────────────────
+CONF=/etc/config/network
+_ip_ok(){
+    v=$1
+    case "$v" in ''|*[!0-9.]*) return 1 ;; esac
+    OLDIFS=$IFS; IFS=.; set -- $v; IFS=$OLDIFS
+    [ "$#" -eq 4 ] || return 1
+    for o in "$1" "$2" "$3" "$4"; do
+        case "$o" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$o" -le 255 ] 2>/dev/null || return 1
+    done
+    return 0
+}
+_apply(){
+    uci commit network
+    echo '  已提交，等 5 秒后 ip -4 addr show br-lan 查看实际地址（不重启 network，避免断链）'
+}
+status(){
+    echo '========== AP 模式 · 当前配置（官方 5.4.213）=========='
+    printf '  固件模式      : %s\n' "$(cat /etc/firmware_mode 2>/dev/null || echo '未知（应为 ap）')"
+    printf '  lan 协议      : %s\n' "$(uci -q get network.lan.proto 2>/dev/null || echo '-')"
+    printf '  静态管理地址  : %s\n' "$(uci -q get network.lan.ipaddr 2>/dev/null || echo '（无，DHCP 客户端）')"
+    printf '  本机 DHCP 端  : %s\n' "$(case "$(uci -q get dhcp.lan.ignore 2>/dev/null)" in 1) echo '已关（上级分配，哑 AP 默认）';; *) echo '开启';; esac)"
+    printf '  br-lan 实际地址: %s\n' "$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | tr '\n' ' ')"
+    echo
+    echo '  改地址：qsdk-bridge-ap static 172.10.10.241 255.255.252.0'
+    echo '  改回  ：qsdk-bridge-ap dhcp'
+}
+case "${1:-status}" in
+  status) status ;;
+  static)
+      IP=${2:-}; MASK=${3:-255.255.252.0}; GW=${4:-}; DNS=${5:-}
+      _ip_ok "$IP" || { echo "错误：IP 不合法：$IP"; exit 1; }
+      uci -q set network.lan.proto='static'
+      uci -q set network.lan.ipaddr="$IP"
+      _wd_ip_changed "$IP"
+      uci -q set network.lan.netmask="$MASK"
+      [ -n "$GW" ] && uci -q set network.lan.gateway="$GW"
+      [ -n "$DNS" ] && uci -q set network.lan.dns="$DNS"
+      echo "  静态地址已设 $IP/$MASK"; _apply ;;
+  dhcp)
+      uci -q set network.lan.proto='dhcp'
+      uci -q delete network.lan.ipaddr 2>/dev/null || true
+      uci -q delete network.lan.netmask 2>/dev/null || true
+      uci -q delete network.lan.gateway 2>/dev/null || true
+      echo '  lan 已改为 DHCP 客户端'; _apply ;;
+  lan-dhcp)
+      case "${2:-}" in on) uci -q set dhcp.lan.ignore='0';; off) uci -q set dhcp.lan.ignore='1';;
+        *) echo '用法: qsdk-bridge-ap lan-dhcp on|off'; exit 1;; esac
+      uci commit dhcp; echo "  本机 DHCP 已设 ${2}"; [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart 2>/dev/null || true ;;
+  *) echo '用法: qsdk-bridge-ap status|static <IP> <MASK> [GW] [DNS]|dhcp|lan-dhcp on|off'; exit 1 ;;
+esac
+exit 0

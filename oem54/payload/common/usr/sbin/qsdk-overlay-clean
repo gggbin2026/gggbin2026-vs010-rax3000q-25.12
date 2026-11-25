@@ -1,0 +1,87 @@
+#!/bin/sh
+# ───────────────────────────────────────────────────────────────────────
+# qsdk-overlay-clean · 第 45 次 · 解决「刷完没变动」
+#
+# 如果刷机时勾了「保留配置」，/overlay 里旧版页面与 CGI 会盖住新固件
+# squashfs 里的文件 —— 固件刷进去了，页面看起来却完全没变。
+#
+#   qsdk-overlay-clean            清理（先备份，只删白名单路径）
+#   qsdk-overlay-clean --dry-run  只列出会删什么，不动
+#   qsdk-overlay-clean --status   看 upperdir 与残留数量
+#
+# ⚠ 只处理【本仓定制】的页面/CGI/工具路径，绝不碰 network/wireless/dhcp/
+#   dropbear/uhttpd/luci 等配置，也不会删你自己的文件。
+# ───────────────────────────────────────────────────────────────────────
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+DRY=0; STATUS=0
+case "${1:-}" in --dry-run) DRY=1 ;; --status) STATUS=1 ;; esac
+
+# 找 overlayfs 的 upperdir（OpenWrt 21.02 / QSDK 常见写法）
+UP=$(mount 2>/dev/null | sed -n 's/.*upperdir=\([^,)]*\).*/\1/p' | head -1)
+[ -z "$UP" ] && [ -d /overlay/upper ] && UP=/overlay/upper
+[ -z "$UP" ] && [ -d /overlay ] && UP=/overlay
+say(){ echo "[overlay-clean] $*"; logger -t qsdk-overlay-clean "$*" 2>/dev/null || true; }
+
+if [ -z "$UP" ] || [ ! -d "$UP" ]; then
+  say '未检测到 overlay upperdir（可能没勾保留配置，或 rootfs_data 尚未建）'
+  say '那页面没变就是另一个原因：刷的不是新固件。请先看 cat /etc/firmware_build'
+  exit 0
+fi
+
+# 白名单：只清这些路径在 upperdir 的残留（相对 /）
+LIST='www/bridge/index.html
+www/ap/index.html
+www/cgi-bin/bridge
+www/cgi-bin/apstatus
+usr/sbin/qsdk-link-rate
+usr/sbin/qsdk-nic-guard
+usr/sbin/qsdk-bridge-dhcp
+usr/sbin/qsdk-bridge-role
+usr/sbin/qsdk-watchdog
+usr/sbin/qsdk-bridge-ap
+usr/sbin/qsdk-dhcp-guard
+usr/sbin/qsdk-rssi-guard
+usr/sbin/health-fix
+usr/sbin/wifi-stack-check
+usr/lib/oem54/qsdk-wifi.sh
+etc/init.d/qsdk-nic-guard
+etc/init.d/qsdk-bridge-role
+etc/init.d/qsdk-watchdog
+etc/init.d/qsdk-guard
+etc/config/qsdk-guard
+etc/config/wdsdog
+etc/config/ap-rssi-guard
+etc/firmware_build'
+
+HITS=0
+for f in $LIST; do
+  [ -e "$UP/$f" ] && { echo "  $f"; HITS=$((HITS+1)); }
+done
+
+if [ "$STATUS" = 1 ]; then
+  say "upperdir=$UP  残留定制文件：$HITS 个"
+  exit 0
+fi
+
+if [ "$HITS" -eq 0 ]; then
+  say "upperdir=$UP 里没有旧定制文件残留 —— 页面没变不是 overlay 造成的"
+  say '请核对：cat /etc/firmware_build 是否有 r45- 前缀；md5sum /www/cgi-bin/bridge'
+  exit 0
+fi
+
+if [ "$DRY" = 1 ]; then
+  echo '  ── 以上文件会被移走（dry-run，未改动）──'
+  exit 0
+fi
+
+BK=/etc/oem54-overlay-clean/$(date +%Y%m%d-%H%M%S 2>/dev/null || echo 1)
+mkdir -p "$BK"
+echo '  ── 移走以下旧残留 ──'
+for f in $LIST; do
+  [ -e "$UP/$f" ] || continue
+  mkdir -p "$BK/$(dirname "$f")"
+  mv "$UP/$f" "$BK/$f" 2>/dev/null && echo "  ✓ $f" || echo "  ✗ 移走失败 $f"
+done
+say "已备份到 $BK；重启后新固件的 squashfs 文件即生效"
+say '执行 reboot 重启（或 sync; reboot -f）'
+exit 0

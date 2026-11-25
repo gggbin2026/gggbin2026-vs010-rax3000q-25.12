@@ -1,0 +1,139 @@
+#!/bin/sh
+# ───────────────────────────────────────────────────────────────────────
+# ntp-sync · 第 54 次 · NTP 客户端【循环】同步（默认每 5 分钟 / 300 秒一轮）
+#
+#   ★★★ 用户第 54 次确认的语义：不是「开机同步一次」，也不是「只同步 N 次」，
+#        而是【开机后永不结束的循环】：同步 → 睡 300 秒 → 再同步 → 再睡 …
+#        直到 off / 关机。单轮失败照样进下一轮（不会退出循环）。
+#        开机由 procd 拉起 /usr/sbin/ntp-sync loop，意外退出会 respawn 拉回。
+#
+#   为什么单独做：OpenWrt 21.02 的 sysntpd 用 busybox ntpd 常驻模式，
+#   轮询间隔是【自适应 1~60 分钟】（官方 UCI schema 只有 server / enabled /
+#   enable_server / use_dhcp / dhcp_interface，没有 poll_interval / minpoll），
+#   没法固定成 5 分钟。这里保留 sysntpd 常驻负责平滑校时，另每 interval
+#   秒跑一次 `ntpd -q -n -p <server>` 做强制同步 —— 两者都是客户端、
+#   都不 bind UDP 123，不冲突；零新增包（busybox ntpd 本来就在）。
+#
+#   ★ 服务器从 uci system.ntp.server 动态读（第 51 次的两台内网服务器），
+#     改 NTP 地址不用改这里。
+#   ★ 用 timeout 兜底：服务器不可达时不会把循环挂死。
+#   ★ 日志简洁：成功静默（只写 /tmp/ntp-sync.state），失败限流一条 syslog。
+#
+#   ntp-sync once                    立刻同步一次
+#   ntp-sync status                  看间隔 / 服务器 / 上次结果
+#   ntp-sync set-interval N          ★ 自定义间隔秒数（默认 300，最小 60）
+#   ntp-sync on | off                启用 / 停用（改完立即生效，不用重编）
+#   ntp-sync loop                    procd 调用，别手敲
+# ───────────────────────────────────────────────────────────────────────
+CONF=ntp-sync
+STATE=/tmp/ntp-sync.state
+LOG=/tmp/ntp-sync.log
+LAST_WARN=/tmp/ntp-sync.lastwarn
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH
+
+_cfg(){ v=$(uci -q get "$CONF.main.$1" 2>/dev/null); [ -n "$v" ] && { echo "$v"; return; }; echo "$2"; }
+load(){
+    ENABLED=$(_cfg enabled 1)
+    INTERVAL=$(_cfg interval 300)
+    TIMEOUT=$(_cfg timeout 25)
+    case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=300 ;; esac
+    case "$TIMEOUT"  in ''|*[!0-9]*) TIMEOUT=25  ;; esac
+    [ "$INTERVAL" -lt 60 ] && INTERVAL=60
+    [ "$TIMEOUT"  -lt 5  ] && TIMEOUT=5
+}
+servers(){
+    uci -q get system.ntp.server 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9a-zA-Z.:_-]+$' | head -8
+}
+_warn(){
+    # 失败日志限流：30 分钟内最多一条 syslog，不刷屏
+    now=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    last=$(cat "$LAST_WARN" 2>/dev/null || echo 0)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $(( now - last )) -lt 1800 ] && return 0
+    echo "$now" > "$LAST_WARN"
+    logger -t ntp-sync "同步失败/超时（$1），下轮继续尝试；不影响另一台服务器" 2>/dev/null || true
+}
+sync_once(){
+    args=''
+    for s in $(servers); do args="$args -p $s"; done
+    [ -n "$args" ] || { _warn '未配置 NTP 服务器'; return 1; }
+    # busybox ntpd -q = 设好时钟就退出；-n = 前台。两个都不 bind 123，
+    # 与常驻 sysntpd 并存无冲突。
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT" ntpd -q -n $args >/dev/null 2>&1
+    else
+        ntpd -q -n $args >/dev/null 2>&1 & p=$!
+        i=0; while [ "$i" -lt "$TIMEOUT" ] && kill -0 "$p" 2>/dev/null; do sleep 1; i=$((i+1)); done
+        kill "$p" 2>/dev/null || true
+    fi
+    rc=$?
+    ROUND=${ROUND:-0}
+    TS=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    case "$TS" in ''|*[!0-9]*) TS=0 ;; esac
+    if [ "$rc" -eq 0 ]; then
+        printf 'ok=1 round=%s ts=%s time=%s servers=%s\n' "$ROUND" "$TS" \
+          "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$(servers | tr '\n' ',')" > "$STATE"
+    else
+        printf 'ok=0 round=%s ts=%s time=%s rc=%s\n' "$ROUND" "$TS" \
+          "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$rc" > "$STATE"
+        _warn "rc=$rc"
+    fi
+    # 自己的小日志只留最近 20 行，不写 syslog
+    printf '%s %s\n' "$(date '+%H:%M:%S' 2>/dev/null)" "$(cat "$STATE")" >> "$LOG" 2>/dev/null
+    n=$(wc -l < "$LOG" 2>/dev/null || echo 0); [ "$n" -gt 20 ] 2>/dev/null && tail -n 20 "$LOG" > "$LOG.t" && mv "$LOG.t" "$LOG"
+    return "$rc"
+}
+loop(){
+    load
+    [ "$ENABLED" = 1 ] || exit 0
+    ROUND=0
+    printf '%s 循环启动：每 %s 秒同步一次，永不结束（off 才停）\n' \
+      "$(date '+%H:%M:%S' 2>/dev/null)" "$INTERVAL" >> "$LOG" 2>/dev/null
+    while :; do
+        ROUND=$(( ROUND + 1 ))
+        # ★ 单轮失败也不退出：sync_once 内部的 _warn 只记一条限流日志，
+        #   返回非 0 后这里照样往下睡 interval 秒，进入第 ROUND+1 轮。
+        sync_once || true
+        sleep "$INTERVAL"
+    done
+}
+status(){
+    load
+    ST=$(cat "$STATE" 2>/dev/null || echo '尚未同步')
+    RD=$(printf '%s' "$ST" | sed -n 's/.*round=\([0-9]*\).*/\1/p')
+    TS=$(printf '%s' "$ST" | sed -n 's/.*ts=\([0-9]*\).*/\1/p')
+    case "$TS" in ''|*[!0-9]*) TS=0 ;; esac
+    NOW=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    LEFT=$(( INTERVAL - (NOW - TS) )); [ "$LEFT" -lt 0 ] && LEFT=0
+    echo '========== NTP 循环同步 · 第 54 次 =========='
+    echo "  启用        : $ENABLED"
+    echo "  ★ 模式      : 循环（同步 → 睡 $INTERVAL 秒 → 再同步 … 永不结束）"
+    echo "  同步间隔    : $INTERVAL 秒（★ set-interval N 自定义，默认 300 = 5 分钟）"
+    echo "  单次超时    : $TIMEOUT 秒（单轮失败自动进下一轮，不退出循环）"
+    echo "  NTP 服务器  : $(servers | tr '\n' ' ')"
+    echo "  sysntpd     : 常驻保留（平滑校时），两者都是客户端不冲突"
+    echo "  已完成轮次  : ${RD:-0}"
+    echo "  距下轮约    : ${LEFT} 秒"
+    echo "  上次结果    : $ST"
+    echo '  自定义：ntp-sync set-interval 600 ；停用：ntp-sync off'
+}
+_set(){ uci -q set "$CONF.main.$1=$2" 2>/dev/null; uci commit "$CONF" 2>/dev/null; /etc/init.d/ntp-sync restart >/dev/null 2>&1 || true; }
+# 只有被直接执行才做命令分发；被 source 时只暴露函数（便于自检 / 复用），
+# 也不会因为末尾的 exit 把调用方脚本一起退出（bridge-watchdog 同款保护）。
+case "$(basename "$0")" in
+  ntp-sync|ntp-sync.sh)
+case "${1:-status}" in
+    loop)   loop ;;
+    once)   load; sync_once; echo "同步完成：$(cat "$STATE" 2>/dev/null)" ;;
+    status) status ;;
+    set-interval)
+        n=${2:-}; case "$n" in ''|*[!0-9]*) echo '用法: ntp-sync set-interval 秒数（≥60）'; exit 1;; esac
+        [ "$n" -lt 60 ] && n=60
+        _set interval "$n"; echo "已设：每 $n 秒同步一次（立即生效，不用重编）" ;;
+    on)  _set enabled 1; echo '已启用 NTP 定时同步' ;;
+    off) _set enabled 0; echo '已停用 NTP 定时同步'; /etc/init.d/ntp-sync stop >/dev/null 2>&1 || true ;;
+    *)   echo '用法: ntp-sync once|status|set-interval N|on|off|loop'; exit 1 ;;
+esac
+exit 0
+    ;;
+esac
