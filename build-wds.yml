@@ -1,0 +1,317 @@
+name: Build WDS Bridge (新内核)
+
+# 双机型 · 新内核 · WDS 网桥。push 不触发，只在 Actions 手动 Run。
+# 基线与板级注入逻辑全部在 scripts/prepare.sh，本文件只管编排与发布。
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '机型：both=一次出两个'
+        required: true
+        default: 'both'
+        type: choice
+        options: [both, rax3000q, vs010]
+      baseline:
+        description: '新内核基线（见 baseline.env）'
+        required: true
+        default: 'qosmio-25.12-nss'
+        type: choice
+        options: [qosmio-25.12-nss, official-25.12.6, kuncy7-6.18-nss]
+      nand_patch:
+        description: 'V2 批次复旦微 FM25LS01 闪存补丁（默认关；报 unknown flash ID / EUCLEAN 才勾）'
+        required: false
+        default: 'false'
+        type: boolean
+      ssh:
+        description: 'SSH 连进 Actions 调试 (tmate)'
+        required: false
+        default: 'false'
+        type: boolean
+      wds_delay:
+        description: '机器狗：连续网络不通多少分钟自动重启（1~120，默认 5；刷后也能 set-delay 改）'
+        required: false
+        default: '5'
+        type: string
+      wds_peer:
+        description: '机器狗 ping 对端：auto=按主备自动推导 .241↔.242，或填具体 IP，off=只查无线关联'
+        required: false
+        default: 'auto'
+        type: string
+      ntp_poll_minutes:
+        description: 'NTP 循环校时间隔（分钟，1~1440，默认 5；刷后也能 ntp-poller set-minutes 改）'
+        required: false
+        default: '5'
+        type: string
+      build_verbose:
+        description: '详细编译日志（默认关：控制台只报结果，完整日志留在 build.log）'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  FW_MODE: "wds"
+  TZ: Asia/Shanghai
+  KEEP_RELEASES: "5"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(github.event.inputs.device == 'both' && '["rax3000q","vs010"]' || format('["{0}"]', github.event.inputs.device)) }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Init environment
+      run: |
+        set -e
+        sudo apt-get -qq update
+        sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
+          gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip \
+          zlib1g-dev file wget quilt time device-tree-compiler ccache xz-utils jq
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Restore source / dl cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/.git
+          openwrt/dl
+        key: nk-${{ github.event.inputs.baseline }}-${{ matrix.device }}-v1
+        restore-keys: nk-${{ github.event.inputs.baseline }}-
+
+    - name: Prepare (clone + feeds + board + config + overlay)
+      id: prep
+      env:
+        DEVICE: ${{ matrix.device }}
+        BASELINE: ${{ github.event.inputs.baseline }}
+        NAND_PATCH: ${{ github.event.inputs.nand_patch }}
+        WDS_DELAY: ${{ github.event.inputs.wds_delay }}
+        WDS_PEER: ${{ github.event.inputs.wds_peer }}
+        NTP_POLL_MINUTES: ${{ github.event.inputs.ntp_poll_minutes }}
+      run: |
+        set -euo pipefail
+        chmod +x scripts/*.sh
+        sh scripts/verify.sh
+        bash scripts/prepare.sh "$DEVICE" "$FW_MODE" "$BASELINE"
+        cd openwrt
+        # ── 内核版本：只读源码树，绝不调用 make（第 45 次修复）──
+        # 旧写法是「调用 make 的 kernel_version 目标，管道 tr/cut 取号」：
+        #   qosmio 25.12-nss 上该 make 目标返回非 0，而本步骤开头是
+        #   set -euo pipefail → 命令替换失败直接让整个 Prepare 退出码 2；
+        #   2>/dev/null 又把错误吞掉，日志里看不到任何报错，
+        #   make download / make 一步没跑，build.log 也不存在。
+        # 现在纯读文件：KERNEL_PATCHVER + LINUX_VERSION-<主版本> 拼接，
+        # 每级都有 || true 与兜底，永远不会因探测失败终止编译。
+        KVER=""
+        KV_MAIN=$(grep -m1 '^KERNEL_PATCHVER' target/linux/qualcommax/Makefile 2>/dev/null \
+                 | cut -d= -f2 | tr -cd '0-9.' || true)
+        KV_SUB=""
+        if [ -n "$KV_MAIN" ] && [ -f "target/linux/generic/kernel-$KV_MAIN" ]; then
+          KV_SUB=$(grep -m1 "^LINUX_VERSION-$KV_MAIN" \
+                   "target/linux/generic/kernel-$KV_MAIN" 2>/dev/null \
+                   | cut -d= -f2 | tr -cd '0-9.' || true)
+          KVER="${KV_MAIN}${KV_SUB}"
+        fi
+        if [ -z "$KVER" ]; then
+          KVER=$(grep -rhoE 'LINUX_VERSION[ -]?6\.[0-9]+\.[0-9]+' target/linux/ include/ 2>/dev/null \
+                 | grep -oE '6\.[0-9]+\.[0-9]+' | sort -V | tail -1 || true)
+        fi
+        if [ -z "$KVER" ]; then
+          case "$BASELINE" in
+            qosmio-25.12-nss) KVER=6.12.116 ;;
+            official-25.12.6) KVER=6.12.112 ;;
+            kuncy7-6.18-nss)  KVER=6.18.60  ;;
+            *) KVER=kernel ;;
+          esac
+          echo "::warning::源码树未读到内核版本，使用 baseline.env 兜底值 $KVER"
+        fi
+        echo "KERNEL=$KVER" >> "$GITHUB_ENV"
+        echo "KVER=$KVER"   >> "$GITHUB_ENV"
+        echo "HEAD=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
+        echo "[prepare] 实际内核版本 = $KVER（读自源码树，将写入固件文件名）"
+
+    - name: Download sources
+      env:
+        BUILD_VERBOSE: ${{ github.event.inputs.build_verbose }}
+      run: |
+        cd openwrt
+        set -o pipefail
+        if [ "$BUILD_VERBOSE" = "true" ]; then
+          make download -j8 V=s || make download -j1 V=s
+        else
+          # 第 47 次：默认简洁，完整输出只进 download.log，失败才 tail
+          if ! make download -j8 V=0 > /tmp/download.log 2>&1; then
+            make download -j1 V=0 >> /tmp/download.log 2>&1 \
+              || { echo "下载失败，末尾 25 行："; tail -25 /tmp/download.log; exit 1; }
+          fi
+          echo "✓ 源码下载完成（$(find dl -type f | wc -l) 个文件）"
+        fi
+        find dl -size -1024c -delete || true
+
+    - name: Compile firmware
+      id: compile
+      env:
+        BUILD_VERBOSE: ${{ github.event.inputs.build_verbose }}
+      run: |
+        cd openwrt
+        set -o pipefail
+        if [ "$BUILD_VERBOSE" = "true" ]; then
+          if make -j$(nproc) V=s 2>&1 | tee build.log; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT; exit 1
+          fi
+        else
+          # 第 47 次：V=0 + 重定向，控制台不再刷 15 万行；
+          # 完整日志仍作为 build.log artifact 上传，排查不受影响。
+          if make -j$(nproc) V=0 > build.log 2>&1; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✓ 编译完成，完整日志见 build.log artifact（$(grep -c '^' build.log) 行）"
+            grep -E '^OK: .* in [0-9]+ packages|is ready' build.log | tail -3 || true
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "===== 失败摘要（只列真实错误，最多 25 行）====="
+            grep -E '^(make\[[0-9]+\]: \*\*\*|.*ERROR: target/linux failed|.*FATAL ERROR|.*Error: .*\.dts|.*error:|.*No rule to make target|.*Collected errors|.*package .* failed to build)' build.log \
+              | grep -vE 'for mod in|; do |^[[:space:]]*for ' \
+              | tail -25 || true
+            echo "===== build.log 末尾 12 行 ====="
+            tail -12 build.log || true
+            exit 1
+          fi
+        fi
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: buildlog-${{ matrix.device }}-wds
+        path: openwrt/build.log
+        if-no-files-found: ignore
+
+    - name: Organize firmware
+      id: collect
+      if: steps.compile.outputs.status == 'success'
+      env:
+        DEVICE: ${{ matrix.device }}
+      run: |
+        set -euo pipefail
+        D="$DEVICE"; mkdir -p "$GITHUB_WORKSPACE/firmware_out"
+        case "$D" in
+          rax3000q) MATCH='*rax3000q*' ;;
+          vs010)    MATCH='*vs010*'   ;;
+        esac
+        find openwrt/bin/targets -type f \( -name "$MATCH" -o -name 'sha256sums' \) \
+             ! -path '*/packages/*' -exec cp -a {} "$GITHUB_WORKSPACE/firmware_out/" \; 2>/dev/null || true
+        cd "$GITHUB_WORKSPACE/firmware_out"
+        rm -f sha256sums
+        STAMP=$(date +%Y%m%d)
+        # 命名方式：<模式字样>-<实际内核版本>-<日期>-<机型>-<原文件名>
+        # 内核版本来自上一步 make kernel_version，不写死、不带旧 SDK 编号
+        KTAG="${KVER:-kernel}"
+        PREFIX="Nwrt-WDS-${KTAG}-${STAMP}-"
+        for f in *factory* *sysupgrade* *initramfs*; do
+          [ -f "$f" ] || continue
+          case "$f" in "$PREFIX"*) continue ;; esac
+          mv -f -- "$f" "${PREFIX}${D}-${f}"
+        done
+        ls *factory* >/dev/null 2>&1 || { echo "::error::缺 factory 镜像"; ls -lh; exit 1; }
+        ls *sysupgrade* >/dev/null 2>&1 || { echo "::error::缺 sysupgrade 镜像"; ls -lh; exit 1; }
+        cat > CHANGE-IP-NOTICE.txt <<'NOTICE_EOF'
+        🔴【改网桥管理 IP 必读 · WDS】════════════════════════════════
+
+        出厂：主 172.10.10.241 / 备 172.10.10.242，掩码 255.255.252.0（/22）。
+        机器狗默认启用：连续网络不通 5 分钟自动重启（set-delay 1~120 可自定义）。
+
+        ■ 改 IP 会不会导致自动重启？—— 不会「仅因改 IP」就重启
+          · mode=or：无线关联 / 互 ping 对端 / 锚点，任一通即通，计时立刻清零
+          · 必须【连续】不通满 delay 分钟才重启；network restart 只是短暂断链
+          · 两端各挂链路本地角色别名：主 169.254.241.1/16、备 169.254.241.2/16
+            互 ping 这条与管理 IP 完全解耦，改成任何地址都不会失效
+
+        ■ 但「互 ping 对方管理 IP」会指向旧地址，改完 IP 请执行（两台各跑一次）
+          bridge-watchdog resync            # 自动从邻居表发现对端新 IP
+          或 bridge-watchdog set-peer <对端新管理 IP>
+          bridge-watchdog status            # 复核；IP 非 .241/.242 时会打印红字告警
+          /bridge/ 状态页也会显示红条「改 IP 必读」
+
+        ■ 常用命令
+          bridge-watchdog set-delay 10      # 5 → 10 分钟，立即生效
+          bridge-watchdog dryrun on         # 临时只记日志不重启；off 恢复
+          bridge-watchdog off               # 彻底停用
+          3 次连续重启仍不通会自动转 dryrun 停手，不会无限重启
+
+        ■ 注意
+          ping 自己 / 127.0.0.1 永远通，判不出断链；必须 ping【对端】。
+        ════════════════════════════════════════════════════════════
+        NOTICE_EOF
+        # 第 50 次：编译日志里用 ANSI 真红标出「改 IP 必读」（GitHub Actions 会渲染颜色）
+        printf '\033[31m'
+        printf '%s\n' '🔴🔴🔴【改网桥 IP 必读】出厂 172.10.10.241/22；改 IP 本身不会触发机器狗重启，' \
+                       '但请执行 bridge-watchdog resync（自动发现对端新 IP，两台各跑一次）' \
+                       '或 bridge-watchdog set-peer <对端新IP>；详见 CHANGE-IP-NOTICE.txt 与本 Release 说明 🔴🔴🔴'
+        printf '\033[0m'
+        # 第 52 次：插件基线已冻结，下载日志里也标红说明
+        printf '\033[31m'
+        printf '%s\n' '🔴【插件基线已冻结】以第 51 次为准：82 项只增不减；少一项 gen-config 直接 ::error:: 阻断；详见仓库 baseline/插件基线冻结报告.html'
+        printf '\033[0m'
+        { for x in *; do [ -f "$x" ] && [ "$x" != sha256sums ] && sha256sum "$x"; done; } > sha256sums
+        echo "PREFIX=$PREFIX" >> $GITHUB_ENV
+        echo "=== 交付产物 ==="; ls -lh
+
+    - name: Upload firmware artifact
+      if: steps.compile.outputs.status == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Nwrt-WDS-${{ matrix.device }}-${{ github.event.inputs.baseline }}
+        path: firmware_out
+        if-no-files-found: error
+        retention-days: 90
+
+    - name: Publish Release (rolling keep 5)
+      if: steps.compile.outputs.status == 'success'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        DEVICE: ${{ matrix.device }}
+        BASELINE: ${{ github.event.inputs.baseline }}
+      run: |
+        set -euo pipefail
+        TAG="fw-${KVER:-kernel}-$(date +%Y%m%d-%H%M%S)-${DEVICE}-wds"
+        # ── 第 56 次：Release 说明改为【独立 md 文件 + --notes-file】──────────
+        # 旧写法把整段 Markdown 塞进 bash 双引号字符串（NOTES 变量赋值），
+        # 里面的 Markdown 反引号被当成【命令替换】执行：08:04 两台都在 Publish Release
+        # 步骤 exit 127（gen-config.sh / 172.10.10.241 / bridge-watchdog 等
+        # "command not found"）。编译本身早已成功、固件也已上传 artifact。
+        # 现在说明文本存在 release/*.md 里，完全不经过 shell 解释；
+        # 变量元信息用几行 echo 追加（这几行不含反引号），再 --notes-file 传入。
+        NOTES_FILE="$(mktemp)"
+        cp "$GITHUB_WORKSPACE/release/RELEASE-NOTES-WDS.md" "$NOTES_FILE"
+        {
+          echo ''
+          echo '---'
+          echo "基线: ${BASELINE} | 内核: ${KERNEL:-见 build.log} | 源码: ${HEAD:-}"
+          echo "NAND补丁: ${NAND_PATCH:-false} | 生成: $(date -u +%FT%TZ)"
+        } >> "$NOTES_FILE"
+
+        gh release create "$TAG" firmware_out/* \
+          --title "WDS 固件 ${DEVICE} · ${BASELINE} · $(date +%F)" \
+          --notes-file "$NOTES_FILE"
+        rm -f "$NOTES_FILE"
+
+        # 滚动保留：只保留本机型本模式最近 N 个 release
+        mapfile -t TAGS < <(gh release list --limit 100 --json tagName --jq \
+          ".[] | select(.tagName | endswith(\"-${DEVICE}-wds\")) | .tagName" | sort -r)
+        i=0
+        for t in "${TAGS[@]}"; do
+          i=$((i+1)); [ "$i" -le "$KEEP_RELEASES" ] && continue
+          gh release delete "$t" -y --cleanup-tag || true
+        done
