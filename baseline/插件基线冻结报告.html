@@ -261,5 +261,21 @@ B 层之后只剩 <b>2 处代码 exit 1</b>（核心锚点收敛 / 设备符号�
 </div>
 <div class="redbox">🔴 <b>这次不用重编也能拿到固件</b>：两台已在 Actions run <code>45567664935</code> 的 artifact 里 —— VS010 <code>Nwrt-WDS-vs010-qosmio-25.12-nss</code>（ID <code>15003161629</code>）、RAX3000Q <code>Nwrt-WDS-rax3000q-qosmio-25.12-nss</code>（ID <code>15003175799</code>）。上传第 56 次包后<b>重跑一次</b>才会自动生成 GitHub Release（约 37 分钟）；只要固件直接下 artifact 即可。</div>
 <div class="redbox">🔴 <b>82 项冻结基线一个没动、29 个 <code>=y</code> 一字未改</b>；B 层纯诊断 / 野文件排除 / nft 报红 / NTP 5 分钟 / 机器狗 / 管理网段 / SSH-TTYD / 防火墙-IPv6 关 / 同桥 / STP / 简洁日志全部原样保留。<b>本轮没删也没加任何插件</b>，只改了「怎么把编译成果发布出去」。</div>
-<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据最终修正于第 55 次 · 发布链修正于第 56 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
+<h2 class="red">🔴 十六、第 58 次：机器狗改成独立插件，配置 100% 归用户</h2>
+<div class="redbox"><b>用户原话：「把机器狗改成插件，配置我自己来设置」。</b> 旧实现有三处「替用户做主」，
+最痛的是 <b>首启 <code>99-bridge-ready</code> 强写 7 个 <code>uci -q set wdsdog.main.*</code></b> ——
+用户刷后改的 <code>delay / peer / enabled</code>，一开机就被冲回出厂值。这次全部收口。</div>
+<div class="card">
+<div class="row"><span class="k red">🔴 独立插件包</span><span class="v"><code>package/bridge-watchdog/</code>：标准 OpenWrt package（Makefile + 脚本 + init.d + 用户配置说明 + 模板），可 <code>apk del/add</code> 单独装卸升级；<code>prepare.sh</code> 在 defconfig 前拷进构建树</span></div>
+<div class="row"><span class="k red">🔴 用户配置层</span><span class="v"><code>/etc/wdsdog.conf</code> 优先级最高，<code>bridge-watchdog config</code> 生成<b>全注释模板</b>自己填；删掉即回出厂 UCI。优先级：用户文件 &gt; <code>uci set</code> &gt; 出厂 UCI</span></div>
+<div class="row"><span class="k">编译期</span><span class="v"><code>wds_delay / wds_peer</code> 默认<b>留空 = 不注入</b>；只有主动填值才 sed</span></div>
+<div class="row"><span class="k red">🔴 首启</span><span class="v">不再写任何 <code>uci set wdsdog.*</code>，只 enable+start / stop+disable；用户配置不会被覆写</span></div>
+<div class="row"><span class="k">未配置</span><span class="v"><code>UNCONFIGURED=1</code> → 只待命、<b>绝不重启</b>；写好配置 restart 立即生效。<code>status</code> 显示配置源</span></div>
+<div class="row"><span class="k">实测</span><span class="v">配置全删光 → <code>UNCONFIGURED=1 ENABLED=0</code>；用户层 <code>delay=17 mode=ping</code> → <code>DELAY=17 MODE=ping</code></span></div>
+</div>
+<div class="redbox">🔴 <b>冻结基线 82 项一字不动，只追加 1 项 → 83 项</b>（<code>[pkg]|bridge-watchdog</code> +
+<code>CONFIG_PACKAGE_bridge-watchdog=y</code>），「只增不减」继续生效。机器狗全部判据能力
+（mode=or / peer=auto / 别名互 ping / max_reboots / resync / 全套 CLI）、NTP 5 分钟、
+第 57 次 bootargs 兜底、Release <code>--notes-file</code> 全部原样保留。<b>没删也没减任何插件。</b></div>
+<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据最终修正于第 55 次 · 发布链修正于第 56 次 · 机器狗插件化于第 58 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
 </div></body></html>

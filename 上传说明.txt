@@ -1,140 +1,84 @@
-VS010 / RAX3000Q · 第 56 次（2026-11-25）
+VS010 / RAX3000Q · 第 58 次（2026-11-25）
+主题：机器狗改成独立插件、配置 100% 由用户设置
+    + 本包是【18:00 之后所有修复的合并增量包】（第 57 次 + 第 58 次一次补齐）
 
 ════════════════════════════════════════
-★★★ 最重要：这次编译其实已经成功了 ★★★
+★★★ 这次要传哪个包 ★★★
 ════════════════════════════════════════
-11-25 07:26 开始 make，08:03（vs010）/ 08:00（rax3000q）完成。
-两台都产出并上传成 artifact（各约 46 MB）：
-  Nwrt-WDS-6.12.91-20261125-vs010-...-squashfs-factory.img   16M
-  Nwrt-WDS-6.12.91-20261125-vs010-...-squashfs-factory.ubi   16M
-  Nwrt-WDS-6.12.91-20261125-vs010-...-squashfs-sysupgrade.bin 15M
-  （rax3000q 同名同规格，机型字段不同）
-
-Actions run 45567664935 里可直接下载，不用重编：
-  VS010     https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt/actions/runs/45567664935/artifacts/15003161629
-  RAX3000Q  https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt/actions/runs/45567664935/artifacts/15003175799
-
-唯一挂掉的是【最后一步 Publish Release】，shell 退出码 127：
-  line 3: gen-config.sh: command not found
-  line 3: 172.10.10.241: command not found
-  line 3: bridge-watchdog: command not found
-  command substitution: syntax error near unexpected token `newline'
-★ 不是源码、不是配置、不是你传错了，也不是固件没编出来。
+  ✅ VS010-RAX3000Q-inc58-after18.zip  ← 【主交付】18点后累积修复增量包
+     基准 = 远端 gggbin2026-vs010-rax3000q-25.12 当前 HEAD d978691（17:04，第56次状态）
+     内容 = 第 57 次（板级 bootargs 兜底 / 删闭源 ECC / TTL 诊断手册）
+          + 第 58 次（机器狗插件化）
+     ★ 你 18 点之后的修复一直没传上去，这个包一次补齐，不用分两次
+  · VS010-RAX3000Q-full58.zip          全量兜底（仓库状态不确定 / 推倒重来时用）
+  · README-inc58.txt                   增量清单（只给你看，不用上传）
 
 ════════════════════════════════════════
-★ 根因：Markdown 反引号被 bash 当成命令替换
+★ 机器狗：改成插件，配置你自己来设置
 ════════════════════════════════════════
-旧写法把整段 Release 说明塞进一个 bash 双引号字符串：
-  NOTES="✅ ... 少一项 `gen-config.sh` 直接 `::error::` 阻断 ...
-         `bridge-watchdog set-peer <对端新管理IP>` ..."
-  gh release create ... --notes "$(printf '%b' "$NOTES")"
+旧实现最痛的一点：首启 99-bridge-ready 强写 7 个 uci set wdsdog.main.*，
+把你刷后改的 delay / peer / enabled 全冲回出厂值。这次彻底收口：
 
-双引号里的 Markdown 反引号被 bash 当成【命令替换】执行；
-步骤开头是 set -euo pipefail，第一个 command not found 就让整个步骤挂掉，
-<对端新管理IP> 里的 < 还触发 syntax error。
-这些"命令"全是写给人看的文字，不是真要执行。
+  · 新增标准插件包 package/bridge-watchdog/（可 apk 单独装卸 / 升级）
+  · 用户配置 /etc/wdsdog.conf 【优先级最高】，bridge-watchdog config 生成全注释模板
+  · 编译期 wds_delay / wds_peer 默认【留空 = 不注入】（你主动填才写）
+  · 首启【不再写任何 uci set wdsdog.*】，你的配置不会被覆写
+  · 未配置 = 只待命、绝不重启；status 显示当前生效的「配置源」
 
-前几轮编译都在 make 之前失败（第 52/54/55 次），从没走到 Publish Release；
-第 55 次修好后第一次全链跑通，才在最后一步撞上。
+配置优先级：/etc/wdsdog.conf > uci set wdsdog.main.* > 出厂 /etc/config/wdsdog
 
-════════════════════════════════════════
-★ 本次修了什么
-════════════════════════════════════════
-【① 说明文本彻底脱离 shell 字符串】
-  新增 release/RELEASE-NOTES-WDS.md 与 release/RELEASE-NOTES-AP.md
-  —— 纯 Markdown 文件，反引号 / $ / 反斜杠全部按字面保存，不经过 shell 解释。
+刷后自己配（3 步）：
+  bridge-watchdog config                # 生成 /etc/wdsdog.conf（全注释）
+  vi /etc/wdsdog.conf                   # 取消注释、填自己的值
+  /etc/init.d/bridge-watchdog restart
+  bridge-watchdog status                # 看配置源 / 启用 / 距重启还剩
 
-【② 两份 workflow 的 Publish Release 改法】
-  · 移除 NOTES="..." 双引号赋值与 printf '%b' "$NOTES"
-  · 改为 cp release/*.md → mktemp 临时文件
-  · 元信息（基线 / 内核 / HEAD / NAND 开关 / 生成时间）用几行
-    【不含反引号】的 echo 追加，变量正常展开
-  · gh release create ... --notes-file "$NOTES_FILE"，用完 rm -f
-  · 临时文件不在 firmware_out/ 里，不会把说明文件当固件传进 Release
-  · 滚动保留最近 5 个 Release 的逻辑不变
-
-【③ verify.sh 加第 56 次判据】
-  两份 workflow 的 Publish 代码行禁止出现反引号 / 旧 NOTES 赋值；
-  必须使用 --notes-file 且引用 release/*.md；两个 md 文件必须存在。
-  顺带把「改 IP 说明」「NTP 周期」两个旧判据改指向新的 md 文件。
-
-【④ 文档同步】
-  三份标红详细日志（HTML / MD / ANSI）新增第十五章；
-  README / FIRMWARE / 修复总览 累积至第 56 次；
-  F 段「以后每次同时出总包 + 增量包」的规矩保持生效。
-
-🔴 82 项冻结基线一个没动、29 个 =y 一字未改；
-   gen-config.sh B 层纯诊断、构建树野文件排除、nft 报红、
-   NTP 5 分钟循环、机器狗、172.10.10.241/22、SSH/TTYD、
-   防火墙/IPv6 关、WAN+LAN 同桥、STP、简洁日志全部原样保留。
-★ 本轮没删也没加任何插件，只改了「怎么把编译成果发布出去」。
+可调：enabled / delay / grace / interval / iface / peer / anchor /
+      mode / max_reboots / dryrun（完整说明见 package/bridge-watchdog/files/USER-CONFIG.md）
+原有 CLI 全部保留：set-delay 10 / set-peer auto / set-mode or /
+      dryrun on / off / resync / once / status
 
 ════════════════════════════════════════
-★ 两个包，选一个传（以后固定这个规矩）
+🔴 冻结基线：82 项一字不动，只【追加】1 项 → 83 项
 ════════════════════════════════════════
-  ① VS010-RAX3000Q-增量修复包-第56次.zip   ← 推荐（仓库已是第 55 次状态）
-     只含本次改动文件，网页拖进去覆盖即可，不用整仓重传
-  ② VS010-RAX3000Q-总修复可上传文件-第56次.zip ← 累积全量
-     仓库状态不确定 / 想推倒重来 / 本地没旧仓库时才用
-  ★ 两个包同名文件逐字节一致；增量包里的「增量清单.txt」只给你看，不用上传
-  ★ 判断口径：不确定仓库状态 → 总包；确定是上一版 → 增量包
+第 52 次定的「插件只能增加或保持，不能再减少」继续生效：
+baseline/frozen-baseline.conf 旧 82 行一个字节没改，
+只追加 [pkg]|bridge-watchdog；config/common.seed 加 CONFIG_PACKAGE_bridge-watchdog=y。
+verify.sh 普通 / 严格均 RESULT: PASS（0 项非阻断警告）。
+★ 没删也没减任何插件；机器狗全部判据能力（mode=or / 别名互 ping /
+  max_reboots / resync）原样保留。
 
 ════════════════════════════════════════
-★ 现在你可以怎么选
+一并把 18 点后的板级修复也带上（第 57 次）
 ════════════════════════════════════════
-  A. 只要固件 → 直接下上面两个 artifact，不用传包、不用重编（最快）
-  B. 想让 GitHub Release 自动生成（带完整说明、可长期留存）→
-     传第 56 次包 → sh scripts/verify.sh 出 PASS → Actions 手动 Run 一次
-     （约 37 分钟；这次会一路走到 Publish Release 并成功打 tag）
+  · 两台 DTS /chosen 补 bootargs 兜底（console + ubi.mtd=rootfs + rootwait）
+  · 删掉第 44 次从 5.4 闭源 FDT 抄来的 nand-ecc-strength / step-size
+  · VS010 qcom,port_phyinfo 的 port@ 编号对齐官方 pz-l8
+  · 新增 docs/TTL-启动诊断.md ★ VS010「Starting kernel 零输出 + 自动重启」
+    先按它做 TTL 诊断，不要急着重刷
 
 ════════════════════════════════════════
-一、前面几轮全部保留（一个没少）
+怎么传
 ════════════════════════════════════════
-  ✅ B 层纯诊断(55)    seed 声明 + 核心锚点两类硬阻断，其余只警告
-  ✅ 构建树排除(54)    14 个包外野文件（仓库文件原地保留，KEEP_EXTRA_FILES=1 可逆）
-  ✅ nft 报红(54)      health-fix 明确提示「无线 DHCP 防护【未生效】」
-  ✅ 冻结基线(52)      82 项只增不减 + 三份标红详细日志
-  ✅ NTP(51)           每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）
-  ✅ 机器狗(49/50)     WDS 默认启用：连续不通 5 分钟重启；set-delay 改时间；
-                       mode=or 三判据、max_reboots=3；改 IP 不误重启 + resync
-  ✅ 管理网段          172.10.10.241 / 255.255.252.0（/22）；WDS 备机自动 .242
-  ✅ SSH 正常          0.0.0.0:22 / root / admin；四层开机兜底
-  ✅ 无线 DHCP 防护 / 插件 luci-app-ttyd / 防火墙 + IPv6 关 / 删 wan/wan6
-  ✅ WAN+LAN 同桥 / STP / 主题不白屏 / 第 46 次 TARGET_DEVICES 裁剪
-  ✅ CI 简洁日志 / 低资源（cron、ucitrack、led、gpio_switch 仍停用）
+  unzip -o VS010-RAX3000Q-inc58-after18.zip -d 你的仓库目录
+  cd 你的仓库目录 && sh scripts/verify.sh     # RESULT: PASS
+  git add -A && git commit -m "第58次：机器狗插件化 + 18点后累积修复" && git push
+
+★ 网页上传时 board/ scripts/ docs/ package/ baseline/ config/ release/
+  要连【目录结构】一起拖；.github/workflows 第一个字符是点。
+★ 建议顺手删掉仓库根目录散落的两个 yml：build-wds.yml / build-ap.yml
+  （第 56 次上传时放错位置留下的重复文件；正确版已在 .github/workflows/，
+   它们不进编译链，但留着容易再混淆）
+★ 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
+  ipq5018-vs010.dts / oem_extract/ / ATR文件/ / 两份 ART / DTS / oem54/
 
 ════════════════════════════════════════
-二、怎么传 / 怎么点
+编译与刷机
 ════════════════════════════════════════
-解压后按原路径全部覆盖。网页上传注意：
-  · .github/workflows 第一个字符是【点】
-  · release/ 是本次新增目录，别漏传（两份 RELEASE-NOTES-*.md）
-  · .gitignore 是隐藏文件，网页容易漏；命令行最稳：
-      git add -A && git commit -m "第56次：Release 说明改用 --notes-file" && git push
-  · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
-    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART / DTS / oem54/
+Actions 手动 Run → baseline qosmio-25.12-nss → ★ device 先选 vs010 单跑
+wds_delay / wds_peer 保持留空（配置归你）；nand_patch / ART_CALIBRATION /
+ssh / build_verbose 全部 false；ntp_poll_minutes=5
 
-上传后 sh scripts/verify.sh → RESULT: PASS（0 警告）再点 Run workflow。
-  baseline 保持 qosmio-25.12-nss；★ device 先选 vs010 单跑，成功再 both
-  WDS 输入框：wds_delay=5、wds_peer=auto、ntp_poll_minutes=5
-  AP  输入框：ntp_poll_minutes=5
-  nand_patch / ART_CALIBRATION / ssh / build_verbose 全部保持 false
-
-════════════════════════════════════════
-三、刷前 / 刷后
-════════════════════════════════════════
-刷完第一件事 passwd 改掉 admin（弱密码）。管理入口 http://172.10.10.241
-  LuCI /cgi-bin/luci · 状态页 /bridge/(WDS) 或 /ap/(AP) · SSH :22 · TTYD :7681
-刷后建议跑：
-  health-fix                # 应看到 ✓ nft/bridge 可用 + ✓ nwrt_l2 表已加载
-  ntp-poller status         # 应显示「300 秒 = 5 分钟」
-  bridge-watchdog status    # 看机器狗 / 对端 / 重启计数
-两台都刷 AP 且同时在线会都是 .241 冲突，第二台改 .243（改完两台各跑 resync）。
-64 位不死 U-Boot 是硬门槛；VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区；
-刷前备份 0:ART(mtd13) 与 0:TRAINING(mtd14)；
-RAX3000Q 板级未在 6.12 实机验证，首次务必 3.3V USB-TTL；
-WDS 4addr 在开源 ath11k+NSS 下未验证；CN+HE160 开机 5G 约 60s CAC 不可见。
-
-历次修复清单：修复总览.md（累积至第 56 次）
-详细日志（标红）：baseline/插件基线冻结报告.html（已同步第 56 次）
-Release 说明模板：release/RELEASE-NOTES-WDS.md / -AP.md（可自行改文字，不经过 shell）
+刷前红线：64 位不死 U-Boot 硬门槛 / 绝不刷 CMCC U-Boot、MIBIB、大分区 /
+备份 0:ART(mtd13) 与 0:TRAINING(mtd14) / 首次务必 TTL /
+刷完第一件事 passwd 改掉 admin。

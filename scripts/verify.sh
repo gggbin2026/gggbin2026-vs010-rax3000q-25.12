@@ -471,6 +471,67 @@ has '改网桥 IP 必读' release/RELEASE-NOTES-WDS.md \
 has '🔴 改管理 IP 后请跑 bridge-watchdog resync' files/etc/banner \
   && ok "登录 banner 带改 IP 提示" || bad "banner 缺改 IP 提示"
 [ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 仍精简（14 行内）" || warn "banner 偏长"
+# ── 第 58 次：机器狗改成独立插件，配置 100% 由用户设置 ──────────────
+# 用户原话：「把机器狗改成插件，配置我自己来设置」。
+# 旧实现的三处「替用户做主」：① 编译期 workflow 注入 delay/peer；
+# ② 首启 99-bridge-ready 强写 7 个 uci set（用户改的值开机就被冲掉）；
+# ③ 脚本缺省硬编码「启用 + 5 分钟」。这次全部收口：
+#   · 新增标准 OpenWrt package/bridge-watchdog（可 apk 单独装卸/升级）
+#   · 用户配置层 /etc/wdsdog.conf 优先级最高；bridge-watchdog config 生成模板
+#   · 未配置时只待命、绝不重启
+#   · 基线 82 项一字不动，【追加】[pkg]|bridge-watchdog → 83 项（只增不减）
+P58=1
+for f in package/bridge-watchdog/Makefile \
+         package/bridge-watchdog/files/bridge-watchdog \
+         package/bridge-watchdog/files/bridge-watchdog.init \
+         package/bridge-watchdog/files/USER-CONFIG.md \
+         package/bridge-watchdog/files/wdsdog.conf.example; do
+  [ -f "$f" ] && ok "插件包文件存在: $f" || { bad "插件包缺 $f"; P58=0; }
+done
+has 'CONFIG_PACKAGE_bridge-watchdog=y' config/common.seed \
+  && grep -Fq '[pkg]|bridge-watchdog' baseline/frozen-baseline.conf \
+  && ok "插件包已进 seed + 冻结基线（追加，不是删减）" \
+  || { bad "插件包未进 seed/基线"; P58=0; }
+NF58=$(grep -c '^\[' baseline/frozen-baseline.conf)
+[ "$NF58" -ge 83 ] \
+  && ok "冻结基线 $NF58 项 ≥ 83（旧 82 项全保留 + 新增 1 项，只增不减）" \
+  || { bad "冻结基线只有 $NF58 项（应 ≥83）"; P58=0; }
+# 包内脚本与 files/ 必须逐字节一致，防止两份逻辑漂移
+if cmp -s files/usr/sbin/bridge-watchdog package/bridge-watchdog/files/bridge-watchdog; then
+  ok "插件包脚本与 files/ 逐字节一致（单一实现）"
+else
+  bad "插件包脚本与 files/usr/sbin/bridge-watchdog 不一致"; P58=0
+fi
+for k in 'USER_CONF=/etc/wdsdog.conf' '_user_cfg' 'UNCONFIGURED' 'CFG_SRC' 'config)'; do
+  has "$k" files/usr/sbin/bridge-watchdog || { bad "机器狗缺第58次能力 $k"; P58=0; }
+done
+[ "$P58" = 1 ] && ok "第 58 次：机器狗=独立插件；编译期不注入 / 首启不覆写 / 未配置不重启 / 配置全归用户"
+
+# ── 第 57 次：实机启动兜底（VS010 Starting kernel 后零输出 + 自动重启）──
+# 11-25 刷入 VS010 后 U-Boot 日志止于 "Jumping to AARCH64 kernel via monitor"，
+# 无任何内核输出并循环重启。核查结论：
+#   · fdt_fixup_qpic / parse_fdt_fixup / Could not find PCI 是【无害 warning】：
+#     OpenWrt 官方 commit 3bbb4f6 明确「bootloader tries to fixup the qpic nand
+#     node, it actually can't find it as the node was renamed to spi」——
+#     6.12 主线节点已从 qpic-nand@79b0000 改名 spi@79b0000，官方 pz-l8 同样
+#     打印这几行且实机可启动，不要去补 /soc/qpic-nand 节点。
+#   · 真正可疑：/chosen 缺 bootargs 兜底 + 第 44 次从 5.4 闭源 FDT 抄来的
+#     nand-ecc-strength/step-size 强行声明（官方 pz-l8 没有）。
+P57=1
+for d in board/ipq5018-vs010.6.12.dts board/ipq5018-rax3000q.6.12.dts; do
+  has 'console=ttyMSM0,115200n8' "$d" && has 'ubi.mtd=rootfs' "$d" \
+    && has 'rootfstype=squashfs' "$d" && has 'rootwait' "$d" \
+    && ok "$(basename "$d") /chosen 带完整 bootargs 兜底（console/ubi/rootwait）" \
+    || { bad "$(basename "$d") 缺 bootargs 兜底"; P57=0; }
+  grep -qE '^[[:space:]]*nand-ecc-(strength|step-size)' "$d" \
+    && { bad "$(basename "$d") 仍有闭源 ECC 属性"; P57=0; } \
+    || ok "$(basename "$d") 无强行 ECC 声明"
+done
+[ -f docs/TTL-启动诊断.md ] \
+  && ok "存在 docs/TTL-启动诊断.md（不重编即可定位根因）" \
+  || { bad "缺 TTL 启动诊断文档"; P57=0; }
+[ "$P57" = 1 ] && ok "第 57 次：板级 DTS 与官方实机基线对齐 + bootargs 兜底"
+
 # ── 第 56 次：Release 发布步骤不再把 Markdown 塞进 shell 字符串 ─────
 # 11-25 08:04 两台编译【其实全部成功】、固件已上传 artifact，却都挂在最后
 # Publish Release 步骤 exit 127：
@@ -756,14 +817,22 @@ for kv in "option delay '5'" "option grace '6'" "option peer 'auto'" \
   has "$kv" files/etc/config/wdsdog || bad "WDS 机器狗缺 $kv"
 done
 has "option delay '5'" files/etc/config/wdsdog && ok "出厂：连续不通 5 分钟重启，宽限 6 分钟"
+# 第 58 次：首启【绝不覆写用户配置】（旧版强写 7 个 uci set，把用户改的值冲掉）
 has 'bridge-watchdog enable' files/etc/uci-defaults/99-bridge-ready \
-  && has "wdsdog.main.enabled='1'" files/etc/uci-defaults/99-bridge-ready \
-  && has "wdsdog.main.dryrun='0'" files/etc/uci-defaults/99-bridge-ready \
-  && ok "WDS 首启 enable+start，并强制写回启用值（防保留配置带旧值）" \
+  && ok "WDS 首启 enable+start（只启服务，不碰配置）" \
   || bad "WDS 首启链未启用机器狗"
+if grep -qE '^[[:space:]]*uci[[:space:]]+-q[[:space:]]+set[[:space:]]+wdsdog\.' files/etc/uci-defaults/99-bridge-ready; then
+  bad "WDS 首启仍在 uci set wdsdog.* 覆写用户配置（第 58 次已禁止）"
+else
+  ok "WDS 首启不再 uci set wdsdog.*（配置归用户）"
+fi
 has 'bridge-watchdog disable' files.ap/etc/uci-defaults/99-bridge-ready \
-  && has "wdsdog.main.enabled='0'" files.ap/etc/uci-defaults/99-bridge-ready \
   && ok "AP 首启仍显式 stop+disable" || bad "AP 首启未停用机器狗"
+if grep -qE '^[[:space:]]*uci[[:space:]]+-q[[:space:]]+set[[:space:]]+wdsdog\.' files.ap/etc/uci-defaults/99-bridge-ready; then
+  bad "AP 首启仍在 uci set wdsdog.* 覆写用户配置"
+else
+  ok "AP 首启不再 uci set wdsdog.*（配置归用户）"
+fi
 # 代码级：缺省值、多判据、对端自动推导、重启上限、CLI
 has 'ENABLED=$(_cfg enabled 1)' files/usr/sbin/bridge-watchdog \
   && has 'DRYRUN=$(_cfg dryrun 0)' files/usr/sbin/bridge-watchdog \
@@ -782,17 +851,20 @@ has '_wireless_ok "$i" && return 0' files/usr/sbin/bridge-watchdog \
   || bad "多判据 OR 缺失"
 has '自动转 dryrun=1，停止重启循环' files/usr/sbin/bridge-watchdog \
   && ok "连续重启达上限自动停手（防无限重启）" || bad "缺重启次数护栏"
-# 编译期自定义
-has 'wds_delay:' .github/workflows/build-wds.yml \
-  && has 'wds_peer:' .github/workflows/build-wds.yml \
-  && has 'WDS_DELAY' scripts/prepare.sh \
-  && ok "编译期可设时间（workflow input + prepare.sh 写 UCI）" \
-  || bad "编译期自定义时间链路缺失"
-if grep -q '5 分钟重启' files/etc/banner && ! grep -q '机器狗默认停用' files/etc/banner; then
-  ok "WDS banner 已改为启用说明（含 dryrun / 上限 / 改时间）"
+# 第 58 次：编译期默认【不注入】，用户自己配；input 保留但默认留空
+if grep -A4 'wds_delay:' .github/workflows/build-wds.yml | grep -q "default: ''"; then
+  ok "机器狗插件：workflow wds_delay 默认留空（不注入）"
 else
-  bad "WDS banner 仍宣称停用或缺改时间提示"
+  bad "wds_delay 默认值不是留空（第 58 次要求配置归用户）"
 fi
+has '编译期不注入任何参数' scripts/prepare.sh \
+  && has 'package/bridge-watchdog' scripts/prepare.sh \
+  && ok "prepare.sh 默认不注入参数 + 装入独立插件包" \
+  || bad "prepare.sh 未插件化"
+has '配置自己设' files/etc/banner \
+  && has '/etc/wdsdog.conf' files/etc/banner \
+  && ok "WDS banner 已改为插件说明（配置用户自设）" \
+  || bad "WDS banner 仍是旧版预置文案"
 
 # ── 第 44 次（配置收口）：IPv6 关闭 / DHCP 防护 / 插件精简 ──
 # (1) IPv6：编译期全局开关 + 运行期三层兜底
@@ -850,8 +922,12 @@ done
 has 'led_mesh: led-0' "$DTS_V" && has 'led_pwr: led-1' "$DTS_V" \
   && has '"gpio33", "gpio31"' "$DTS_V" \
   && ok "VS010 LED 已按 vs010.dtb 实机改为 mesh33/pwr31" || bad "VS010 LED 仍是 PZ-L8 的 GPIO35"
-has 'nand-ecc-strength = <4>' "$DTS_V" && has 'nand-ecc-step-size = <512>' "$DTS_V" \
-  && ok "VS010 NAND ECC 4bit/512（实机 FDT）" || bad "VS010 缺 4bit/512 ECC"
+# 第 57 次：反向判据 —— 不再把 5.4 闭源 FDT 的 ECC 值强行写进 6.12 DTS
+if grep -qE '^[[:space:]]*nand-ecc-(strength|step-size)' "$DTS_V"; then
+  bad "VS010 DTS 仍强行声明 NAND ECC（6.12 qcom_snand 由芯片 ID 表协商）"
+else
+  ok "VS010 DTS 未强行声明 NAND ECC（与官方 pz-l8 实机基线对齐）"
+fi
 if sed -E '/^[[:space:]]*(\/\/|\/\*|\*|\*\/)/d' "$DTS_V" \
      | grep -qE 'KEY_RESTART|label[[:space:]]*=[[:space:]]*"reset"'; then
   bad "VS010 DTS 含复位键（悬空 GPIO 会误进 failsafe）"
@@ -865,8 +941,11 @@ has '0x4d300000' "$DTS_V" && ok "VS010 已标注 5G bdf-addr 跨栈差异（不�
 # (3) RAX3000Q：按官方 main 原文校正端口 / ECC / 双 compatible
 has '"cmcc,rax3000q", "cmcc,rax3000qy"' "$DTS_R" \
   && ok "RAX3000Q compatible 双写（官方名 + QY 变体）" || bad "RAX3000Q compatible 未双写"
-has 'nand-ecc-strength = <8>' "$DTS_R" && has 'nand-ecc-step-size = <512>' "$DTS_R" \
-  && ok "RAX3000Q NAND ECC 8bit/512（GD5F1GQ5REYIG）" || bad "RAX3000Q 缺 8bit/512 ECC"
+if grep -qE '^[[:space:]]*nand-ecc-(strength|step-size)' "$DTS_R"; then
+  bad "RAX3000Q DTS 仍强行声明 NAND ECC（第 57 次已删除）"
+else
+  ok "RAX3000Q DTS 未强行声明 NAND ECC（第 57 次对齐）"
+fi
 if grep -qE '^[[:space:]]*(keys|leds) \{' "$DTS_R"; then
   bad "RAX3000Q DTS 定义了 keys/leds（变砖案例：复位键 GPIO 冲突）"
 else

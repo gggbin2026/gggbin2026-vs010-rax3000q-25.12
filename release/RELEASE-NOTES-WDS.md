@@ -8,7 +8,9 @@
 
 **命名**：`Nwrt-WDS-<内核版本>-<日期>-<机型>-*.ubi / *.bin`（tag 带内核版本、后缀 `-wds`）
 
-**模式**：WDS 网桥。WAN+LAN+2.4G+5G 全在 `br-lan`；主 `172.10.10.241` / 备 `172.10.10.242`，5G ch36 HE160 4addr，DHCP 1h；NTP：每 5 分钟循环校时一次（`ntp-poller`，开机先同步一次；`set-minutes` 可改）；机器狗默认启用：连续不通 5 分钟重启；`set-delay` 改时间、`set-peer auto` 互 ping【对端】、`resync` 改 IP 后重同步、3 次不通自动停手；`dryrun on` 可临时暂停。
+**模式**：WDS 网桥。WAN+LAN+2.4G+5G 全在 `br-lan`；主 `172.10.10.241` / 备 `172.10.10.242`，5G ch36 HE160 4addr，DHCP 1h；NTP：每 5 分钟循环校时一次（`ntp-poller`，开机先同步一次；`set-minutes` 可改）。
+
+🔴 **【第 58 次：机器狗改成插件，配置自己设】** 独立包 `bridge-watchdog`，编译期不注入参数、首启不覆写。**配置 100% 由你决定**：`bridge-watchdog config` 生成 `/etc/wdsdog.conf`（最高优先）或 `uci set wdsdog.main.*`。未配置时只待命、**绝不重启**。出厂 UCI 默认仍是 5 分钟 / 宽限 6 分钟 / 3 次停手；`status` 可看配置源，`off` 彻底停用，改 IP 后 `resync`。
 
 **无线**：NSS FW 12.5 优先（12.2 回退）+ ECM→NSS 双射频卸载；CN / ch36 / HE160 / 本机 BDF / 256M LOW；HE160 在 CN 下覆盖 DFS，开机 5G 需约 60s CAC。
 

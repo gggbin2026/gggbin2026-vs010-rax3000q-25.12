@@ -267,16 +267,11 @@ fi
 # 与第 45 次「默认停用」不同，这里 enable+start；但靠三条机制防误伤：
 #   mode=or（任一判据通即通）/ peer=auto（互 ping 对端）/ max_reboots=3（3 次后自动停手）。
 # 显式写 UCI 是为了防 sysupgrade「保留配置」把旧 enabled=0 / dryrun=1 带回来。
-if command -v uci >/dev/null 2>&1; then
-    uci -q set wdsdog.main.enabled='1'     2>/dev/null || true
-    uci -q set wdsdog.main.dryrun='0'      2>/dev/null || true
-    uci -q set wdsdog.main.delay='5'       2>/dev/null || true
-    uci -q set wdsdog.main.grace='6'       2>/dev/null || true
-    uci -q set wdsdog.main.peer='auto'     2>/dev/null || true
-    uci -q set wdsdog.main.mode='or'       2>/dev/null || true
-    uci -q set wdsdog.main.max_reboots='3' 2>/dev/null || true
-    uci -q commit wdsdog                   2>/dev/null || true
-fi
+# 第 58 次【插件化】：这里【绝不写任何 uci set wdsdog.*】。
+# 旧版每次首启强写 7 个值，把用户自己改的 delay / peer / enabled 全冲掉 ——
+# 这正是「配置我自己来设置」要解决的核心。配置归用户：/etc/wdsdog.conf
+# （最高优先）或 uci set wdsdog.main.*；本脚本只负责把插件启起来。
+# 出厂值仍由 files/etc/config/wdsdog 提供（冻结基线 82 项一字不动）。
 if [ -x /etc/init.d/bridge-watchdog ]; then
     /etc/init.d/bridge-watchdog enable  2>/dev/null || true
     /etc/init.d/bridge-watchdog start   2>/dev/null || true

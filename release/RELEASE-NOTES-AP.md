@@ -8,7 +8,9 @@
 
 **命名**：`Nwrt-AP-<内核版本>-<日期>-<机型>-*.ubi / *.bin`（tag 带内核版本、后缀 `-ap`）
 
-**模式**：普通哑 AP。WAN+LAN+2.4G+5G 全在 `br-lan`；管理 `172.10.10.241`，`NwrtAP-2G` / `NwrtAP-5G`，本机 DHCP 关；NTP 每 5 分钟循环校时（`ntp-poller`，`set-minutes` 可改）；无 WDS / 无主备 / 机器狗停用（AP 无 WDS 链路）。
+**模式**：普通哑 AP。WAN+LAN+2.4G+5G 全在 `br-lan`；管理 `172.10.10.241`，`NwrtAP-2G` / `NwrtAP-5G`，本机 DHCP 关；NTP 每 5 分钟循环校时（`ntp-poller`，`set-minutes` 可改）；无 WDS / 无主备。
+
+🔴 **【第 58 次：机器狗改成插件】** 独立包 `bridge-watchdog`，AP 出厂停用、配置 100% 由用户自设（`/etc/wdsdog.conf` 最高优先）。想开自己写配置，未配置只待命、绝不重启。
 
 **无线**：NSS FW 12.5 优先（12.2 回退）+ ECM→NSS 双射频卸载；CN / ch36 / HE160 / 本机 BDF / 256M LOW；HE160 在 CN 下覆盖 DFS，开机 5G 需约 60s CAC。
 

@@ -49,6 +49,8 @@ CONFIG_PACKAGE_iwinfo=y
 CONFIG_PACKAGE_wireless-regdb=y
 CONFIG_PACKAGE_wpad-basic-mbedtls=y
 CONFIG_PACKAGE_hostapd-common=y
+# 第 58 次：机器狗【独立插件包】（用户自配 /etc/wdsdog.conf，编译期不注入参数）
+CONFIG_PACKAGE_bridge-watchdog=y
 CONFIG_PACKAGE_bridge=y
 CONFIG_PACKAGE_ethtool=y
 

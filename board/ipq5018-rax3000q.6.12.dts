@@ -77,7 +77,9 @@
 	};
 
 	chosen {
-		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
+		/* 第 57 次：与 VS010 同口径兜底（见 docs/TTL-启动诊断.md） */
+		bootargs = "console=ttyMSM0,115200n8 ubi.mtd=rootfs rootfstype=squashfs rootwait";
+		bootargs-append = " ubi.mtd=rootfs root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -128,12 +130,8 @@
 		compatible = "spi-nand";
 		reg = <0>;
 		nand-ecc-engine = <&qpic_nand>;
-		/* 官方 main DTS 实证：GigaDevice GD5F1GQ5REYIG → 8bit/512。
-		 * 注意与 VS010 的 4bit/512 不同（两台闪存型号不同，按机型分别修）。
-		 * 若板子是东芯 Dosilicon 变体、dmesg 报 unknown flash / EUCLEAN，
-		 * 删掉这两行重编，让驱动自行协商。 */
-		nand-ecc-strength = <8>;
-		nand-ecc-step-size = <512>;
+		/* 第 57 次：同 VS010，删掉强行声明的 8bit/512，交回 spinand ID 表协商。
+		 * 与官方 qosmio/ipq5018-pz-l8.dts 实机基线对齐。 */
 		nand-bus-width = <8>;
 
 		partitions {

@@ -56,7 +56,17 @@
 	};
 
 	chosen {
-		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
+		/* 第 57 次：兜底 cmdline。原厂 5.4 实机 FDT 的 /chosen 同时有
+		 *   bootargs        = console=ttyMSM0,115200n8 ubi.mtd=rootfs rootfstype=squashfs rootwait
+		 *   bootargs-append =  ubi.mtd=rootfs root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M
+		 * 第 56 次之前这里只有 bootargs-append，且漏了 ubi.mtd=rootfs。
+		 * U-Boot env 若因 bad CRC 回落默认环境 / 被 Web 升级改写，bootargs 可能
+		 * 为空 → 内核没有 console，早期 printk 全部丢弃，表现就是
+		 * 「Starting kernel ... 后零输出 + 看门狗复位自动重启」。
+		 * 这里补一份与实机 FDT 同口径的 bootargs 兜底；U-Boot 有 env bootargs
+		 * 时会用 fdt set /chosen bootargs 覆盖它，不会冲突。 */
+		bootargs = "console=ttyMSM0,115200n8 ubi.mtd=rootfs rootfstype=squashfs rootwait";
+		bootargs-append = " ubi.mtd=rootfs root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -145,10 +155,12 @@
 		compatible = "spi-nand";
 		reg = <0>;
 		nand-ecc-engine = <&qpic_nand>;
-		/* vs010.dtb 实机 /soc/qpic-nand@79b0000/nandcs@0：4bit/512。
-		 * F5D01G41LB(ESMT 系) 物理参数，与 RAX3000Q 的 8bit/512 不同。 */
-		nand-ecc-strength = <4>;
-		nand-ecc-step-size = <512>;
+		/* 第 57 次：删掉第 44 次从 5.4 闭源 FDT 抄来的 4bit/512 强行声明。
+		 * 6.12 主线该节点已由 qpic-nand@79b0000 改名 spi@79b0000（qcom_snand
+		 * 新驱动架构），ECC 由 drivers/mtd/nand/spi 的芯片 ID 表协商；
+		 * 官方 qosmio/ipq5018-pz-l8.dts（实机验证可启动）此处【不写】这两个属性。
+		 * PZ-L8 NSS 项目实证：U-Boot 写入 ECC 与 qcom_snand 读取 ECC 不一致会
+		 * 导致 ubiattach -74 EUCLEAN、刷后起不来。不再凭 32 位闭源 FDT 猜值。 */
 		nand-bus-width = <8>;
 
 		partitions {
@@ -189,14 +201,14 @@
 
 	qcom,port_phyinfo {
 		// MAC0 -> GE Phy --- MDI --- QCA8337 Phy4(Port5)
-		port@1 {
+		port@0 {
 			port_id = <1>;
 			mdiobus = <&mdio0>;
 			phy_address = <7>;
 		};
 
 		// MAC1 -> Uniphy --- SGMII --- QCA8337 SerDes(Port6)
-		port@2 {
+		port@1 {
 			port_id = <2>;
 			mdiobus = <&mdio1>;
 			forced-speed = <1000>;

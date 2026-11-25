@@ -7,8 +7,8 @@
   5G   : WDS_AP / WDS123456        ch36 · HE160 · 4addr
   2.4G : BRIDGE-SETUP / admin12345
   主备 : 172.10.10.241 / 172.10.10.242（DHCP 主开备关）  STP 开  防火墙 / IPv6 关
-  机器狗: 连续不通 5 分钟重启 | set-delay 10 改时间 | set-peer auto 互 ping 对端
-            dryrun on 暂停 | 3 次不通自动停手 | grace 6 分钟内可 SSH
+  机器狗: 【插件·配置自己设】/etc/wdsdog.conf（bridge-watchdog config 生成模板）
+            出厂 5 分钟/宽限 6 分钟/3 次停手 | status 看配置源 | off 彻底停用
   🔴 改管理 IP 后请跑 bridge-watchdog resync（别名 169.254.241.1/.2 已防误重启）
   ⚠ 刷完先 passwd 改掉 admin；首次务必 TTL 验证 4addr 协商
   完整说明: FIRMWARE.md

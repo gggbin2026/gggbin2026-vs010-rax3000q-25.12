@@ -275,10 +275,8 @@ fi
 # ── 7c.【AP 模式】机器狗停用 ──────────────────────────────────────
 # AP 模式没有 5G WDS 链路，机器狗没有判据可盯。显式 stop + disable，
 # 专治 sysupgrade 勾了「保留配置」把旧 rc.d 链接带回来的情况。
-if command -v uci >/dev/null 2>&1; then
-    uci -q set wdsdog.main.enabled='0' 2>/dev/null || true
-    uci -q commit wdsdog 2>/dev/null || true
-fi
+# 第 58 次【插件化】：不再 uci set wdsdog.main.enabled='0' 覆写用户配置。
+# AP 出厂停用由 files.ap/etc/config/wdsdog 提供；用户想开机器狗自己改配置即可。
 if [ -x /etc/init.d/bridge-watchdog ]; then
     /etc/init.d/bridge-watchdog stop    2>/dev/null || true
     /etc/init.d/bridge-watchdog disable 2>/dev/null || true

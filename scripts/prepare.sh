@@ -44,6 +44,18 @@ done < "$ROOT/feeds.conf.default"
 ./scripts/feeds install -a
 echo "  ✓ feeds 就绪"
 
+# ── 第 58 次：安装【独立插件包】bridge-watchdog ──────────────────
+# 标准 OpenWrt package 目录，能被 apk/opkg 单独装卸与升级；
+# 必须在 gen-config.sh（内部 make defconfig）之前放进树，否则 CONFIG_PACKAGE_
+# bridge-watchdog=y 会被 Kconfig 当作未知符号丢掉。
+if [ -d "$ROOT/package/bridge-watchdog" ]; then
+  rm -rf "$TREE/package/bridge-watchdog"
+  cp -r "$ROOT/package/bridge-watchdog" "$TREE/package/bridge-watchdog"
+  echo "  ✓ 已装入插件包 package/bridge-watchdog（可独立装卸/升级）"
+else
+  echo "::warning::缺 package/bridge-watchdog，机器狗将只由 files/ overlay 提供"
+fi
+
 # ── 3. 板级注入（VS010 DTS / RAX3000Q 校验 / BDF 落盘）──
 "$ROOT/scripts/board-inject.sh" "$D" "$TREE"
 
@@ -100,21 +112,29 @@ fi
 
 printf '%s\n' "$MODE" > "$TREE/files/etc/firmware_mode"
 
-# ── 第 49 次：编译期自定义机器狗（仅 WDS）──────────────────────────
-# 刷后仍可用 bridge-watchdog set-delay / set-peer 随时改，不用重编。
-if [ "$MODE" = wds ]; then
-  WD_DELAY="${WDS_DELAY:-5}"; WD_PEER="${WDS_PEER:-auto}"
-  case "$WD_DELAY" in ''|*[!0-9]*) WD_DELAY=5 ;; esac
-  [ "$WD_DELAY" -ge 1 ] && [ "$WD_DELAY" -le 120 ] || WD_DELAY=5
-  case "$WD_PEER" in
-    auto|off) ;;
-    ''|*[!0-9.]*) WD_PEER=auto ;;
-    *) ;;   # 纯数字+点，按具体 IP 处理
-  esac
-  # 只替换引号内的值，保留行尾注释与缩进
-  sed -i -E "s/option delay '[0-9]*'/option delay '$WD_DELAY'/" "$TREE/files/etc/config/wdsdog"
-  sed -i -E "s/option peer '[^']*'/option peer '$WD_PEER'/"   "$TREE/files/etc/config/wdsdog"
-  echo "  ✓ WDS 机器狗：连续不通 ${WD_DELAY} 分钟重启，peer=${WD_PEER}"
+# ── 第 58 次【插件化】：编译期默认【不注入】机器狗参数 ──────────────
+# 用户要求「配置我自己来设置」：workflow 的 wds_delay / wds_peer 默认留空，
+# 这里就一个字节都不改 tree/files/etc/config/wdsdog，出厂值原样保留；
+# 用户刷后写 /etc/wdsdog.conf 或 uci set 自己定，首启也不会覆写。
+# 只有用户【主动】在 Run workflow 里填了值才 sed（兼容老习惯）。
+if [ "$MODE" = wds ] && { [ -n "${WDS_DELAY:-}" ] || [ -n "${WDS_PEER:-}" ]; }; then
+  WD_DELAY="${WDS_DELAY:-}"; WD_PEER="${WDS_PEER:-}"
+  if [ -n "$WD_DELAY" ]; then
+    case "$WD_DELAY" in ''|*[!0-9]*) WD_DELAY=5 ;; esac
+    [ "$WD_DELAY" -ge 1 ] && [ "$WD_DELAY" -le 120 ] || WD_DELAY=5
+    sed -i -E "s/option delay '[0-9]*'/option delay '$WD_DELAY'/" "$TREE/files/etc/config/wdsdog"
+  fi
+  if [ -n "$WD_PEER" ]; then
+    case "$WD_PEER" in
+      auto|off) ;;
+      *[!0-9.]*) WD_PEER=auto ;;
+      *) ;;
+    esac
+    sed -i -E "s/option peer '[^']*'/option peer '$WD_PEER'/" "$TREE/files/etc/config/wdsdog"
+  fi
+  echo "  ✓ 用户在 workflow 显式填了机器狗参数，已注入：delay=${WD_DELAY:-不填} peer=${WD_PEER:-不填}"
+else
+  echo "  ✓ 机器狗插件：编译期不注入任何参数（配置由用户自设，见 /etc/wdsdog.conf）"
 fi
 # 第 48 次：AP / WDS 统一管理地址 172.10.10.241 / 255.255.252.0（/22）
 AP_IP=172.10.10.241

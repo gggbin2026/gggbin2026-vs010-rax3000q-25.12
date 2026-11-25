@@ -38,6 +38,10 @@
 # 清零计时、只记日志、绝不重启（第 18 次校准保留）。
 
 CONF_PKG=wdsdog
+# 第 58 次【插件化】：用户配置层 /etc/wdsdog.conf 优先级最高（纯 KEY=VALUE）。
+# 这是用户「配置我自己来设置」的落点：编译期不再注入、首启不再 uci set 覆写，
+# 用户写这个文件（或用 uci set）即完全生效，升级/重启都不会被冲掉。
+USER_CONF=/etc/wdsdog.conf
 STATE=/tmp/bridge-watchdog.state
 LOG=/tmp/bridge-watchdog.log
 RCNT=/etc/wdsdog-reboot-count
@@ -46,15 +50,32 @@ LL_AP='169.254.241.1'
 LL_STA='169.254.241.2'
 DISCOVERED=/tmp/wdsdog-peer-discovered
 
-# ── 配置读取（带缺省；第 49 次缺省 = WDS 出厂启用的安全值）────────
-_cfg() {  # $1=key $2=默认值
+# ── 配置读取（第 58 次：用户文件 > UCI > 出厂缺省）────────────────
+_user_cfg() {  # 从 /etc/wdsdog.conf 读 KEY=VALUE；全注释/不存在 → 空
+    [ -f "$USER_CONF" ] || return 0
+    awk -F= -v k="$1" '
+        /^[[:space:]]*#/ {next} /^[[:space:]]*$/ {next}
+        { key=$1; sub(/^[^=]*=/,"");
+          gsub(/^[[:space:]]+|[[:space:]]+$/,"",key);
+          gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0);
+          sub(/^"/,"",$0); sub(/"$/,"",$0);
+          if (key==k) { print $0; exit } }' "$USER_CONF" 2>/dev/null
+}
+_cfg() {  # $1=key $2=默认值（仅当用户层和 UCI 都没配时才用）
+    v=$(_user_cfg "$1")
+    [ -n "$v" ] && { echo "$v"; return; }
     v=$(uci -q get "$CONF_PKG.main.$1" 2>/dev/null)
     [ -n "$v" ] && { echo "$v"; return; }
     echo "$2"
 }
 load_cfg() {
-    # 配置文件丢了（sysupgrade / 首次刷机 / 手删）也按 WDS 出厂语义走：
-    # 启用 + 5 分钟 + 真重启；AP 模式由 files.ap/etc/config/wdsdog 显式 enabled=0 覆盖。
+    # 第 58 次【插件化安全缺省】：用户把 UCI 配置段删光、且没写用户文件时，
+    # 绝不擅自按「启用 + 5 分钟」乱重启 —— 标记未配置并停手，等用户自己配。
+    # 出厂 files/etc/config/wdsdog 仍在（冻结基线 82 项一字不动），正常刷机照旧工作。
+    UNCONFIGURED=0
+    if [ ! -f "$USER_CONF" ] && ! uci -q get "$CONF_PKG.main" >/dev/null 2>&1; then
+        UNCONFIGURED=1
+    fi
     ENABLED=$(_cfg enabled 1)
     DELAY=$(_cfg delay 5)
     GRACE=$(_cfg grace 6)
@@ -78,6 +99,9 @@ load_cfg() {
     case "$MODE" in or|ping|wireless) ;; *) MODE=or ;; esac
     [ "$ENABLED" = 1 ] || ENABLED=0
     [ "$DRYRUN" = 1 ] || DRYRUN=0
+    [ "$UNCONFIGURED" = 1 ] && ENABLED=0
+    [ -f "$USER_CONF" ] && CFG_SRC="$USER_CONF（用户自配）" \
+                        || CFG_SRC="/etc/config/wdsdog（UCI 出厂）"
 }
 
 # ── 单调时钟 / 到期判定 ──────────────────────────────────────────
@@ -276,10 +300,16 @@ loop() {
     _ensure_ll_alias
     _refresh_discovery
     _ip_warn "$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')" >/dev/null 2>&1 || true
-    _log "机器狗启动: enabled=$ENABLED delay=${DELAY}分 grace=${GRACE}分 interval=${INTERVAL}秒 mode=$MODE peer=$PEER -> $(_resolve_peer) 别名=$(_ll_peer) 发现=$(cat $DISCOVERED 2>/dev/null || echo 无) anchor=${ANCHOR:-无} max_reboots=$MAXRB dryrun=$DRYRUN"
+    _log "机器狗启动(插件): 配置源=$CFG_SRC enabled=$ENABLED delay=${DELAY}分 grace=${GRACE}分 interval=${INTERVAL}秒 mode=$MODE peer=$PEER -> $(_resolve_peer) 别名=$(_ll_peer) 发现=$(cat $DISCOVERED 2>/dev/null || echo 无) anchor=${ANCHOR:-无} max_reboots=$MAXRB dryrun=$DRYRUN"
+    # 第 58 次：未配置 = 只待命、绝不重启。用户自己写 /etc/wdsdog.conf 或 uci set 后，
+    # 下一次 load_cfg（restart 或新开机）立即生效，不用重编固件。
+    if [ "$UNCONFIGURED" = 1 ]; then
+        _log "【未配置】机器狗插件已安装但未设置参数：不动作、不重启。请编辑 /etc/wdsdog.conf（bridge-watchdog config 生成模板）或 uci set wdsdog.main.*，然后 /etc/init.d/bridge-watchdog restart"
+    fi
     tick=0
     while :; do
         now=$(_now)
+        [ "$UNCONFIGURED" = 1 ] && { sleep "${INTERVAL:-30}"; load_cfg; continue; }
         tick=$(( tick + 1 ))
         [ $(( tick % 10 )) -eq 0 ] && _refresh_discovery
         if [ "$now" -lt $(( GRACE * 60 )) ]; then
@@ -345,6 +375,9 @@ status() {
     first=$(cat "$STATE" 2>/dev/null || echo 0)
     case "$first" in ''|*[!0-9]*) first=0 ;; esac
     echo '========== bridge-watchdog 状态 =========='
+    echo "  插件版本    : bridge-watchdog (第58次插件化，可独立装卸/升级)"
+    echo "  配置源      : $CFG_SRC"
+    [ "$UNCONFIGURED" = 1 ] && echo "  🔴 未配置    : 不动作、不重启；bridge-watchdog config 生成用户配置模板"
     echo "  启用        : $ENABLED   (on / off)"
     echo "  重启延时    : $DELAY 分钟  ★ set-delay 10 可改成 10 分钟，立即生效"
     echo "  开机宽限    : $GRACE 分钟  (set-grace N)"
@@ -391,6 +424,8 @@ usage() {
 bridge-watchdog —— WDS 无线看门狗（机器狗）
 
   status / once          看状态 / 立刻逐条检测一次（绝不重启）
+  config                 ★生成【用户配置模板】/etc/wdsdog.conf（全注释，自己填；最高优先）
+                         删掉该文件即回到 /etc/config/wdsdog 的出厂 UCI 值
   set-delay N            ★自定义「连续不通多少分钟才重启」，1~120，默认 5
   set-grace N            开机宽限分钟数，默认 6（这段时间内可从容 SSH 改配置）
   set-interval N         检查间隔秒数，默认 30
@@ -417,6 +452,34 @@ main() {
     cmd=${1:-status}
     case "$cmd" in
         loop)      loop ;;
+        config)
+            if [ -f "$USER_CONF" ]; then
+                echo "已存在 $USER_CONF（不会覆盖，自己编辑即可）："; cat "$USER_CONF"; exit 0
+            fi
+            cat > "$USER_CONF" <<'WDSCONF'
+# ══════════════════════════════════════════════════════════════
+# bridge-watchdog 插件 · 用户配置（第 58 次）
+# ★ 本文件优先级【最高】，覆盖 /etc/config/wdsdog 的同名项。
+# ★ 全部默认注释：不取消注释 = 未配置 = 插件只待命、绝不重启。
+# ★ 想用哪个就取消哪行注释并改值；不写的项继续用 UCI / 出厂缺省。
+# ★ 改完执行 /etc/init.d/bridge-watchdog restart（或下次开机）生效，不用重编。
+# ★ 删掉本文件即完全回到 UCI 出厂配置；想彻底停用：bridge-watchdog off
+# ══════════════════════════════════════════════════════════════
+# enabled=1              # 1=启用 / 0=彻底停用
+# delay=5                # 连续不通多少分钟才重启（1~120）
+# grace=6                # 开机宽限分钟（等 WiFi 校准 / 主备收敛）
+# interval=30            # 每多少秒检查一次
+# iface=auto             # 固定 WDS 接口名，auto=自动挑
+# peer=auto              # auto=按主备互 ping 对端 / off=不 ping / 具体 IP
+# anchor=                # 可选锚点（上级网关），任一通即算通
+# mode=or                # or | ping | wireless；or 最不容易误重启
+# max_reboots=3          # 连续重启上限，达到后自动转 dryrun 停手
+# dryrun=0               # 1=只记日志不重启（调试用）
+WDSCONF
+            echo "已生成 $USER_CONF（全注释模板）"
+            echo "请自行取消注释并填值 → /etc/init.d/bridge-watchdog restart"
+            echo "★ 配置完全由你决定；编译期与首启都不会再覆写它。"
+            ;;
         once)      once ;;
         status)    status ;;
         resync)

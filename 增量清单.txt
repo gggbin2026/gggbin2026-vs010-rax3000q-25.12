@@ -1,80 +1,102 @@
-VS010 / RAX3000Q · 第 56 次 · 增量清单
+VS010 / RAX3000Q · 第 58 次 · 【18:00 之后累积修复增量包】清单
 （本文件仅给你看，★ 不用上传到仓库 ★）
 
 ════════════════════════════════════════
-★★★ 先看这个：这次编译其实已经成功了 ★★★
+★★★ 这个包是什么：18 点后的修复一次补齐 ★★★
 ════════════════════════════════════════
-11-25 07:26 make → 08:03(vs010) / 08:00(rax3000q) 完成，
-两台固件都已上传 artifact（各约 46MB），可直接下载，不用重编：
-  VS010     .../actions/runs/45567664935/artifacts/15003161629
-  RAX3000Q  .../actions/runs/45567664935/artifacts/15003175799
-唯一挂掉的是最后 Publish Release 步骤（exit 127）：
-  NOTES="...`xxx`..." 里的 Markdown 反引号被 bash 当成命令替换执行。
+  基准 = 远端 gggbin2026-vs010-rax3000q-25.12 当前 HEAD d978691（17:04，第56次状态）
+  ★ 你 18 点之后的修复一直没传上去，这个包把【第 57 次 + 第 58 次】合并成一份，
+    一次覆盖到位，不用分两次传。
+
+  内含：
+    · 第 57 次：两台 DTS /chosen 补 bootargs 兜底、删闭源 ECC 声明、
+      port@ 编号对齐官方 pz-l8、新增 docs/TTL-启动诊断.md
+    · 第 58 次：机器狗改成独立插件、配置 100% 由用户设置
 
 ════════════════════════════════════════
-怎么传
+★ 怎么传
 ════════════════════════════════════════
-前提：仓库已经是【第 55 次】状态（上一轮增量包上传过）。
-只要把下面文件按原路径覆盖即可，其余文件一个都不用动。
+  unzip -o VS010-RAX3000Q-inc58-after18.zip -d 你的仓库目录
+  cd 你的仓库目录 && sh scripts/verify.sh    # 应输出 RESULT: PASS（0 警告）
+  git add -A && git commit -m "第58次：机器狗插件化 + 18点后累积修复" && git push
 
-  · GitHub 网页：Add file → Upload files，连同 .github/ scripts/
-    release/ baseline/ 这些【目录结构】一起拖进去覆盖同名文件
-  · 命令行最稳（隐藏文件 / 目录带点不会出错）：
-      unzip -o VS010-RAX3000Q-增量修复包-第56次.zip -d 你的仓库目录
-      cd 你的仓库目录 && sh scripts/verify.sh   # 应输出 RESULT: PASS
-      git add -A && git commit -m "第56次增量：Release 改用 --notes-file" && git push
-
-★ 不确定仓库是不是第 55 次 → 改用总包
-  VS010-RAX3000Q-总修复可上传文件-第56次.zip（全量覆盖）
+  ★ 网页上传时 board/ scripts/ docs/ package/ baseline/ config/ release/
+    要连【目录结构】一起拖；.github/workflows 第一个字符是点。
 
 ════════════════════════════════════════
-本次改动（清单由脚本自动生成，见下方）
+本次文件清单（脚本自动生成）
 ════════════════════════════════════════
-~ .github/workflows/build-ap.yml
 ~ .github/workflows/build-wds.yml
 ~ FIRMWARE.md
 ~ README.md
+~ baseline/frozen-baseline.conf
 ~ baseline/基线摘要.log
 ~ baseline/插件与服务冻结基线-详细日志.md
 ~ baseline/插件基线冻结报告.html
+~ board/ipq5018-rax3000q.6.12.dts
+~ board/ipq5018-vs010.6.12.dts
+~ config/common.seed
+~ files.ap/etc/banner
+~ files.ap/etc/uci-defaults/99-bridge-ready
+~ files/etc/banner
+~ files/etc/uci-defaults/99-bridge-ready
+~ files/usr/sbin/bridge-watchdog
+~ release/RELEASE-NOTES-AP.md
+~ release/RELEASE-NOTES-WDS.md
+~ scripts/prepare.sh
 ~ scripts/verify.sh
 ~ 上传说明.txt
 ~ 修复总览.md
-+ release/RELEASE-NOTES-AP.md
-+ release/RELEASE-NOTES-WDS.md
-════════════════════════════════════════
-关键改动说明
-════════════════════════════════════════
-  + release/RELEASE-NOTES-WDS.md    ★ 新增：WDS Release 说明纯 Markdown 模板
-  + release/RELEASE-NOTES-AP.md     ★ 新增：AP Release 说明纯 Markdown 模板
-  ~ 两份 workflow                   Publish Release 改用 --notes-file，
-                                    移除 NOTES="..." 双引号赋值（反引号不再被 shell 解释）
-  ~ scripts/verify.sh               第56次判据 + 两个旧判据改指向 release/*.md
-  ~ README / FIRMWARE / 修复总览    第56次章节 + 累积至第56次
-  ~ baseline/ 三份标红日志         第十五章复盘
-  ~ 上传说明.txt                    artifact 直取说明 + 双包用法
++ docs/TTL-启动诊断.md
++ package/bridge-watchdog/Makefile
++ package/bridge-watchdog/files/USER-CONFIG.md
++ package/bridge-watchdog/files/bridge-watchdog
++ package/bridge-watchdog/files/bridge-watchdog.init
++ package/bridge-watchdog/files/wdsdog.conf.example
 
 ════════════════════════════════════════
-没动 / 不用管
+★ 机器狗插件化：配置你自己来设置
 ════════════════════════════════════════
-  · baseline/frozen-baseline.conf（82 项）、config/*.seed（29 个 =y）—— 一字未改
-  · scripts/gen-config.sh / prepare.sh / board-inject.sh / port-overlay.sh —— 一字未改
-  · files/、files.ap/ 全部运行期脚本 —— 一字未改
-  · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
-    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART / DTS / oem54/
-  · 本次【无需手动删任何文件】
+  旧实现最痛的一点：首启 99-bridge-ready 强写 7 个 uci set wdsdog.main.*，
+  把你刷后改的 delay / peer / enabled 全冲回出厂值。这次彻底收口：
+    + package/bridge-watchdog/  标准独立插件包（可 apk 单独装卸/升级）
+    · 用户配置 /etc/wdsdog.conf【优先级最高】，bridge-watchdog config 生成全注释模板
+    · 编译期 wds_delay / wds_peer 默认【留空=不注入】
+    · 首启【不再写任何 uci set wdsdog.*】，你的配置不会被覆写
+    · 未配置只待命、绝不重启；status 显示配置源
+    · 冻结基线 82 项一字不动，只追加 1 项 → 83 项（只增不减）
+
+  刷后自己配：
+    bridge-watchdog config                # 生成 /etc/wdsdog.conf（全注释）
+    vi /etc/wdsdog.conf                   # 取消注释、填自己的值
+    /etc/init.d/bridge-watchdog restart
+    bridge-watchdog status                # 看配置源 / 启用 / 距重启还剩
+
+  完整说明：package/bridge-watchdog/files/USER-CONFIG.md
 
 ════════════════════════════════════════
-现在你可以怎么选
+🔴 建议手动删的只有 2 个文件
 ════════════════════════════════════════
-  A. 只要固件 → 直接下上面两个 artifact，不用传包、不用重编（最快）
-  B. 想让 GitHub Release 自动生成（带完整说明、可长期留存）→
-     传第 56 次包 → verify PASS → Actions 手动 Run 一次（约 37 分钟）
+  仓库根目录散落的 build-wds.yml / build-ap.yml
+  —— 第 56 次上传放错位置留下的重复文件；正确版已在 .github/workflows/。
+  它们不进编译链，但留着容易再混淆。
+
+  ★ 其余 62 个「远端有、包里没有」的文件【一律别删】：
+    FLASHING.md / firmware/* / flash.py / ipq5018-vs010.dts /
+    oem_extract/ / ATR文件/ / 两份 ART / oem54/ / files/ 下那批野文件
+    （野文件 prepare.sh 已在构建树自动排除，仓库里留着不影响固件）
 
 ════════════════════════════════════════
-以后固定规矩（已写进 修复总览.md F 段）
+编译与刷机
 ════════════════════════════════════════
-每次修复同时出两个包：
-  总包  VS010-RAX3000Q-总修复可上传文件-第N次.zip  （全量，兜底）
-  增量  VS010-RAX3000Q-增量修复包-第N次.zip        （只含本次改动，日常用）
-两个包同名文件逐字节一致；增量包不含删除动作，需删文件会在清单里单列。
+  Actions 手动 Run → baseline qosmio-25.12-nss → ★ device 先选 vs010 单跑
+  wds_delay / wds_peer 保持【留空】（配置归你）；
+  nand_patch / ART_CALIBRATION / ssh / build_verbose 全部 false；ntp_poll_minutes=5
+
+  刷前红线：64 位不死 U-Boot 硬门槛 / 绝不刷 CMCC U-Boot、MIBIB、大分区 /
+  备份 0:ART(mtd13) 与 0:TRAINING(mtd14) / 首次务必 TTL /
+  VS010 若仍 Starting kernel 零输出，先按 docs/TTL-启动诊断.md 做 TTL 诊断 /
+  刷完第一件事 passwd 改掉 admin。
+
+  不确定仓库状态 → 改用 VS010-RAX3000Q-full58.zip（全量兜底）
+  两个包同名文件逐字节一致；外层文件名全 ASCII，避免附件预览解析失败。
