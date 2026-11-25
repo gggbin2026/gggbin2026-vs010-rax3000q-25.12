@@ -208,4 +208,21 @@ else
     [ -x /etc/init.d/sysntpd ] && { /etc/init.d/sysntpd enable 2>/dev/null || true; /etc/init.d/sysntpd restart 2>/dev/null || true; }
 fi
 
+
+# ── 第 54 次：无线 DHCP 防护是否真的生效（nft 命令可见性）─────────
+# gen-config 里 nftables 可能被 make defconfig 收敛成「符号合并」，
+# l2-guard 有容错不会让系统起不来，但防护会空转。这里明确报出来。
+if command -v nft >/dev/null 2>&1 && nft list tables bridge >/dev/null 2>&1; then
+    say "  ✓ nft/bridge 可用：无线端 DHCP 防护具备生效条件"
+    if nft list tables bridge 2>/dev/null | grep -q 'nwrt_l2'; then
+        say "  ✓ nwrt_l2 表已加载（无线 DHCP Snooping 实际生效）"
+    else
+        say "  ⚠ nwrt_l2 表未加载：跑 l2-guard apply 或查 /etc/config/l2guard enabled"
+    fi
+else
+    say "  🔴 nft 命令 / bridge family 不可用 —— 无线 DHCP 防护【未生效】"
+    say "     刷后执行 apk list nftables* 核对；若确实缺包，反馈编译日志再补基线等价符号"
+fi
+
+
 exit 0

@@ -50,10 +50,15 @@ build_rules() {
 apply() {
     [ "$(cfg enabled)" = '1' ] || { off; echo 'l2-guard: disabled'; return 0; }
     if ! have_nft; then
+        # 第 54 次：nftables 包曾被 make defconfig 收敛，nft 命令可能真不在固件里。
+        # 不再轻描淡写，明确写状态 + 日志，health-fix / 状态页能一眼看到防护是否空转。
         echo 'skip' > "$MARK"
-        logger -t l2-guard 'nft/bridge 不可用，跳过（官方基线无此包时属预期）'
-        echo 'l2-guard: nft bridge 不可用，已跳过'; return 0
+        printf '%s\n' 'nft-missing' > /tmp/l2guard.reason
+        logger -t l2-guard '🔴 nft 命令或 bridge family 不可用：无线端 DHCP 防护未生效！请核对 nftables 包是否编入（apk list nftables*）'
+        echo '🔴 l2-guard: nft bridge 不可用，无线 DHCP 防护【未生效】（health-fix 会再报一次）'
+        return 0
     fi
+    rm -f /tmp/l2guard.reason 2>/dev/null || true
     build_rules
     # 只重建自己的表，绝不 flush 全局 ruleset
     nft delete table bridge "$TABLE" 2>/dev/null || true
