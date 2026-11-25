@@ -902,3 +902,42 @@ B 层之后仅剩 2 处代码 `exit 1`（核心锚点收敛 / 设备符号丢失
 🔴 **82 项冻结基线一个没动、一个没删**；`config/*.seed` 29 个 `=y` 一字未改。
 第 54 次构建树野文件排除 / nft 报红、第 51 次 NTP 5 分钟循环、第 50 次改 IP 防护、
 第 49 次机器狗、管理网段、SSH/TTYD、防火墙/IPv6 关、WAN+LAN 同桥、STP、简洁日志全部原样保留。
+
+## 第 56 次：编译已成功，修复 Release 发布 `exit 127`（2026-11-25）
+
+> **这轮编译本身已经完全成功了**：07:26 开始 make，08:03（vs010）/ 08:00（rax3000q）完成，
+> 两台都产出 `factory.img` 16M + `factory.ubi` 16M + `sysupgrade.bin` 15M，
+> 以 `Nwrt-WDS-6.12.91-20261125-<机型>-*` 上传为 artifact（各约 46 MB）。
+> 唯一挂掉的是**最后一步 Publish Release**，shell 退出码 **127**。
+
+### 根因
+
+`NOTES="✅ ... `gen-config.sh` ... `bridge-watchdog set-peer <对端IP>` ..."` 把整段 Markdown
+塞进 bash 双引号字符串，**反引号被当成命令替换执行**：`gen-config.sh` / `172.10.10.241` /
+`bridge-watchdog` 全被当命令跑 → `command not found`；`<对端新管理IP>` 里的 `<` 还触发
+`syntax error`。`set -euo pipefail` 下第一个失败就让整个步骤挂掉。
+
+之前几轮编译都在 `make` 之前失败（第 52/54/55 次），从没走到 Publish Release；
+第 55 次修好后第一次全链跑通，才在最后一步撞上。
+
+### 修法
+
+| 改动 | 说明 |
+|---|---|
+| 🔴 新增 `release/RELEASE-NOTES-WDS.md` / `-AP.md` | 纯 Markdown，不经过 shell 解释 |
+| 🔴 两份 workflow 改 `gh release create --notes-file "$NOTES_FILE"` | 移除 `NOTES="..."` 双引号赋值与 `printf '%b' "$NOTES"` |
+| 元信息 | 几行不含反引号的 `echo` 追加到 `mktemp` 临时文件，用后 `rm -f` |
+| `verify.sh` 第 56 次判据 | Publish 代码行禁止反引号 / 旧 NOTES 赋值，必须 `--notes-file` + 引用 `release/*.md` |
+
+模拟执行两份 Publish 步骤（gh 打桩）：退出码 0、无 `command not found`、`--notes-file` 正确传入。
+
+### 🔴 不用重编也能拿到固件
+
+两台固件已在 Actions run `45567664935` 的 artifact：
+VS010 `Nwrt-WDS-vs010-qosmio-25.12-nss`（ID `15003161629`）、
+RAX3000Q `Nwrt-WDS-rax3000q-qosmio-25.12-nss`（ID `15003175799`）。
+上传第 56 次包后**重跑一次**才会自动生成 GitHub Release（约 37 分钟）；只要固件直接下 artifact 即可。
+
+🔴 **82 项冻结基线一个没动、29 个 `=y` 一字未改**；B 层纯诊断、构建树野文件排除、
+nft 报红、NTP 5 分钟循环、机器狗、`172.10.10.241/22`、SSH/TTYD、防火墙/IPv6 关、
+WAN+LAN 同桥、STP、简洁日志全部原样保留。**本轮没删也没加任何插件**。

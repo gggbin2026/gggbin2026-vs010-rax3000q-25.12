@@ -8,7 +8,7 @@ STRICT="${VERIFY_STRICT:-0}"      # 1 = 本地严格自检（警告也算失败�
 ok(){ echo "  ✓ $1"; }
 bad(){ echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 warn(){ echo "  ⚠ $1（非阻断，不停止编译）"; WARN=$((WARN+1)); }
-has(){ grep -q "$1" "$2" 2>/dev/null; }
+has(){ grep -q -- "$1" "$2" 2>/dev/null; }   # -- 兼容以 - 开头的检索词（如 --notes-file）
 
 echo "==================== [verify] 新内核改造包自检 ===================="
 
@@ -464,13 +464,53 @@ for f in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
     && ok "$(basename "$f")：下载说明红字段落 + Actions 真红日志 + NOTICE 附件" \
     || bad "$(basename "$f") 缺改 IP 说明/标红"
 done
-has '改网桥 IP 必读' .github/workflows/build-wds.yml \
-  && has 'resync' .github/workflows/build-wds.yml \
-  && ok "WDS Release NOTES 明确写「改 IP 不会误重启 + resync」" \
+has '改网桥 IP 必读' release/RELEASE-NOTES-WDS.md \
+  && has 'resync' release/RELEASE-NOTES-WDS.md \
+  && ok "WDS Release NOTES（独立 md）明确写「改 IP 不会误重启 + resync」" \
   || bad "WDS Release NOTES 缺改 IP 说明"
 has '🔴 改管理 IP 后请跑 bridge-watchdog resync' files/etc/banner \
   && ok "登录 banner 带改 IP 提示" || bad "banner 缺改 IP 提示"
 [ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 仍精简（14 行内）" || warn "banner 偏长"
+# ── 第 56 次：Release 发布步骤不再把 Markdown 塞进 shell 字符串 ─────
+# 11-25 08:04 两台编译【其实全部成功】、固件已上传 artifact，却都挂在最后
+# Publish Release 步骤 exit 127：
+#   line 3: gen-config.sh: command not found
+#   line 3: 172.10.10.241: command not found
+#   line 3: bridge-watchdog: command not found
+#   command substitution: syntax error near unexpected token `newline'
+# 根因：NOTES="...`xxx`..." 里的 Markdown 反引号被 bash 当成【命令替换】执行，
+# 且步骤是 set -euo pipefail，第一个失败就整个步骤挂掉。
+# 修法：说明文本独立成 release/*.md，用 gh release create --notes-file 传入，
+#       完全不经过 shell 解释；元信息用几行不含反引号的 echo 追加。
+P56=1
+for wf in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
+  # 只看代码行（排除注释），代码行里不允许出现反引号 / 旧 NOTES 赋值
+  bad_ticks=$(awk '/^[[:space:]]*#/{next} /`/ {n++} END{print n+0}' "$wf")
+  [ "$bad_ticks" = 0 ] \
+    && ok "$(basename "$wf") Publish 步骤代码行无反引号（不会再触发命令替换）" \
+    || { bad "$(basename "$wf") Publish 步骤代码行仍有 $bad_ticks 个反引号"; P56=0; }
+  has --notes-file "$wf" \
+    && ok "$(basename "$wf") 使用 --notes-file 传 Release 说明" \
+    || { bad "$(basename "$wf") 缺 --notes-file"; P56=0; }
+  if grep -qE '^[[:space:]]*NOTES="|printf .%b. "\$NOTES"' "$wf"; then
+    bad "$(basename "$wf") 仍残留旧 NOTES 双引号赋值"; P56=0
+  else
+    ok "$(basename "$wf") 已移除旧 NOTES 双引号赋值"
+  fi
+  has 'cp "$GITHUB_WORKSPACE/release/' "$wf" \
+    && ok "$(basename "$wf") 从独立 md 文件读取说明" \
+    || { bad "$(basename "$wf") 未引用 release/*.md"; P56=0; }
+done
+for n in RELEASE-NOTES-WDS.md RELEASE-NOTES-AP.md; do
+  [ -f "release/$n" ] && ok "存在 release/$n（纯 Markdown，不经过 shell）" \
+    || { bad "缺 release/$n"; P56=0; }
+done
+# 说明文件本身允许有反引号（它是文件，不是 shell 字符串），但要确认它没被当成脚本
+head -1 release/RELEASE-NOTES-WDS.md | grep -q '^✅' \
+  && ok "Release 说明是纯文本 md（首行非 shebang，不会被当脚本执行）" \
+  || { bad "Release 说明格式异常"; P56=0; }
+[ "$P56" = 1 ] && ok "第 56 次：编译成果能正常发布成 Release（exit 127 已消除）"
+
 # ── 第 55 次：彻底移除「树里查不到包源 → 真缺 → exit 1」─────────────
 # 03:2x 编译再次在 make 之前断掉：
 #   🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：
@@ -664,9 +704,9 @@ has 'ntp_poll_minutes:' .github/workflows/build-wds.yml \
 for f in files/etc/banner files.ap/etc/banner; do
   has '每 5 分钟循环校时' "$f" || bad "$f 缺 NTP 周期说明"
 done
-has '每 5 分钟循环校时' .github/workflows/build-wds.yml \
-  && has '每 5 分钟循环校时' .github/workflows/build-ap.yml \
-  && ok "两份 Release NOTES 也写明 NTP 周期" || bad "Release NOTES 缺 NTP 周期"
+has '每 5 分钟循环校时' release/RELEASE-NOTES-WDS.md \
+  && has '每 5 分钟循环校时' release/RELEASE-NOTES-AP.md \
+  && ok "两份 Release NOTES（独立 md）也写明 NTP 周期" || bad "Release NOTES 缺 NTP 周期"
 
 # ── 第 46 次：qosmio 树自带坏 DTS 导致 target/linux/install 失败 ──
 has '第46次裁剪' scripts/board-inject.sh \

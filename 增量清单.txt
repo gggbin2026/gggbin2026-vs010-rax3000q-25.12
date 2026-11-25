@@ -1,59 +1,80 @@
-VS010 / RAX3000Q · 第 55 次 · 增量清单
+VS010 / RAX3000Q · 第 56 次 · 增量清单
 （本文件仅给你看，★ 不用上传到仓库 ★）
+
+════════════════════════════════════════
+★★★ 先看这个：这次编译其实已经成功了 ★★★
+════════════════════════════════════════
+11-25 07:26 make → 08:03(vs010) / 08:00(rax3000q) 完成，
+两台固件都已上传 artifact（各约 46MB），可直接下载，不用重编：
+  VS010     .../actions/runs/45567664935/artifacts/15003161629
+  RAX3000Q  .../actions/runs/45567664935/artifacts/15003175799
+唯一挂掉的是最后 Publish Release 步骤（exit 127）：
+  NOTES="...`xxx`..." 里的 Markdown 反引号被 bash 当成命令替换执行。
 
 ════════════════════════════════════════
 怎么传
 ════════════════════════════════════════
-前提：仓库已经是【第 54 次】的状态（11-25 那次上传 + 补过 .gitignore）。
-在这个前提下，只要把下面 11 个文件按原路径覆盖即可，其余 128 个文件一个都不用动。
+前提：仓库已经是【第 55 次】状态（上一轮增量包上传过）。
+只要把下面文件按原路径覆盖即可，其余文件一个都不用动。
 
-  · GitHub 网页：Add file → Upload files，把解压出来的 11 个文件连同
-    .github/ scripts/ baseline/ 这些【目录结构】一起拖进去覆盖同名文件
-  · 命令行更稳（隐藏文件 / 目录带点不会出错）：
-      unzip -o VS010-RAX3000Q-增量修复包-第55次.zip -d 你的仓库目录
-      cd 你的仓库目录 && sh scripts/verify.sh      # 应输出 RESULT: PASS
-      git add -A && git commit -m "第55次增量：B层纯诊断" && git push
+  · GitHub 网页：Add file → Upload files，连同 .github/ scripts/
+    release/ baseline/ 这些【目录结构】一起拖进去覆盖同名文件
+  · 命令行最稳（隐藏文件 / 目录带点不会出错）：
+      unzip -o VS010-RAX3000Q-增量修复包-第56次.zip -d 你的仓库目录
+      cd 你的仓库目录 && sh scripts/verify.sh   # 应输出 RESULT: PASS
+      git add -A && git commit -m "第56次增量：Release 改用 --notes-file" && git push
 
-★ 不确定仓库是不是第 54 次 → 改用总包
-  VS010-RAX3000Q-总修复可上传文件-第55次.zip（139 文件，全量覆盖）
+★ 不确定仓库是不是第 55 次 → 改用总包
+  VS010-RAX3000Q-总修复可上传文件-第56次.zip（全量覆盖）
 
 ════════════════════════════════════════
-本次改动（11 个，全部是「覆盖」，无新增文件、无删除）
+本次改动（清单由脚本自动生成，见下方）
 ════════════════════════════════════════
-  ~ .github/workflows/build-wds.yml          Release NOTES 改为第55次说明
-  ~ .github/workflows/build-ap.yml           同上
-  ~ scripts/gen-config.sh                   ★ 核心修复：B 层改纯诊断，
-                                             删除「真缺阻断」，加平台提供归类
-  ~ scripts/verify.sh                       加第55次判据，防止真缺阻断被加回来
-  ~ README.md                               第55次章节 + 双包交付规范
-  ~ FIRMWARE.md                             第55次章节
-  ~ 修复总览.md                              E15 章节 + F 段双包规范
-  ~ 上传说明.txt                            双包用法
-  ~ baseline/插件与服务冻结基线-详细日志.md   新增第十四章（标红）
-  ~ baseline/插件基线冻结报告.html           新增第十四章（CSS 真红）
-  ~ baseline/基线摘要.log                    第十四章（ANSI 真红）
+~ .github/workflows/build-ap.yml
+~ .github/workflows/build-wds.yml
+~ FIRMWARE.md
+~ README.md
+~ baseline/基线摘要.log
+~ baseline/插件与服务冻结基线-详细日志.md
+~ baseline/插件基线冻结报告.html
+~ scripts/verify.sh
+~ 上传说明.txt
+~ 修复总览.md
++ release/RELEASE-NOTES-AP.md
++ release/RELEASE-NOTES-WDS.md
+════════════════════════════════════════
+关键改动说明
+════════════════════════════════════════
+  + release/RELEASE-NOTES-WDS.md    ★ 新增：WDS Release 说明纯 Markdown 模板
+  + release/RELEASE-NOTES-AP.md     ★ 新增：AP Release 说明纯 Markdown 模板
+  ~ 两份 workflow                   Publish Release 改用 --notes-file，
+                                    移除 NOTES="..." 双引号赋值（反引号不再被 shell 解释）
+  ~ scripts/verify.sh               第56次判据 + 两个旧判据改指向 release/*.md
+  ~ README / FIRMWARE / 修复总览    第56次章节 + 累积至第56次
+  ~ baseline/ 三份标红日志         第十五章复盘
+  ~ 上传说明.txt                    artifact 直取说明 + 双包用法
 
 ════════════════════════════════════════
 没动 / 不用管
 ════════════════════════════════════════
   · baseline/frozen-baseline.conf（82 项）、config/*.seed（29 个 =y）—— 一字未改
+  · scripts/gen-config.sh / prepare.sh / board-inject.sh / port-overlay.sh —— 一字未改
   · files/、files.ap/ 全部运行期脚本 —— 一字未改
-  · scripts/prepare.sh、board-inject.sh、port-overlay.sh —— 一字未改
   · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
     ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART / DTS / oem54/
-  · 本次【无需手动删任何文件】（0 删除）
+  · 本次【无需手动删任何文件】
 
 ════════════════════════════════════════
-为什么这次能只传 11 个
+现在你可以怎么选
 ════════════════════════════════════════
-第 55 次只修了「gen-config.sh 的 B 层误判」这一处代码，其余都是文档 / 日志 /
-Release 说明同步。第 54 次已落地的构建树野文件排除、nft 报红、第 51 次 NTP
-5 分钟循环、第 50 次改 IP 防护、第 49 次机器狗、82 项冻结基线等全部原样保留。
+  A. 只要固件 → 直接下上面两个 artifact，不用传包、不用重编（最快）
+  B. 想让 GitHub Release 自动生成（带完整说明、可长期留存）→
+     传第 56 次包 → verify PASS → Actions 手动 Run 一次（约 37 分钟）
 
 ════════════════════════════════════════
 以后固定规矩（已写进 修复总览.md F 段）
 ════════════════════════════════════════
 每次修复同时出两个包：
-  总包  VS010-RAX3000Q-总修复可上传文件-第N次.zip   （全量，兜底）
-  增量  VS010-RAX3000Q-增量修复包-第N次.zip         （只含本次改动，日常用）
+  总包  VS010-RAX3000Q-总修复可上传文件-第N次.zip  （全量，兜底）
+  增量  VS010-RAX3000Q-增量修复包-第N次.zip        （只含本次改动，日常用）
 两个包同名文件逐字节一致；增量包不含删除动作，需删文件会在清单里单列。

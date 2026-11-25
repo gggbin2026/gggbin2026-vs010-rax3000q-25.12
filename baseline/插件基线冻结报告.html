@@ -237,5 +237,29 @@ B 层之后只剩 <b>2 处代码 exit 1</b>（核心锚点收敛 / 设备符号�
 <div class="row"><span class="k">新增插件 / 服务</span><span class="v ok">✅ PASS，提示「允许」</span></div>
 </div>
 <div class="redbox">🔴 <b>82 项冻结基线一个没动、一个没删</b>；<code>config/*.seed</code> 29 个 <code>=y</code> 一字未改。第 54 次野文件排除 / nft 报红、第 51 次 NTP、第 50 次改 IP、第 49 次机器狗、管理网段 / SSH / TTYD / 防火墙 / IPv6 / 同桥 / STP / 简洁日志全部原样保留。</div>
-<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据最终修正于第 55 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
+<h2 class="red">🔴 十五、第 56 次：编译已成功，但 Release 发布 <code>exit 127</code>（2026-11-25）</h2>
+<div class="redbox"><b>★ 编译本身已经完全成功了。</b> 11-25 07:26 开始 make，08:03/08:00 完成，两台都产出
+<code>factory.img</code> 16M + <code>factory.ubi</code> 16M + <code>sysupgrade.bin</code> 15M，
+以 <code>Nwrt-WDS-6.12.91-20261125-&lt;机型&gt;-*</code> 上传为 artifact（各约 46 MB）。
+唯一挂掉的是<b>最后一步 Publish Release</b>：<br>
+<code>line 3: gen-config.sh: command not found</code> ·
+<code>line 3: 172.10.10.241: command not found</code> ·
+<code>line 3: bridge-watchdog: command not found</code> ·
+<code>command substitution: syntax error near unexpected token `newline'</code> ·
+<code>Process completed with exit code 1.（shell 实为 127）</code></div>
+<div class="card">
+<div class="row"><span class="k red">🔴 根因</span><span class="v">旧写法 <code>NOTES="...`gen-config.sh`...`bridge-watchdog set-peer &lt;对端IP&gt;`..."</code> 把整段 Markdown 塞进 bash 双引号字符串，<b>反引号被当成命令替换执行</b>；<code>set -euo pipefail</code> 下第一个 <code>command not found</code> 就挂掉，<code>&lt;</code> 还触发 syntax error。这些都是写给人看的文字</span></div>
+<div class="row"><span class="k">为什么现在才暴露</span><span class="v">前几轮编译都在 <code>make</code> 之前就失败，从没走到 Publish Release；第 55 次修好后第一次全链跑通才撞上</span></div>
+</div>
+<h3>修法：说明文本彻底脱离 shell 字符串</h3>
+<div class="card">
+<div class="row"><span class="k red">🔴 新增独立 md</span><span class="v"><code>release/RELEASE-NOTES-WDS.md</code> / <code>-AP.md</code>，纯 Markdown，反引号 / <code>$</code> / 反斜杠全部字面保存，<b>不经过 shell 解释</b></span></div>
+<div class="row"><span class="k red">🔴 workflow 改法</span><span class="v"><code>gh release create ... --notes-file "$NOTES_FILE"</code>，不再有 <code>NOTES="..."</code> 双引号赋值、不再有 <code>printf '%b' "$NOTES"</code></span></div>
+<div class="row"><span class="k">元信息</span><span class="v">基线 / 内核 / HEAD / NAND 开关 / 生成时间，用几行<b>不含反引号</b>的 <code>echo</code> 追加，变量正常展开</span></div>
+<div class="row"><span class="k">临时文件</span><span class="v"><code>mktemp</code> + <code>rm -f</code>，不污染 <code>firmware_out/*</code></span></div>
+<div class="row"><span class="k">防再犯</span><span class="v"><code>verify.sh</code> 第 56 次判据：Publish 代码行不允许出现反引号 / 旧 NOTES 赋值，必须 <code>--notes-file</code> + 引用 <code>release/*.md</code></span></div>
+</div>
+<div class="redbox">🔴 <b>这次不用重编也能拿到固件</b>：两台已在 Actions run <code>45567664935</code> 的 artifact 里 —— VS010 <code>Nwrt-WDS-vs010-qosmio-25.12-nss</code>（ID <code>15003161629</code>）、RAX3000Q <code>Nwrt-WDS-rax3000q-qosmio-25.12-nss</code>（ID <code>15003175799</code>）。上传第 56 次包后<b>重跑一次</b>才会自动生成 GitHub Release（约 37 分钟）；只要固件直接下 artifact 即可。</div>
+<div class="redbox">🔴 <b>82 项冻结基线一个没动、29 个 <code>=y</code> 一字未改</b>；B 层纯诊断 / 野文件排除 / nft 报红 / NTP 5 分钟 / 机器狗 / 管理网段 / SSH-TTYD / 防火墙-IPv6 关 / 同桥 / STP / 简洁日志全部原样保留。<b>本轮没删也没加任何插件</b>，只改了「怎么把编译成果发布出去」。</div>
+<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据最终修正于第 55 次 · 发布链修正于第 56 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
 </div></body></html>
