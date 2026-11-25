@@ -296,4 +296,61 @@ MKEOF
   echo "  ℹ 若双频/网口异常，先用 device=vs010 单编验证编译链是否正常"
 fi
 
+# ── 6. 裁剪 TARGET_DEVICES（第 46 次 · 修 Compile firmware exit 1）──────
+# 【日志实证】2026-11-24 15:14 run #3 两份 job 都在 target/linux/install 段挂掉：
+#   Error: .../arch/arm64/boot/dts/qcom/ipq5018-nss.dtsi:118.1-7
+#          Label or path wifi0 not found
+#   FATAL ERROR: Syntax error parsing input tree
+#   make[5]: *** [Makefile:42: image-ipq5018-wrc-x3000gs2.dtb] Error 1
+#   make[5]: *** [Makefile:42: image-ipq5018-gl-b3000.dtb] Error 1
+#   → ERROR: target/linux failed to build → world Error 2 → 步骤 exit 1
+#
+# 【根因】qosmio 25.12-nss 自带的 ipq5018-nss.dtsi 引用 &wifi0 / &wifi1 / &wifi2，
+#   但整棵树只有 wifi:（内核 ipq5018.dtsi，2G 内置）、wifi1:/wifi2:
+#   （ipq5018-qcn6122.dtsi），【从来没有 wifi0: label】。
+#   树自带 elecom_wrc-x3000gs2 / glinet_gl-b3000 的 DTS include 了 nss.dtsi，
+#   编 DTB 必炸（gl-b3000 还把 nss.dtsi 放在 qcn6122.dtsi 之前 include，
+#   于是 wifi1/wifi2 也一并 not found）。这是上游分支当前快照的自身问题。
+#
+# 【为什么会拖垮我们】OpenWrt 的 `make -C image compile install` 会为 ipq50xx.mk
+#   里【所有 TARGET_DEVICES +=】生成并编译 DTB，与 .config 里选了哪台无关。
+#   哪怕只选 vs010，也会去编那两个坏设备 → 整个 target/linux/install 失败。
+#
+# 【为什么裁掉就安全】本仓 VS010 / RAX3000Q 两份 DTS 与能编过的 cmcc_pz-l8
+#   同款 include（ipq5018.dtsi + ess + qcn6122），【都不 include nss.dtsi】，
+#   引用 &wifi / &wifi1 两个真实存在的 label。NSS 加速靠驱动/固件包与 qca-nss
+#   内核模块，不靠这段 dtsi，裁掉不影响无线/有线卸载。
+#   顺带少编 11 个无关 DTB，更省 CI 时间与资源。
+if [ -f "$IMGMK" ]; then
+  cp -n "$IMGMK" "$IMGMK.orig46" 2>/dev/null || true
+  awk '
+    /^[[:space:]]*TARGET_DEVICES[[:space:]]*\+=/ {
+      n=$0
+      sub(/^[[:space:]]*TARGET_DEVICES[[:space:]]*\+=[[:space:]]*/,"",n)
+      sub(/[[:space:]]*#.*$/,"",n)
+      gsub(/[[:space:]]/,"",n)
+      if (n !~ /^(unicom_vs010|cmcc_rax3000q)$/) {
+        print "# [第46次裁剪] " $0
+        next
+      }
+    }
+    { print }
+  ' "$IMGMK" > "$IMGMK.tmp46" && mv "$IMGMK.tmp46" "$IMGMK"
+
+  LEFT=$(grep -c '^[[:space:]]*TARGET_DEVICES[[:space:]]*+=' "$IMGMK" || true)
+  if [ "$LEFT" -lt 1 ]; then
+    echo "::error::裁剪后 TARGET_DEVICES 为空（板级注入可能失败），停编"
+    exit 1
+  fi
+  echo "  ✓ TARGET_DEVICES 裁剪完成，保留 $(grep '^[[:space:]]*TARGET_DEVICES' "$IMGMK" | tr '\n' ' ')（其余已注释，见 .orig46）"
+
+  # 只读提示：树内 nss.dtsi 的悬空 label 依然存在，但已无设备 include 它
+  NSSD="$DTS_DIR/ipq5018-nss.dtsi"
+  if [ -f "$NSSD" ] && grep -q '&wifi0' "$NSSD"; then
+    echo "::warning::树内 ipq5018-nss.dtsi 仍引用悬空 &wifi0（上游快照问题）；已通过裁剪 TARGET_DEVICES 绕开，不改动树内文件"
+  fi
+else
+  echo "::warning::未找到 $IMGMK，跳过 TARGET_DEVICES 裁剪（若报 wifi0 not found 请检查板级布局）"
+fi
+
 echo "[board-inject] ✓ 完成"

@@ -2,13 +2,14 @@ config system
 	option hostname 'VS010'
 	option timezone 'CST-8'
 	option zonename 'Asia/Shanghai'
-	option log_size '64'
+	option log_size '32'
 	option ttylogin '0'
 	option urandom_seed '0'
 
 config timeserver 'ntp'
-	option enabled '1'        # 客户端开
-	option enable_server '0'   # 服务端关（纯客户端）
-	# 【第 51 次】只做 NTP 客户端，同步内网两台时间服务器（不对外提供 NTP）
+	option enabled '1'
+	option enable_server '0'
+	option use_dhcp '0'
+	option poll_interval '300'     # 第 51 次：固定周期循环校时（秒；默认 300 = 5 分钟）
 	list server '192.168.1.254'
 	list server '172.10.10.254'

@@ -1,93 +1,106 @@
-VS010 / RAX3000Q · 总修复可上传文件 · 第 45 次（2026-11-24）
+VS010 / RAX3000Q · 总修复可上传文件 · 第 52 次（2026-11-25）
 
-【这次修了什么 —— 先说结论】
-你 13:54 那两份 WDS 编译日志（checkout 33482ba）都是
-  ##[error]Process completed with exit code 2
-而且 openwrt/build.log 根本不存在 —— 编译一步都没跑。
-不是内核、驱动、DTS 的问题，是 Prepare 步骤被一行「探测内核版本」静默掐死。
-另外按你要求，把「机器狗导致刷机后自动重启」也彻底关掉了。
+【只传这一个】累积全量包，含第 41~51 次全部修复 + 第 52 次。
+之前所有包（含第 51 次）全部作废。仓库：
+  https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt
 
-【根因 1（致命）：内核版本探测让整个步骤 exit 2】
-旧 workflow 里：
-    KVER=$(make -s kernel_version 2>/dev/null | tr -cd '0-9.' | cut -c1-24)
-qosmio 25.12-nss 上这个 make 目标返回非 0；步骤开头是 set -euo pipefail，
-命令替换一失败整个 Prepare 就退出码 2；2>/dev/null 又把错误吞了，
-所以日志里只看到「[prepare] ✓ 可以开始 make download / make」后直接失败，
-make download / make 一行没跑，build.log 自然不存在。
+════════════════════════════════════════
+★ 本次：插件 / 服务冻结基线（只增不减）+ 详细日志（标红）
+════════════════════════════════════════
+用户要求：「以后插件就以这版为准，不能再减少了，以后只能增加或保持，
+并出具一版详细的日志，重要地方标红。」
 
-修复：两份 workflow 改成【纯读源码树】，绝不调用 make：
-    target/linux/qualcommax/Makefile 的 KERNEL_PATCHVER (=6.12)
-  + target/linux/generic/kernel-6.12 的 LINUX_VERSION-6.12 (=.91)
-  → KVER=6.12.91，每级都有 || true 兜底，最后回落 baseline.env。
-固件名仍带内核版本，但以【源码树实际值】为准，可能与文档里记的
-6.12.116 不同，这是正确的，不是写错。git rev-parse 也加了 || echo unknown。
+【本轮一个插件都没删、也没加】纯粹把第 51 次的现状冻结成基线。
 
-★ 日志里满屏 "error: recursive dependency detected!"
-  （dnsdist-full / snort3 / knot-resolver / openappid）是 qosmio feed 自带包的
-  Kconfig 告警，make defconfig 末尾 "# No change to .config" + "✓ 收敛完成"，
-  【不是失败原因】，不用管、也没改代码。
+🔴 铁律：以后只能【增加或保持】，【不能再减少】。
+🔴 「插件」取广义：不只锁 luci-app-ttyd（本来只有 1 个，锁了等于没锁），
+   而是把 29 个编译包 + 4 个全局开关 + 9 个 init.d 服务 + 20 个 usr/sbin 工具
+   + 4 个状态页/CGI + 4 个首启脚本 + 12 项关键 UCI 配置 = 共 82 项 全部冻结。
 
-【根因 2：TTYD 和无线固件被自己的脚本删了】
-日志 4264/4265 行：
-    ::warning::ath11k-firmware-ipq5018-qcn6122 在当前 feeds 中未找到，已从 .config 显式关闭
-    ::warning::luci-app-ttyd 在当前 feeds 中未找到，已从 .config 显式关闭
-但 feeds install -a 日志里明明有 "Installing package 'luci-app-ttyd' from luci"。
-原因：gen-config.sh 旧第 5 段用 `./scripts/feeds list | awk '{print $1}'` 探测，
-在 qosmio 树上误判；更讽刺的是 =n 的主题会被 `grep '^...=y$' || continue` 跳过，
-它自称的「防主题白屏」一次都没生效，只把必需包删了。日志末尾
-"luci-app 数量: 0（只应为 ttyd）" 就是证据。
+【单一数据源】baseline/frozen-baseline.conf
+  🔴 只允许【追加新行】，禁止删除 / 改名 / 改值任何已有行。
+  verify.sh 里 FROZEN_MIN=82 是硬编码下限 —— 连清单一起删行也拦得住；
+  另有锚点复核（TTYD / SSH / l2-guard / 机器狗 / ntp-poller）硬编码再查一遍。
 
-修复：必需包（dropbear / ttyd / luci-app-ttyd /
-ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb）【永不自动删】，
-defconfig 后只核对只警告；只有「主题类且 =y」才做不存在即剔除；
-探测改用文件存在性 package/feeds/*/<pkg>/Makefile，不依赖 feeds list 格式。
-模拟树实测：4 个必需包全保留，feed 里没有的 argon 主题被正确剔除。
+【三重校验，少一项就出不了固件】
+  ① 上传前：sh scripts/verify.sh → 🔴 冻结基线…丢失 → RESULT: FAIL
+  ② 编译期：gen-config.sh 读同一份清单 [pkg] 段，defconfig 后缺包
+            → ::error::🔴 冻结基线包缺失 + exit 1
+  ③ 防篡改：条目数下限 82 + 锚点复核
 
-【★ 根因 3：机器狗导致刷机后自动重启 —— 已彻底关闭】
-旧默认 WDS：enabled=1 / delay=5 / grace=6，首启脚本还 enable+start。
-单机、无对端 WDS、或只当有线网桥时，开机约 6+5≈11 分钟就 reboot -f，
-之后每周期反复重启，连 SSH 排障窗口都没有。
+  gen-config.sh 的 REQUIRED_PKGS 从写死 5 个改成读清单全量 29 个，
+  核对从「只警告」升级为「阻断」；verify.sh 旧判据「luci-app 数量 == 1」
+  改成「>=1 且基线项在位」，以后新增 LuCI 插件不会再被自检误杀。
 
-现在四层都改了：
-  · files/etc/config/wdsdog        → enabled '0' + dryrun '1' 双保险
-  · files.ap/etc/config/wdsdog     → enabled '0'（原本就是）
-  · WDS 首启 99-bridge-ready 7c 段 → stop + disable，并 uci 强制写 enabled=0
-                                     （防 sysupgrade「保留配置」把旧值带回来）
-  · /usr/sbin/bridge-watchdog 代码缺省 → enabled 0 / dryrun 1
-                                     （配置文件丢失也不再回落成自动重启）
-  · banner / 两份 Release NOTES 文案同步
-脚本与 init.d【完整保留】，成对 WDS 部署仍可手动：
-    bridge-watchdog set-peer 192.168.1.242
-    bridge-watchdog set-delay 10
-    bridge-watchdog on
-    bridge-watchdog dryrun off     # 观察一两天确认不误重启才执行
+  实测：原样 → PASS(82/82)；删 nic-guard → FAIL；注释掉 luci-app-ttyd → FAIL；
+       删清单一行 → FAIL(81<82)；新增服务/工具 → PASS 且提示「允许」。
 
-刷机动作本身仍会【正常重启一次】（原厂 Web API 返回 isreboot=1），
-这是刷机流程自带，不是故障；开机之后不会再无故重启。
+【以后怎么「增加」插件（正确姿势）】
+  1. baseline/frozen-baseline.conf 的 [pkg] 段【追加】一行 [pkg]|新包名
+  2. config/plugins.seed（或 common.seed）把对应包写成 =y
+  3. sh scripts/verify.sh 会提示「基线外新增项（允许）」，编译期自动核对
+  4. 新增服务 / 页面就往 [initd] / [sbin] / [www] 段追加
+  🔴 不要删旧行、不要把 =y 注释掉、不要改成 =n。
 
-【怎么传】
-仓库就是 https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt
-（当前 HEAD 33482ba，21:48，你已把 .gitignore 三行补上，与第 44 次包 133/133 一致）。
-★ 只传这一个【累积全量包】，之前所有包（41/42/43/44 次）全部作废。
-解压后按原路径全部覆盖上传。网页上传注意：
-  · .github/workflows 第一个字符是【点】，别又变成 github/workflows
-  · .gitignore 是隐藏文件，网页上传容易漏；用 git 命令行最稳：
-        git add -A && git commit -m "第45次：编译链+TTYD+机器狗" && git push
+════════════════════════════════════════
+★ 详细日志（重要处标红）—— 三份，覆盖三种媒介
+════════════════════════════════════════
+  baseline/插件基线冻结报告.html      ★主交付：CSS 真红 color:#d00 + 红底警示框
+                                     手机/浏览器直接打开，最直观
+  baseline/插件与服务冻结基线-详细日志.md   🔴 + 加粗，GitHub/编辑器阅读
+  baseline/基线摘要.log               ANSI \033[31m 真红，SSH 终端 cat 出来就是红的
+
+  内容：10 条标红重点 / 三重校验 / 29 个包逐个用途与定位文件 /
+        9 服务 + 20 工具 + 4 页面 + 4 首启 + 12 配置 + 4 全局开关 /
+        🔴 明确关闭项（红线）/ 访问网络速查 / 五种校验实测 / 变更记录。
+
+  ★ 编译后固件下载页也有：两份 Release NOTES 开头新增
+    「🔴 【插件基线已冻结】」段；Actions 组织产物时用 ANSI 真红打印
+    「🔴【插件基线已冻结】…82 项只增不减…」，和「改 IP 必读」红字一起出现。
+
+════════════════════════════════════════
+一、前几轮已修好的（本包全部保留，一个没少）
+════════════════════════════════════════
+  ✅ NTP(第51次)     每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）
+  ✅ 机器狗(49/50)   WDS 默认启用：连续不通 5 分钟重启；set-delay 改时间；
+                     mode=or 三判据、max_reboots=3 防无限重启；
+                     改网桥 IP 不误重启 + resync 自动发现对端 + 下载页红字
+  ✅ 管理网段        172.10.10.241 / 255.255.252.0（/22）；WDS 备机自动 .242
+  ✅ SSH 正常        0.0.0.0:22 / root / admin；四层开机兜底
+  ✅ 无线 DHCP 防护 / 插件 luci-app-ttyd / 防火墙 + IPv6 关 / 删 wan/wan6
+  ✅ WAN+LAN 同桥 / STP / 主题不白屏 / 第 46 次 TARGET_DEVICES 裁剪
+  ✅ CI 简洁日志 / 低资源（cron、ucitrack、led、gpio_switch 仍停用）
+
+════════════════════════════════════════
+二、怎么传 / 怎么点
+════════════════════════════════════════
+解压后按原路径全部覆盖。网页上传注意：
+  · .github/workflows 第一个字符是【点】
+  · .gitignore 是隐藏文件，网页容易漏；命令行最稳：
+      git add -A && git commit -m "第52次：插件基线冻结+详细日志" && git push
+  · ★ 本轮新增整个 baseline/ 目录（4 个文件），别漏传：
+      frozen-baseline.conf（唯一数据源，最重要）
+      插件基线冻结报告.html / 插件与服务冻结基线-详细日志.md / 基线摘要.log
   · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
-    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART
+    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART / DTS 目录
 
-【上传后】
-本地 sh scripts/verify.sh → RESULT: PASS（0 警告）再去 Run workflow。
-建议 baseline 保持 qosmio-25.12-nss，★ device 先选 vs010 单跑一次，成功再 both；
-nand_patch / ART_CALIBRATION / ssh 全保持 false/0。
-这次 Prepare 会正常走到 make download / make，日志里应能看到
-  [prepare] 实际内核版本 = 6.12.xx（读自源码树，将写入固件文件名）
-以及 luci-app 数量: 1（ttyd）。
+上传后 sh scripts/verify.sh → RESULT: PASS（0 警告）再点 Run workflow。
+  baseline 保持 qosmio-25.12-nss；★ device 先选 vs010 单跑，成功再 both
+  WDS 输入框：wds_delay=5、wds_peer=auto、ntp_poll_minutes=5
+  AP  输入框：ntp_poll_minutes=5
+  nand_patch / ART_CALIBRATION / ssh / build_verbose 全部保持 false
 
-【刷前边界不变】
-64 位不死 U-Boot 是硬门槛；VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区
-（有实锤变砖案例）；刷前备份 mtd13 0:ART 与 mtd14 0:TRAINING；
+════════════════════════════════════════
+三、刷前 / 刷后
+════════════════════════════════════════
+刷完第一件事 passwd 改掉 admin（弱密码）。管理入口 http://172.10.10.241
+  LuCI /cgi-bin/luci · 状态页 /bridge/(WDS) 或 /ap/(AP) · SSH :22 · TTYD :7681
+刷后验证：sh scripts/verify.sh（在设备上没有，这是上传前用的）
+  ntp-poller status 应显示「300 秒 = 5 分钟」；bridge-watchdog status 看机器狗
+两台都刷 AP 且同时在线会都是 .241 冲突，第二台改 .243（改完两台各跑 resync）。
+64 位不死 U-Boot 是硬门槛；VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区；
+刷前备份 0:ART(mtd13) 与 0:TRAINING(mtd14)；
 RAX3000Q 板级未在 6.12 实机验证，首次务必 3.3V USB-TTL；
-WDS 4addr 在开源 ath11k+NSS 下未验证；CN+HE160 开机 5G 约 60 秒 CAC 不可见。
+WDS 4addr 在开源 ath11k+NSS 下未验证；CN+HE160 开机 5G 约 60s CAC 不可见。
 
-【历次修复清单】修复总览.md（累积至第 45 次）
+历次修复清单：修复总览.md（累积至第 52 次）

@@ -35,12 +35,54 @@ write_network() {
     echo -e "\toption device 'br-lan'"
     echo -e "\toption proto 'static'"
     echo -e "\toption ipaddr '$ip'"
-    echo -e "\toption netmask '255.255.255.0'"
+    echo -e "\toption netmask '255.255.252.0'"
     echo -e "\toption force_link '1'"
+    echo ""
+    echo "# ── 第 48 次：网段 172.10.10.241 / 255.255.252.0（/22 = 172.10.8.0~172.10.11.255）──"
+    echo "# NTP 源 172.10.10.254 就在本网段，二层直连可达，不需要任何路由。"
+    echo "# 另一个源 192.168.1.254 跨网段；纯二层桥无默认网关时不可达，"
+    echo "# 但 busybox ntpd 多 -p peer，一个不通会自动用另一个，不影响校时。"
+    echo "# 若确实要让 192.168.1.254 也可达，取消下面注释并把 gateway 改成本网段实际网关："
+    echo "# config route 'ntp192'"
+    echo "#   option target '192.168.1.254/32'"
+    echo "#   option gateway '172.10.10.1'"
+    echo "#   option interface 'lan'"
   } > "$out"
 }
-write_network "${AP_IP:-192.168.1.241}" "$F/etc/config/network"
-echo "  ✓ network → DSA config device + list ports（$PORTS）"
+write_network "${AP_IP:-172.10.10.241}" "$F/etc/config/network"
+echo "  ✓ network → DSA + STP + 172.10.10.241/22（NTP 172.10.10.254 同网段直连，无需路由）"
+
+# ── 第 47 次：统一 /etc/config/system 的 NTP（客户端，严格只用两个内网源）──
+# files.<机型>/etc/config/system 会覆盖 files/etc/config/system，files.ap 又没有
+# 自己的 system，所以最后在这里统一重写一遍，保证 WDS / AP / 两台机型四路一致。
+SYS="$F/etc/config/system"
+if [ -f "$SYS" ]; then
+  awk '
+    /^config timeserver/ { skip=1; next }
+    skip && /^config /   { skip=0 }
+    skip                 { next }
+    { print }
+  ' "$SYS" > "$SYS.tmp47" && mv "$SYS.tmp47" "$SYS"
+  cat >> "$SYS" <<'EOF'
+
+config timeserver 'ntp'
+	option enabled '1'
+	option enable_server '0'
+	option use_dhcp '0'
+	option poll_interval '300'    # 第 51 次：固定周期循环校时（秒；默认 300 = 5 分钟，可编译期改）
+	list server '192.168.1.254'
+	list server '172.10.10.254'
+EOF
+  grep -q "option ttylogin" "$SYS" || sed -i "/^config system/a\\	option ttylogin '0'" "$SYS"
+  # 第 47 次：日志简洁 —— log buffer 64KB → 32KB（三份机型覆盖层统一）
+  sed -i "s/option log_size '64'/option log_size '32'/" "$SYS" 2>/dev/null || true
+  # 第 51 次：编译期可自定义周期（workflow 的 ntp_poll_minutes 经 prepare.sh 转成秒）
+  NTP_POLL="${NTP_POLL:-300}"
+  case "$NTP_POLL" in ''|*[!0-9]*) NTP_POLL=300 ;; esac
+  [ "$NTP_POLL" -ge 30 ] && [ "$NTP_POLL" -le 86400 ] || NTP_POLL=300
+  sed -i "s/option poll_interval '300'/option poll_interval '$NTP_POLL'/" "$SYS" 2>/dev/null || true
+  echo "  ✓ system → NTP 客户端 192.168.1.254 / 172.10.10.254 + 每 $((NTP_POLL/60)) 分钟循环校时（${NTP_POLL}s）+ log_size 32KB"
+fi
 
 # wireless: hwmode(21.02) → band(22.03+)
 for w in "$F/etc/config/wireless"; do
@@ -86,8 +128,11 @@ for s in "$F/usr/lib/bridge/role.sh" "$F/usr/sbin/bridge-role" "$F/etc/uci-defau
           s/uci -q set network\.lan\.type='bridge'/uci -q set network.lan.device='br-lan'/g; \
           s/uci set network\.lan\.ifname='eth0 eth1'/uci set network.lan.device='br-lan'/g; \
           s/uci -q set network\.lan\.ifname='eth0 eth1'/uci -q set network.lan.device='br-lan'/g" "$s"
+  # 第 47 次防呆：21.02 老兜底会删掉所有 config device 段，25.12 下 br-lan 会建不出来。
+  # 源文件已改，这里再兜一层，任何残留的 delete @device 都降级为空操作。
+  sed -i "s/^[[:space:]]*uci -q delete network\.@device\[0\].*$/    : # 第47次：25.12 DSA 保留 config device/" "$s"
 done
-echo "  ✓ bridge-role / 99-bridge-ready: ifname → device"
+echo "  ✓ bridge-role / 99-bridge-ready: ifname → device + 防呆保留 config device"
 
 # swconfig 只读化：25.12 是 DSA，不能再 set reset/apply
 for s in "$F/usr/sbin/nic-guard" "$F/usr/sbin/portstat" "$F/usr/sbin/accel-check"; do

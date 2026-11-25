@@ -81,7 +81,10 @@ has 'CONFIG_PACKAGE_ttyd=y' config/common.seed && has 'CONFIG_PACKAGE_luci-app-t
   && ok "TTYD 保留（ttyd + luci-app-ttyd）" || bad "缺 TTYD"
 has 'for k in firewall4 firewall' scripts/gen-config.sh && ok "防火墙编译期显式 n" || bad "防火墙未关"
 n=$(grep -c '^CONFIG_PACKAGE_luci-app-.*=y$' config/common.seed || true)
-[ "$n" -eq 1 ] && ok "luci-app 仅 1 个（ttyd），无第三方插件" || bad "luci-app 数量异常: $n"
+# 第 52 次：以第 51 次为冻结基线，【只增不减】。原来写死 -eq 1 会拦住以后新增插件。
+[ "$n" -ge 1 ] && has 'CONFIG_PACKAGE_luci-app-ttyd=y' config/common.seed \
+  && ok "luci-app ≥1 且基线项 luci-app-ttyd 在位（当前 $n 个，允许增加）" \
+  || bad "luci-app 数量异常或基线 ttyd 丢失: $n"
 has 'CONFIG_PACKAGE_kmod-nft-bridge=y' config/common.seed && ok "二层防护所需 nft bridge" || bad "缺 nft bridge"
 has 'list ports' scripts/port-overlay.sh && ok "WAN+LAN 全部在 br-lan" || bad "未生成 DSA 同桥"
 
@@ -295,6 +298,328 @@ has 'GNU awk' scripts/gen-config.sh \
 [ -s docs/编译链预检与板级缺口.md ] \
   && ok "第43次资产: docs/编译链预检与板级缺口.md" || bad "缺编译链预检报告"
 
+# ── 第 47 次：SSH / DHCP 防护 / TTYD / 防火墙 / 删 WAN / NTP 客户端 / STP ──
+# 用户 7 项要求逐条硬校验，避免后续上传覆盖把配置带回去。
+
+# ① SSH（dropbear 监听 0.0.0.0:22，密码/根登录全开）
+for k in "option enable '1'" "option PasswordAuth '1'" "option RootPasswordAuth '1'" "option RootLogin '1'" "option Port '22'"; do
+  grep -qF "$k" files/etc/config/dropbear || bad "SSH 配置缺 $k"
+done
+if grep -E '^[[:space:]]*option Interface' files/etc/config/dropbear >/dev/null 2>&1; then
+  bad "SSH 又绑回了 Interface（会随 IP 切换失联）"
+else
+  ok "SSH：0.0.0.0:22 / root 密码登录 / 不绑 lan 接口"
+fi
+has '/etc/init.d/dropbear enable' files/etc/uci-defaults/99-bridge-ready \
+  && ok "SSH 首启 enable + restart（health-fix 另有兜底）" || bad "SSH 缺首启启用"
+
+# ② 无线 DHCP Snooping（二层 rogue-DHCP 拦截）必须开启
+has "option enabled '1'" files/etc/config/l2guard \
+  && has "option dryrun '0'" files/etc/config/l2guard \
+  && has "option dhcpv6 '1'" files/etc/config/l2guard \
+  && ok "无线端 DHCP 防护 enabled=1 / dryrun=0 / 含 DHCPv6" \
+  || bad "无线 DHCP 防护未开启或处于 dryrun"
+has 'l2-guard enable' scripts/port-overlay.sh && ok "l2-guard 已写入开机启用链" || bad "l2-guard 未开机启用"
+
+# ③ 插件：以第 51 次为冻结基线，只增不减（允许以后新增，不许删基线项）
+has 'CONFIG_PACKAGE_luci-app-ttyd=y' config/common.seed && ok "冻结基线 LuCI 插件 luci-app-ttyd 在位（允许增加）" || bad "TTYD 插件丢失"
+has 'CONFIG_PACKAGE_ttyd=y' config/common.seed && ok "ttyd 本体保留（:7681）" || bad "ttyd 本体丢失"
+
+# ④ 防火墙 / IPv6 关闭
+has 'CONFIG_IPV6=n' config/common.seed && ok "IPv6 编译期关闭" || bad "IPv6 未关"
+has 'firewall4' scripts/gen-config.sh && ok "firewall4 显式 n" || bad "防火墙未显式关闭"
+has '99-no-firewall' files/etc/uci-defaults/99-bridge-ready || true
+[ -s files/etc/uci-defaults/99-no-firewall ] && ok "运行期 99-no-firewall 兜底" || bad "缺 99-no-firewall"
+
+# ⑤ 删除 wan / wan6 三层接口（物理 WAN 端口仍留在 br-lan 的 list ports）
+for f in files/etc/config/network files.ap/etc/config/network; do
+  if grep -qE "^config interface '(wan|wan6)'" "$f"; then bad "$f 仍定义 wan/wan6 三层接口"; else ok "$(basename $(dirname $(dirname $f)))/… network 无 wan/wan6 接口"; fi
+  has "list ports 'wan'" "$f" && ok "  物理 WAN 端口仍在 br-lan（WAN+LAN 同桥）" || bad "  物理 WAN 端口丢失"
+done
+for f in files/etc/uci-defaults/99-bridge-ready files.ap/etc/uci-defaults/99-bridge-ready files/etc/uci-defaults/99-no-ipv6; do
+  has 'uci -q delete network.wan' "$f" && has 'uci -q delete network.wan6' "$f" \
+    && ok "$(echo $f | cut -c1-52)… 运行期删 wan/wan6" || bad "$f 缺 wan/wan6 删除"
+done
+
+# ⑥ NTP 客户端：只同步两台内网服务器
+NTP_OK=1
+for f in files/etc/config/system files.vs010/etc/config/system files.rax3000q/etc/config/system; do
+  has "list server '192.168.1.254'" "$f" && has "list server '172.10.10.254'" "$f" \
+    && has "option use_dhcp '0'" "$f" && has "option enable_server '0'" "$f" && has "option enabled '1'" "$f" \
+    || { bad "$f NTP 配置不完整"; NTP_OK=0; }
+done
+[ "$NTP_OK" = 1 ] && ok "三份 system：NTP 客户端 → 192.168.1.254 / 172.10.10.254（enable_server/use_dhcp=0）"
+for f in files/etc/uci-defaults/99-bridge-ready files.ap/etc/uci-defaults/99-bridge-ready; do
+  has 'for s in 192.168.1.254 172.10.10.254' "$f" || bad "$f 首启仍写公网 NTP"
+done
+if grep -rqE 'ntp\.aliyun\.com|cn\.pool\.ntp\.org|time1\.cloud\.tencent\.com' files files.ap files.vs010 files.rax3000q config scripts 2>/dev/null; then
+  bad "仍残留公网 NTP 服务器"; else ok "全仓已无公网 NTP 服务器（严格只用内网两源）"; fi
+if grep -rqE "^[[:space:]]*config route 'ntp172'|option gateway '192\.168\.1\.254'" files/etc/config/network files.ap/etc/config/network scripts/port-overlay.sh 2>/dev/null; then
+  bad "仍保留第 47 次失效的 /32 路由（/22 下 172.10.10.254 已直连，且网关跨网段会被 netifd 拒绝）"
+else
+  ok "已删除失效 /32 路由；NTP 172.10.10.254 走 /22 二层直连"
+fi
+
+# ⑦ STP 开启（DSA 下必须写在 config device 段）+ 25.12 网络兜底不删 device
+for f in files/etc/config/network files.ap/etc/config/network; do
+  has "option stp '1'" "$f" && has "config device 'br_lan'" "$f" || bad "$f STP 未写在 device 段"
+done
+has "network.br_lan.stp='1'" files/etc/uci-defaults/99-bridge-ready \
+  && has "network.br_lan.stp='1'" files.ap/etc/uci-defaults/99-bridge-ready \
+  && ok "首启兜底也会把 STP 设到 br_lan device 段" || bad "STP 首启兜底缺失"
+if grep -rqF 'uci -q delete network.@device[0]' files files.ap 2>/dev/null; then
+  bad "仍有 21.02 老兜底删除 config device（25.12 会让 br-lan 建不出来、SSH 失联）"; else ok "已无删除 config device 的 21.02 老兜底"; fi
+has '第47次：25.12 DSA 保留 config device' scripts/port-overlay.sh \
+  && ok "port-overlay 有防呆兜底" || warn "port-overlay 缺防呆兜底"
+
+# ⑧ 干净系统 / 低资源 / 日志简洁
+LEAN=1
+for f in files/etc/rc.local files/usr/sbin/health-fix; do
+  has 'for s in cron ucitrack led gpio_switch' "$f" || { bad "$f 缺精简服务循环"; LEAN=0; }
+done
+[ "$LEAN" = 1 ] && ok "精简常驻服务 cron/ucitrack/led/gpio_switch（开机 + health-fix 双层兜底）"
+# 第 51 次：sysntpd 常驻由 ntp-poller 顶替（两者不能同时改系统时间），
+# 所以 sysntpd disable 是允许的；但必须同时有 ntp-poller enable，否则 NTP 会彻底没有。
+if grep -rqE '/etc/init.d/(network|dropbear|ttyd|uhttpd|wpad) disable' files files.ap 2>/dev/null; then
+  bad "误关了 SSH / TTYD / uhttpd / wpad / network 之一"; else ok "必留服务均未被关（SSH/TTYD/LuCI/无线/网络）"; fi
+if grep -rq '/etc/init.d/sysntpd disable' files files.ap 2>/dev/null \
+   && ! grep -rq '/etc/init.d/ntp-poller enable' files files.ap 2>/dev/null; then
+  bad "停用了 sysntpd 却没启用 ntp-poller（NTP 会彻底失效）"; else ok "sysntpd → ntp-poller 切换成对出现"; fi
+LOGOK=1
+for f in files/etc/config/system files.vs010/etc/config/system files.rax3000q/etc/config/system; do
+  has "option log_size '32'" "$f" || { bad "$f log_size 不是 32"; LOGOK=0; }
+done
+[ "$LOGOK" = 1 ] && ok "运行期 log buffer 32KB（三份机型覆盖层一致）"
+for f in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
+  has 'build_verbose' "$f" && has 'V=0 > build.log' "$f" && has '失败摘要（只列真实错误' "$f" \
+    && ok "$(basename "$f")：默认简洁编译日志 + 可切详细" \
+    || bad "$(basename "$f") 仍会刷屏（缺 V=0 / build_verbose / 精准摘要）"
+done
+[ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 已精简（14 行内）" || warn "banner 偏长"
+
+# ── 第 48 次：管理网段统一 172.10.10.241 / 255.255.252.0（/22）──
+# 用户指定：所有设备 IP = 172.10.10.241、掩码 = 255.255.252.0。
+# 唯一例外：WDS 备机由 bridge-role 自动顺延 172.10.10.242，避免两台同 IP 的 ARP 冲突。
+NET_OK=1
+for f in files/etc/config/network files.ap/etc/config/network; do
+  has "option ipaddr '172.10.10.241'" "$f" && has "option netmask '255.255.252.0'" "$f" \
+    && has "config device 'br_lan'" "$f" || { bad "$f 管理地址/掩码不是 172.10.10.241/22"; NET_OK=0; }
+done
+[ "$NET_OK" = 1 ] && ok "两份 network：172.10.10.241 / 255.255.252.0（DSA device 段）"
+has "AP_IP=172.10.10.241" scripts/prepare.sh && ok "prepare.sh AP/WDS 统一 172.10.10.241" \
+  || bad "prepare.sh 仍分流不同管理地址"
+has 'write_network "${AP_IP:-172.10.10.241}"' scripts/port-overlay.sh \
+  && has "option netmask '255.255.252.0'" scripts/port-overlay.sh \
+  && ok "port-overlay 产物默认 172.10.10.241/22" || bad "port-overlay 未同步新网段"
+
+# 全仓旧管理网段字面量必须清零（NTP 源 192.168.1.254、取证文档、历史备份名除外）
+# 排除 verify.sh 自身（判据文本里本来就写着旧值，避免自命中）
+OLDN=$(grep -rlE '192\.168\.1\.(240|241|242|10|100)|255\.255\.255\.0' \
+       files files.ap files.vs010 files.rax3000q scripts config .github/workflows art 2>/dev/null \
+       | grep -v '^scripts/verify.sh$' || true)
+if [ -n "$OLDN" ]; then bad "仍残留旧网段：$OLDN"; else ok "全仓已无旧管理地址与旧掩码"; fi
+OLD24=$(grep -rlE '(^|[^0-9])/24([^0-9]|$)' files files.ap scripts .github/workflows 2>/dev/null \
+        | grep -v '^scripts/verify.sh$' || true)
+if [ -n "$OLD24" ]; then bad "仍有 /24 前缀：$OLD24"; else ok "前缀长度统一 /22（255.255.252.0）"; fi
+# 关键运行期文件逐个点名（防止漏改某个回落值）
+KEY=1
+for f in files/etc/banner files.ap/etc/banner files/etc/bridge.conf files/www/cgi-bin/bridge \
+         files.ap/www/cgi-bin/apstatus files/etc/init.d/bridge-netfix \
+         files/etc/uci-defaults/99-bridge-ready files.ap/etc/uci-defaults/99-bridge-ready \
+         files/usr/lib/bridge/role.sh files/usr/sbin/health-fix files/usr/sbin/nic-guard \
+         files.ap/usr/sbin/bridge-ap; do
+  has '172.10.10.241' "$f" || { bad "$f 未同步 172.10.10.241"; KEY=0; }
+done
+[ "$KEY" = 1 ] && ok "12 个运行期文件（banner/CGI/兜底/工具）全部同步"
+has "BRIDGE_STA_IP='172.10.10.242'" files/usr/lib/bridge/role.sh \
+  && ok "WDS 备机仍自动顺延 172.10.10.242（防两台同 IP 冲突）" \
+  || warn "WDS 备机地址可能被改成 .241，成对部署会 ARP 冲突"
+# NTP 两源保持不变（用户只改设备 IP，未改 NTP）
+NTP2=1
+for f in files/etc/config/system files.vs010/etc/config/system files.rax3000q/etc/config/system; do
+  has "list server '192.168.1.254'" "$f" && has "list server '172.10.10.254'" "$f" \
+    || { bad "$f NTP 源被误改"; NTP2=0; }
+done
+[ "$NTP2" = 1 ] && ok "两个内网 NTP 源保持不变（172.10.10.254 现同 /22 直连可达）"
+
+# ── 第 50 次：改 IP 不误重启 / 自动发现对端 / 下载页红字 ─────────
+IP50=1
+for k in "LL_AP='169.254.241.1'" "LL_STA='169.254.241.2'" \
+         '_ensure_ll_alias' '_discover_peer' '_refresh_discovery' '_ip_warn' 'resync)'; do
+  has "$k" files/usr/sbin/bridge-watchdog || { bad "机器狗缺第50次能力 $k"; IP50=0; }
+done
+[ "$IP50" = 1 ] && ok "机器狗：别名兜底 + 动态发现对端 + resync + 红字告警齐全"
+has 'wd_ll=$(_ll_peer)' files/usr/sbin/bridge-watchdog \
+  && has '_peer_ok "$wd_ll"' files/usr/sbin/bridge-watchdog \
+  && ok "ping 判据优先走链路本地别名（改管理 IP 不受影响）" \
+  || bad "链路本地别名未接入 _wd_ping_ok"
+for f in files/etc/init.d/bridge-netfix files/usr/lib/bridge/role.sh files/usr/sbin/health-fix; do
+  has '169.254.241' "$f" || bad "$f 未挂 WDS 角色别名"
+done
+ok "三处冗余挂载 WDS 角色别名（开机 / 角色收敛 / health-fix）"
+has 'ip_changed' files/www/cgi-bin/bridge && has 'wdIpWarn' files/www/bridge/index.html \
+  && ok "状态页显示本机IP/别名/发现对端 + 改IP红条" || bad "状态页缺第50次展示"
+for f in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
+  has 'CHANGE-IP-NOTICE.txt' "$f" && has '033\[31m' "$f" && has '🔴' "$f" \
+    && ok "$(basename "$f")：下载说明红字段落 + Actions 真红日志 + NOTICE 附件" \
+    || bad "$(basename "$f") 缺改 IP 说明/标红"
+done
+has '改网桥 IP 必读' .github/workflows/build-wds.yml \
+  && has 'resync' .github/workflows/build-wds.yml \
+  && ok "WDS Release NOTES 明确写「改 IP 不会误重启 + resync」" \
+  || bad "WDS Release NOTES 缺改 IP 说明"
+has '🔴 改管理 IP 后请跑 bridge-watchdog resync' files/etc/banner \
+  && ok "登录 banner 带改 IP 提示" || bad "banner 缺改 IP 提示"
+[ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 仍精简（14 行内）" || warn "banner 偏长"
+# ── 第 52 次：冻结基线「只增不减」（用户：以后插件以第 51 次为准）────
+# 单数据源 baseline/frozen-baseline.conf；本段逐项比对当前仓库：
+#   · 基线里任何一项消失 → bad（阻断），编译期 gen-config.sh 也会 ::error:: 退出 1
+#   · 仓库里出现基线外的新项 → 只提示「新增（允许）」，绝不阻断
+#   · 防篡改：条目总数下限 FROZEN_MIN 硬编码，连 manifest 一起删行也拦得住
+BASE=baseline/frozen-baseline.conf
+FROZEN_MIN=82     # 第 51 次冻结时的有效条目数（29包+4全局+9服务+20工具+4页面+4首启+12配置）
+if [ ! -f "$BASE" ]; then
+  bad "🔴 缺冻结基线 $BASE（插件只增不减的唯一数据源，必须随仓库保留）"
+else
+  CNT=$(grep -c '^\[' "$BASE" 2>/dev/null || echo 0)
+  [ "$CNT" -ge "$FROZEN_MIN" ] \
+    || bad "🔴 冻结基线被删行：$CNT 项 < 下限 $FROZEN_MIN（只允许追加，禁止删除/改名/改值）"
+  NF=0; MISS=0; ADDED=""
+  while IFS='|' read -r kind a b c; do
+    case "$kind" in
+      ''|'#'*) continue ;;
+      '[pkg]')
+        NF=$((NF+1))
+        for m in wds ap; do
+          if ! grep -q "^CONFIG_PACKAGE_$a=y$" config/common.seed config/themes.seed "config/$m.seed" 2>/dev/null; then
+            bad "🔴 冻结基线包丢失 [$m]：$a"; MISS=$((MISS+1)); break
+          fi
+        done ;;
+      '[global]')
+        NF=$((NF+1))
+        grep -qF "$a" config/*.seed 2>/dev/null || { bad "🔴 冻结基线全局开关丢失：$a"; MISS=$((MISS+1)); } ;;
+      '[initd]')
+        NF=$((NF+1))
+        [ -f "files/etc/init.d/$a" ] || [ -f "files.ap/etc/init.d/$a" ] \
+          || { bad "🔴 冻结基线服务丢失 init.d/$a"; MISS=$((MISS+1)); } ;;
+      '[sbin]')
+        NF=$((NF+1))
+        [ -f "files/usr/sbin/$a" ] || [ -f "files.ap/usr/sbin/$a" ] \
+          || { bad "🔴 冻结基线工具丢失 usr/sbin/$a"; MISS=$((MISS+1)); } ;;
+      '[www]')
+        NF=$((NF+1))
+        [ -f "files/$a" ] || [ -f "files.ap/$a" ] \
+          || { bad "🔴 冻结基线页面丢失 $a"; MISS=$((MISS+1)); } ;;
+      '[uci]')
+        NF=$((NF+1))
+        [ -f "files/etc/uci-defaults/$a" ] || [ -f "files.ap/etc/uci-defaults/$a" ] \
+          || { bad "🔴 冻结基线首启脚本丢失 $a"; MISS=$((MISS+1)); } ;;
+      '[cfg]')
+        NF=$((NF+1))
+        grep -qF "$b" "$a" 2>/dev/null || { bad "🔴 冻结基线配置项丢失：$a → $b"; MISS=$((MISS+1)); } ;;
+      *) ;;
+    esac
+  done < "$BASE"
+  [ "$MISS" -eq 0 ] && ok "冻结基线 $NF/$NF 项全部在位（第 51 次口径 · 只增不减）"
+  # 防「连锚点一起删」：关键项即使 manifest 被整个替换也硬编码再查一遍
+  [ -f files/etc/init.d/ntp-poller ] && [ -f files/usr/sbin/bridge-watchdog ] \
+    && [ -f files/usr/sbin/l2-guard ] && [ -f files/usr/sbin/ntp-poller ] \
+    && has 'CONFIG_PACKAGE_luci-app-ttyd=y' config/common.seed \
+    && has 'CONFIG_PACKAGE_dropbear=y' config/common.seed \
+    && ok "锚点复核：TTYD / SSH / l2-guard / 机器狗 / ntp-poller 均在" \
+    || bad "🔴 锚点复核失败（关键插件或服务被删）"
+  # 编译期闭环
+  has 'frozen-baseline.conf' scripts/gen-config.sh && has 'MISSING_PKGS' scripts/gen-config.sh \
+    && ok "gen-config 编译期读同一份基线，缺包即 ::error:: 阻断" \
+    || bad "gen-config 未接入冻结基线"
+  # 新增项检测：只允许增加，绝不阻断
+  for d in files/etc/init.d files.ap/etc/init.d; do
+    for x in "$d"/*; do
+      [ -f "$x" ] || continue
+      n=$(basename "$x")
+      grep -qF "[initd]|$n" "$BASE" || ADDED="$ADDED initd:$n"
+    done
+  done
+  for d in files/usr/sbin files.ap/usr/sbin; do
+    for x in "$d"/*; do
+      [ -f "$x" ] || continue
+      n=$(basename "$x")
+      grep -qF "[sbin]|$n" "$BASE" || ADDED="$ADDED sbin:$n"
+    done
+  done
+  [ -n "$ADDED" ] && ok "基线外新增项（允许，只增不减）：$ADDED" \
+    || echo "  · 暂无基线外新增项（保持 = 第 51 次基线）"
+  # 第 52 次：三份「详细日志（标红）」必须随仓库保留
+  for r in baseline/插件与服务冻结基线-详细日志.md \
+           baseline/插件基线冻结报告.html baseline/基线摘要.log; do
+    [ -s "$r" ] || bad "🔴 缺详细日志 $r"
+  done
+  has 'color:#d00' baseline/插件基线冻结报告.html \
+    && has '🔴' baseline/插件与服务冻结基线-详细日志.md \
+    && printf '\033[31m' baseline/基线摘要.log >/dev/null 2>&1 \
+    && ok "三份详细日志齐全：MD 🔴 / HTML CSS 真红 / 终端 ANSI 红" \
+    || bad "详细日志缺标红"
+fi
+
+# ── 第 51 次：NTP 改成「每 5 分钟循环校时一次」──────────────────
+# sysntpd(busybox ntpd) 轮询间隔自适应、无 UCI 参数可钉死；
+# 改用 ntp-poller：ntpd -q 单次校时 + sleep poll_interval 无限循环。
+P51=1
+for f in files/etc/config/system files.vs010/etc/config/system files.rax3000q/etc/config/system; do
+  has "option poll_interval '300'" "$f" || { bad "$f 缺固定周期 poll_interval=300"; P51=0; }
+done
+[ "$P51" = 1 ] && ok "三份 system：poll_interval=300（5 分钟）"
+has "option poll_interval '300'" scripts/port-overlay.sh \
+  && has 'NTP_POLL="${NTP_POLL:-300}"' scripts/port-overlay.sh \
+  && ok "port-overlay 产物带周期 + 编译期可覆盖" || bad "port-overlay 未同步 NTP 周期"
+has '/usr/sbin/ntp-poller' files/etc/init.d/ntp-poller \
+  && has 'procd_set_param command "$PROG" loop' files/etc/init.d/ntp-poller \
+  && ok "ntp-poller procd 服务存在（loop 常驻）" || bad "缺 ntp-poller init.d"
+for k in 'INTERVAL=300' 'sleep "$INTERVAL"' 'sleep "$RETRY"' 'ntpd -q -n -p' \
+         '_ordered_servers' 'set-minutes' 'set-interval' '/proc/uptime'; do
+  has "$k" files/usr/sbin/ntp-poller || { bad "ntp-poller 缺 $k"; P51=0; }
+done
+has 'while :; do' files/usr/sbin/ntp-poller && has '_sync' files/usr/sbin/ntp-poller \
+  && ok "成功后 sleep 300 无限循环；失败 30s 重试" || bad "循环结构缺失"
+if grep -qE 'ntp\.aliyun\.com|cn\.pool\.ntp\.org|time[0-9]\.cloud\.tencent\.com' files/usr/sbin/ntp-poller 2>/dev/null; then
+  bad "ntp-poller 混入公网 NTP 源"; else ok "ntp-poller 仍只用两个内网源"; fi
+for f in files/etc/uci-defaults/99-bridge-ready files.ap/etc/uci-defaults/99-bridge-ready \
+         files/etc/rc.local files/usr/sbin/health-fix; do
+  has '/etc/init.d/sysntpd disable' "$f" && has '/etc/init.d/ntp-poller enable' "$f" \
+    || { bad "$f 未做 sysntpd→ntp-poller 切换"; P51=0; }
+done
+[ "$P51" = 1 ] && ok "首启×2 + rc.local + health-fix 四处切换，sysupgrade 保留配置也生效"
+if grep -rqE '/etc/init.d/cron (enable|start)' files files.ap 2>/dev/null; then
+  bad "为做 5 分钟轮询又启用了 cron（破坏干净系统/低资源）"; else ok "未启用 cron，一个 sh 循环搞定"; fi
+has 'ntp_poll_minutes:' .github/workflows/build-wds.yml \
+  && has 'ntp_poll_minutes:' .github/workflows/build-ap.yml \
+  && has 'NTP_POLL=' scripts/prepare.sh \
+  && ok "编译期可设间隔（workflow input + prepare.sh→port-overlay）" \
+  || bad "编译期自定义间隔链路缺失"
+for f in files/etc/banner files.ap/etc/banner; do
+  has '每 5 分钟循环校时' "$f" || bad "$f 缺 NTP 周期说明"
+done
+has '每 5 分钟循环校时' .github/workflows/build-wds.yml \
+  && has '每 5 分钟循环校时' .github/workflows/build-ap.yml \
+  && ok "两份 Release NOTES 也写明 NTP 周期" || bad "Release NOTES 缺 NTP 周期"
+
+# ── 第 46 次：qosmio 树自带坏 DTS 导致 target/linux/install 失败 ──
+has '第46次裁剪' scripts/board-inject.sh \
+  && has 'unicom_vs010|cmcc_rax3000q' scripts/board-inject.sh \
+  && has 'TARGET_DEVICES 裁剪完成' scripts/board-inject.sh \
+  && ok "board-inject 会裁剪 TARGET_DEVICES（绕开 wifi0 悬空 label）" \
+  || bad "缺 TARGET_DEVICES 裁剪（会重演 wifi0 not found / world Error 2）"
+if grep -q '^#include "ipq5018-nss.dtsi"' board/*.dts 2>/dev/null; then
+  bad "自定义 DTS include 了 ipq5018-nss.dtsi（该文件引用不存在的 &wifi0）"
+else
+  ok "两台自定义 DTS 均不 include ipq5018-nss.dtsi"
+fi
+for f in board/ipq5018-vs010.6.12.dts board/ipq5018-rax3000q.6.12.dts; do
+  has '^&wifi {' "$f" && has '^&wifi1 {' "$f" \
+    && ok "$(basename "$f") 引用真实存在的 &wifi / &wifi1" \
+    || bad "$(basename "$f") wifi label 异常（应为 &wifi / &wifi1，不是 &wifi0）"
+done
+
 # ── 第 45 次：编译链致命项 / 必需包误删 / 机器狗自动重启 ──
 # (1) 致命：workflow 不得再用 make -s kernel_version（set -euo pipefail 下静默 exit 2）
 for f in .github/workflows/build-wds.yml .github/workflows/build-ap.yml; do
@@ -315,25 +640,53 @@ if grep -qE 'for p in .*ath11k-firmware-ipq5018-qcn6122.*ttyd' scripts/gen-confi
 else
   ok "必需包不在自动删除列表"
 fi
-# (3) 机器狗：默认停用，刷机后不会自动重启
-for f in files/etc/config/wdsdog files.ap/etc/config/wdsdog; do
-  grep -q "^[[:space:]]*option enabled '0'" "$f" \
-    && ok "$f 机器狗默认停用" || bad "$f 机器狗仍默认启用（会刷后自动重启）"
+# (3) 第 49 次：WDS 机器狗恢复启用 / 全参数可自定义 / 防误重启 / 防无限重启
+#     用户明确要求「网桥还是要机器狗，5 分钟不通自动重启，时间可自定义」。
+grep -q "^[[:space:]]*option enabled '1'" files/etc/config/wdsdog \
+  && ok "WDS 机器狗默认启用（网桥要机器狗）" || bad "WDS 机器狗未启用"
+grep -q "^[[:space:]]*option enabled '0'" files.ap/etc/config/wdsdog \
+  && ok "AP 机器狗保持停用（刷 AP 不会自动重启）" || bad "AP 机器狗被误启用"
+for kv in "option delay '5'" "option grace '6'" "option peer 'auto'" \
+          "option mode 'or'" "option max_reboots '3'" "option dryrun '0'"; do
+  has "$kv" files/etc/config/wdsdog || bad "WDS 机器狗缺 $kv"
 done
-grep -q "^[[:space:]]*option dryrun '1'" files/etc/config/wdsdog \
-  && ok "WDS 机器狗 dryrun=1 双保险" || bad "WDS 机器狗缺 dryrun 双保险"
-has 'bridge-watchdog disable' files/etc/uci-defaults/99-bridge-ready \
-  && has "wdsdog.main.enabled='0'" files/etc/uci-defaults/99-bridge-ready \
-  && ok "WDS 首启脚本改为 stop+disable（不再 enable+start）" \
-  || bad "WDS 首启脚本仍会启用机器狗"
-has 'ENABLED=$(_cfg enabled 0)' files/usr/sbin/bridge-watchdog \
-  && has 'DRYRUN=$(_cfg dryrun 1)' files/usr/sbin/bridge-watchdog \
-  && ok "bridge-watchdog 代码级缺省也安全（0 / 1）" \
-  || bad "bridge-watchdog 缺省仍会回落到自动重启"
-if grep -q '5 分钟重启' files/etc/banner; then
-  bad "banner 仍宣称开机 5 分钟自动重启"
+has "option delay '5'" files/etc/config/wdsdog && ok "出厂：连续不通 5 分钟重启，宽限 6 分钟"
+has 'bridge-watchdog enable' files/etc/uci-defaults/99-bridge-ready \
+  && has "wdsdog.main.enabled='1'" files/etc/uci-defaults/99-bridge-ready \
+  && has "wdsdog.main.dryrun='0'" files/etc/uci-defaults/99-bridge-ready \
+  && ok "WDS 首启 enable+start，并强制写回启用值（防保留配置带旧值）" \
+  || bad "WDS 首启链未启用机器狗"
+has 'bridge-watchdog disable' files.ap/etc/uci-defaults/99-bridge-ready \
+  && has "wdsdog.main.enabled='0'" files.ap/etc/uci-defaults/99-bridge-ready \
+  && ok "AP 首启仍显式 stop+disable" || bad "AP 首启未停用机器狗"
+# 代码级：缺省值、多判据、对端自动推导、重启上限、CLI
+has 'ENABLED=$(_cfg enabled 1)' files/usr/sbin/bridge-watchdog \
+  && has 'DRYRUN=$(_cfg dryrun 0)' files/usr/sbin/bridge-watchdog \
+  && ok "配置丢失时也按 WDS 出厂语义（启用 / 真重启）" \
+  || bad "bridge-watchdog 缺省仍回落到停用"
+for fn in '_resolve_peer' '_wd_ping_ok' '_rb_count' '_rb_reset' '_maybe_reboot' 'max_reboots' 'set-anchor' 'set-max-reboots' 'set-mode' 'set-grace' 'set-interval'; do
+  has "$fn" files/usr/sbin/bridge-watchdog || bad "机器狗缺 $fn"
+done
+has "ap)  echo '172.10.10.242'" files/usr/sbin/bridge-watchdog \
+  && has "sta) echo '172.10.10.241'" files/usr/sbin/bridge-watchdog \
+  && ok "peer=auto 按主备互 ping【对端】（不是 ping 自己）" \
+  || bad "peer auto 推导缺失"
+has '_wireless_ok "$i" && return 0' files/usr/sbin/bridge-watchdog \
+  && has '_wd_ping_ok && return 0' files/usr/sbin/bridge-watchdog \
+  && ok "mode=or：无线关联 / ping 对端 / ping 锚点任一通即通（防误重启）" \
+  || bad "多判据 OR 缺失"
+has '自动转 dryrun=1，停止重启循环' files/usr/sbin/bridge-watchdog \
+  && ok "连续重启达上限自动停手（防无限重启）" || bad "缺重启次数护栏"
+# 编译期自定义
+has 'wds_delay:' .github/workflows/build-wds.yml \
+  && has 'wds_peer:' .github/workflows/build-wds.yml \
+  && has 'WDS_DELAY' scripts/prepare.sh \
+  && ok "编译期可设时间（workflow input + prepare.sh 写 UCI）" \
+  || bad "编译期自定义时间链路缺失"
+if grep -q '5 分钟重启' files/etc/banner && ! grep -q '机器狗默认停用' files/etc/banner; then
+  ok "WDS banner 已改为启用说明（含 dryrun / 上限 / 改时间）"
 else
-  ok "banner 文案已改为默认停用"
+  bad "WDS banner 仍宣称停用或缺改时间提示"
 fi
 
 # ── 第 44 次（配置收口）：IPv6 关闭 / DHCP 防护 / 插件精简 ──

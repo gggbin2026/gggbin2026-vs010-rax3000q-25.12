@@ -70,11 +70,11 @@ c3po 分支曾因「必须 `fw-memory-mode=2`」的错误检查把它自动关�
 |---|---|---|
 | 两份 workflow 的**编排**（双入口、`device=both` matrix、Release 滚动保留 5、日期戳、tag 后缀 `-wds`/`-ap`） | `.github/workflows/build-wds.yml` / `build-ap.yml` | 重写了 clone/prepare 段，保留命名与发布逻辑 |
 | `files/`（WDS 基底：主备、机器狗、LuCI 修复、状态页、banner、accel-check、wifi-heal…） | `files/` | 关键配置由 `scripts/port-overlay.sh` 升级语法 |
-| `files.ap/`（AP 覆盖层：哑 AP、`.240`、无 DHCP、AP 控制台 `/ap/`、rssi-guard） | `files.ap/` | 同上 |
+| `files.ap/`（AP 覆盖层：哑 AP、`172.10.10.241`、无 DHCP、AP 控制台 `/ap/`、rssi-guard） | `files.ap/` | 同上 |
 | `files.vs010/` / `files.rax3000q/`（机型 hostname/system） | 同名目录 | 不变 |
 | `vs010/bdf/board-cucc_vs010.*`、`wifi-truth.conf`、采集/核对脚本、`nwrt-dump.dts`（存档） | `vs010/` | BDF 二进制与内核无关，直接复用 |
 | `oem_extract/`（新仓库自带的原厂 BDF） | `oem_extract/` | 作为第二份校准来源 |
-| 出厂语义：WDS 主 `.241` / 备 `.242`、5G ch36 HE160、DHCP 1h、机器狗 5 分钟；AP `.240`、`NwrtAP-2G/5G`、无 DHCP | `FIRMWARE.md` + overlay | 完整保留 |
+| 出厂语义：WDS 主 `172.10.10.241` / 备 `172.10.10.242`、5G ch36 HE160、DHCP 1h、机器狗 5 分钟；AP `172.10.10.241`、`NwrtAP-2G/5G`、无 DHCP | `FIRMWARE.md` + overlay | 完整保留 |
 
 ### ❌ 不搬（绑死 5.4 QSDK，进了就编译失败）
 

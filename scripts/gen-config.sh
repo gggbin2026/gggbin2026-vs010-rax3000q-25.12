@@ -7,6 +7,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$TREE"
 
 echo "==================== [gen-config] $D / $MODE ===================="
+# 第 52 次：插件 / 服务以第 51 次为冻结基线，【只增不减】。
+# 包清单唯一数据源 = baseline/frozen-baseline.conf 的 [pkg] 段；
+# 少任何一个包直接 ::error:: 阻断，绝不静默产出缺插件的固件。
 
 # ── 1. 自动探测 target / subtarget（不写死符号）──
 if [ -f target/linux/qualcommax/image/ipq50xx.mk ]; then
@@ -106,8 +109,19 @@ for p in luci-theme-argon luci-theme-footstrap luci-theme-material luci-theme-ed
     echo "::warning::主题 $p 在当前 feeds 中不存在，已从 .config 显式关闭（避免 LuCI 指向空气）"
   fi
 done
-# 必需包清单：defconfig 之后只核对、只警告，绝不从这里删
-REQUIRED_PKGS="dropbear ttyd luci-app-ttyd ath11k-firmware-ipq5018-qcn6122 kmod-ath11k-ahb"
+# ── 第 52 次：必需包清单改为「冻结基线 [pkg] 段」全量 29 项 ──────────
+# 旧版只列 5 个（SSH / TTYD / 射频固件），其余 24 个包被删掉时无人拦截。
+# 现在从 baseline/frozen-baseline.conf 读，单一数据源，verify.sh 也读同一份。
+# 以后【加】包：往该文件 [pkg] 段追加一行即可，这里自动生效；
+# 以后【删】包：不允许 —— 编译期直接失败，这就是「不能再减少」的技术保障。
+BASELINE="$ROOT/baseline/frozen-baseline.conf"
+if [ ! -f "$BASELINE" ]; then
+  echo "::error::缺冻结基线 $BASELINE（第 52 次起插件只增不减，此文件必须随仓库保留）"
+  exit 1
+fi
+REQUIRED_PKGS=$(awk -F'|' '$1=="[pkg]" {print $2}' "$BASELINE")
+[ -n "$REQUIRED_PKGS" ] || { echo "::error::冻结基线 [pkg] 段为空或被删"; exit 1; }
+echo "[gen-config] 冻结基线已加载：$(printf '%s\n' $REQUIRED_PKGS | wc -l) 个包（只增不减）"
 
 # GNU awk 是 OpenWrt 的硬依赖（include/scan.awk 用 asort）。mawk 会让
 # tmp/.targetinfo 变成 0 字节，进而让 defconfig 把全部设备符号丢掉。
@@ -119,13 +133,20 @@ if ! make defconfig; then
   echo "::error::make defconfig 失败（常见原因：缺 gawk / ncurses / feeds 未 update）"
   exit 1
 fi
-# 第 45 次：必需包核对（只警告，绝不阻断、绝不删除）
+# 第 52 次：冻结基线包核对 —— 缺失即【阻断】，不再只是警告。
+# 用户明确要求「以后插件以第 51 次为准，不能再减少，只能增加或保持」。
 # 若这里报缺包，说明 feed 真的没有或 defconfig 丢符号，去查 feeds.conf.default，
-# 而不是回头把 seed 里的 =y 注释掉 —— 那正是上一版把 TTYD 弄丢的原因。
+# 而不是回头把 seed 里的 =y 注释掉 —— 那正是第 45 次把 TTYD 弄丢的原因。
+MISSING_PKGS=""
 for p in $REQUIRED_PKGS; do
-  grep -q "^CONFIG_PACKAGE_$p=y$" .config \
-    || echo "::warning::必需包 $p 未进入 .config（检查 feeds 是否 update/install 完整）"
+  grep -q "^CONFIG_PACKAGE_$p=y$" .config || MISSING_PKGS="$MISSING_PKGS $p"
 done
+if [ -n "$MISSING_PKGS" ]; then
+  echo "::error::🔴 冻结基线包缺失（只增不减，禁止精简）：$MISSING_PKGS"
+  echo "::error::禁止把 config/*.seed 里的 =y 注释掉；要加包请往 baseline/frozen-baseline.conf 的 [pkg] 段追加行"
+  exit 1
+fi
+echo "[gen-config] ✓ 冻结基线 $(printf '%s\n' $REQUIRED_PKGS | wc -l) 个包全部进入 .config（只增不减）"
 
 grep -q "^$DEV_SYM=y" .config || {
   echo "::error::defconfig 把设备符号 $DEV_SYM 丢了"
@@ -135,4 +156,4 @@ grep -q "^$DEV_SYM=y" .config || {
   exit 1
 }
 echo "[gen-config] ✓ $(grep -c '^CONFIG_.*=y$' .config) 个 =y 符号，设备 $DEV 保住"
-echo "[gen-config] 已编 luci-app-*: $(grep -c '^CONFIG_PACKAGE_luci-app-.*=y$' .config || true) 个（应为 1：ttyd）"
+echo "[gen-config] 已编 luci-app-*: $(grep -c '^CONFIG_PACKAGE_luci-app-.*=y$' .config || true) 个（冻结基线要求 ≥1：luci-app-ttyd；允许增加）"

@@ -62,9 +62,32 @@ else
   sed -i "s/option hostname '\([^']*\)'/option hostname '\1-WDS'/" "$TREE/files/etc/config/system" 2>/dev/null || true
 fi
 printf '%s\n' "$MODE" > "$TREE/files/etc/firmware_mode"
-[ "$MODE" = ap ] && AP_IP=192.168.1.240 || AP_IP=192.168.1.241
-AP_IP="$AP_IP" "$ROOT/scripts/port-overlay.sh" "$TREE/files"
-echo "  ✓ overlay 合并完成，firmware_mode=$MODE，管理 IP=$AP_IP"
+
+# ── 第 49 次：编译期自定义机器狗（仅 WDS）──────────────────────────
+# 刷后仍可用 bridge-watchdog set-delay / set-peer 随时改，不用重编。
+if [ "$MODE" = wds ]; then
+  WD_DELAY="${WDS_DELAY:-5}"; WD_PEER="${WDS_PEER:-auto}"
+  case "$WD_DELAY" in ''|*[!0-9]*) WD_DELAY=5 ;; esac
+  [ "$WD_DELAY" -ge 1 ] && [ "$WD_DELAY" -le 120 ] || WD_DELAY=5
+  case "$WD_PEER" in
+    auto|off) ;;
+    ''|*[!0-9.]*) WD_PEER=auto ;;
+    *) ;;   # 纯数字+点，按具体 IP 处理
+  esac
+  # 只替换引号内的值，保留行尾注释与缩进
+  sed -i -E "s/option delay '[0-9]*'/option delay '$WD_DELAY'/" "$TREE/files/etc/config/wdsdog"
+  sed -i -E "s/option peer '[^']*'/option peer '$WD_PEER'/"   "$TREE/files/etc/config/wdsdog"
+  echo "  ✓ WDS 机器狗：连续不通 ${WD_DELAY} 分钟重启，peer=${WD_PEER}"
+fi
+# 第 48 次：AP / WDS 统一管理地址 172.10.10.241 / 255.255.252.0（/22）
+AP_IP=172.10.10.241
+# 第 51 次：NTP 固定周期（默认 5 分钟 = 300 秒）；非法值自动回落 5 分钟。
+NTP_MIN="${NTP_POLL_MINUTES:-5}"
+case "$NTP_MIN" in ''|*[!0-9]*) NTP_MIN=5 ;; esac
+[ "$NTP_MIN" -ge 1 ] && [ "$NTP_MIN" -le 1440 ] || NTP_MIN=5
+NTP_POLL=$(( NTP_MIN * 60 ))
+AP_IP="$AP_IP" NTP_POLL="$NTP_POLL" "$ROOT/scripts/port-overlay.sh" "$TREE/files"
+echo "  ✓ overlay 合并完成，firmware_mode=$MODE，管理 IP=$AP_IP，NTP 每 ${NTP_MIN} 分钟循环校时"
 
 # 2026-11-24：无线满速五件套 + 状态页版本档案（在 port-overlay 之后，band 已升级）
 "$ROOT/scripts/wifi-fullspeed.sh" "$TREE/files" "$BASE" "$MODE"
@@ -83,7 +106,8 @@ cp "$ROOT/build.env" "$TREE/files/etc/build-info" 2>/dev/null || true
 chmod 755 "$TREE/files/usr/sbin/l2-guard" "$TREE/files/usr/sbin/wifi-fullspeed" \
           "$TREE/files/usr/sbin/art-check" "$TREE/files/usr/sbin/oem-stack-check" \
           "$TREE/files/etc/init.d/l2-guard" "$TREE/files/etc/init.d/wifi-fullspeed" \
-          "$TREE/files/etc/uci-defaults/99-no-firewall" 2>/dev/null || true
+          "$TREE/files/etc/uci-defaults/99-no-firewall" \
+          "$TREE/files/usr/sbin/ntp-poller" "$TREE/files/etc/init.d/ntp-poller" 2>/dev/null || true
 
 # ── 6. 定稿 ──
 make defconfig

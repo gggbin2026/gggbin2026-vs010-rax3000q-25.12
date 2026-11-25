@@ -6,7 +6,7 @@
 |---|---|---|
 | 文件名 | `Nwrt-WDS-<内核>-<日期>-<机型>-*` | `Nwrt-AP-<内核>-<日期>-<机型>-*` |
 | Release tag | `fw-<内核>-时间戳-<机型>-wds` | `fw-<内核>-时间戳-<机型>-ap` |
-| 管理地址 | 主 `192.168.1.241` / 备 `192.168.1.242` | `192.168.1.240` |
+| 管理地址 | 主 `172.10.10.241` / 备 `172.10.10.242` | `172.10.10.241` |
 | SSID | 5G `WDS_AP`（4addr）/ 2.4G `BRIDGE-SETUP` | `NwrtAP-2G` / `NwrtAP-5G` |
 | hostname | `<机型>-WDS` | `<机型>-AP` |
 | 状态页 | `/bridge/`（主备 / 机器狗 / 端口 / 仪表盘 / 温度 / NSS） | `/ap/` + `/bridge/` 简版 |
@@ -347,7 +347,7 @@ Kconfig 告警，`make defconfig` 最终 `No change to .config` 且成功，**�
 **`luci-app-ttyd` 和 `ath11k-firmware-ipq5018-qcn6122` 当成「feed 里没有」删掉了**
 （feeds install 明明装了）。现在必需包永不自动删，只对主题类做存在性剔除。
 
-**★ 机器狗（bridge-watchdog）默认停用，刷机后不会自动重启**
+**★ 机器狗（bridge-watchdog）在第 45 次默认停用** —— 第 49 次已按用户要求恢复 WDS 启用，详见后文「第 49 次」。
 
 旧默认 `enabled=1 / delay=5 / grace=6` + 首启 `enable+start`：单机、无对端 WDS、
 或只当有线网桥时，开机约 **6+5≈11 分钟**就 `reboot -f`，之后每个周期反复重启，
@@ -363,7 +363,7 @@ Kconfig 告警，`make defconfig` 最终 `No change to .config` 且成功，**�
 
 成对部署真要用时：
 ```sh
-bridge-watchdog set-peer 192.168.1.242   # 先设对端，ping 判通最准
+bridge-watchdog set-peer 172.10.10.242   # 先设对端，ping 判通最准
 bridge-watchdog set-delay 10             # 或延长触发时间
 bridge-watchdog on                       # 启用（dryrun=1 仍只记日志）
 bridge-watchdog dryrun off               # 观察一两天确认不误重启，才真启用
@@ -371,3 +371,446 @@ bridge-watchdog dryrun off               # 观察一两天确认不误重启，�
 
 刷机动作本身仍会**正常重启一次**（原厂 Web API 返回 `isreboot=1`），这是刷机流程自带，不是故障；
 开机之后不会再无故重启。
+
+## 十六、第 46 次：编译链已跑通，卡在上游树自带坏 DTS
+
+第 45 次的修复**已生效**：日志里能看到 `[prepare] 实际内核版本 = 6.12.91`、
+`luci-app 数量: 1（只应为 ttyd）`，`make` 完整跑了约 48 分钟并生成了 `build.log`。
+这次不是 Prepare 也不是配置问题，是 `target/linux/install` 阶段编 DTB 失败：
+
+```
+Error: ipq5018-nss.dtsi:118.1-7 Label or path wifi0 not found
+FATAL ERROR: Syntax error parsing input tree
+make[5]: *** [image-ipq5018-wrc-x3000gs2.dtb] Error 1
+make[5]: *** [image-ipq5018-gl-b3000.dtb] Error 1
+ERROR: target/linux failed to build.
+```
+
+qosmio 25.12-nss 树自带的 `ipq5018-nss.dtsi` 引用 `&wifi0`，但整棵树根本没有
+`wifi0:` label（只有 `wifi:` / `wifi1:` / `wifi2:`）。树自带的两台设备
+（ELECOM WRC-X3000GS2、GL.iNet GL-B3000）的 DTS include 了它，编 DTB 必炸；
+而 OpenWrt 会为 `ipq50xx.mk` 里**所有** `TARGET_DEVICES` 编 DTB，不管你选了哪台，
+于是把整个编译拖垮。
+
+**修复**：`board-inject.sh` 现在会把 `ipq50xx.mk` 里非白名单的
+`TARGET_DEVICES +=` 行注释掉，只保留 `unicom_vs010` 和 `cmcc_rax3000q`
+（备份为 `ipq50xx.mk.orig46`）。我们这两台的 DTS 与能编过的 PZ-L8 同款 include，
+都不碰 nss.dtsi，所以只编自己的 DTB 即可通过，还少编 13 个无关 DTB。
+
+NSS 有线/无线加速依赖 `qca-nss-drv` / `ecm` 内核模块与 NSS 固件包，**不依赖**
+这段 dtsi；裁掉不影响加速，也不改动任何上游源码文件。
+
+刷前边界不变：64 位不死 U-Boot 是硬门槛、VS010 绝不刷 CMCC 机型的
+U-Boot/MIBIB/大分区、刷前备份 `0:ART`(mtd13) 与 `0:TRAINING`(mtd14)、
+RAX3000Q 板级未在 6.12 实机验证首次务必 3.3V USB-TTL。
+
+## 十七、第 47 次：SSH 可达性 / 内网 NTP / 删 WAN / STP / 干净系统
+
+**SSH 配置本身完全正常**（`0.0.0.0:22`、`root/admin`、密码/根登录全开、四层开机兜底），
+但逐文件核验发现首启 `99-bridge-ready` 与 `bridge/role.sh` 里还留着 21.02 老兜底：
+删掉所有 `config device` 段 + 写 `lan.type=bridge / ifname=eth0 eth1`。
+25.12 DSA 下这会让 `br-lan` 建不出来 → **管理 IP 消失 → SSH / LuCI / TTYD / NTP 全连不上**。
+本次把三处改成 DSA 原生写法并加防呆，这是本轮最关键的修复。
+
+配置现状（编译日志 + 端到端模拟实证）：
+
+| 项 | 值 |
+|---|---|
+| 登录 | `root / admin`（刷完请 `passwd` 改掉）；SSH :22 / LuCI :80 / TTYD :7681 |
+| 插件 | 仅 `luci-app-ttyd`；LuCI 底座 + 中文 + bootstrap，无任何第三方 `luci-app-*` |
+| 无线 DHCP 防护 | `l2guard enabled=1 / dryrun=0`，独立 nft bridge 表，含 DHCPv6 |
+| 防火墙 / IPv6 | 编译期 + 运行期双层关闭 |
+| wan / wan6 | 三层接口已删（五处）；**物理 WAN 口仍在 br-lan 的 `list ports 'wan'`**，WAN+LAN 同桥 |
+| NTP | 只当客户端：`192.168.1.254` / `172.10.10.254`，`enable_server=0 / use_dhcp=0`，无公网源 |
+| STP | `config device 'br_lan'` 的 `option stp '1'`（DSA 下必须写 device 段） |
+| 资源 | 停用 cron / ucitrack / led / gpio_switch；`packet_steering` 保留（非 NSS 基线需要） |
+| 日志 | CI 默认 `V=0` 静默 + 精准失败摘要（可勾 `build_verbose` 看详细）；运行期 log buffer 32KB、banner 12 行 |
+
+**NTP 与 /22 网段**：管理地址改为 `172.10.10.241 / 255.255.252.0`
+（`/22` = `172.10.8.0 ~ 172.10.11.255`）。NTP 源 `172.10.10.254` 就在本网段，
+二层直连可达，**不需要任何路由**；另一个源 `192.168.1.254` 跨网段，纯二层桥
+没有默认网关时不可达，但 busybox ntpd 以多个 `-p peer` 启动，一个不通会自动
+用另一个，不影响校时。第 47 次那条 `config route 'ntp172'`（`172.10.10.254/32
+via 192.168.1.254`）已删除——目标本来就在 /22 内，而 `192.168.1.254` 不是
+同网段网关，netifd 会拒绝该路由。若确实要让 `192.168.1.254` 也可达，在
+`/etc/config/network` 里取消 `config route 'ntp192'` 注释，把 `gateway` 改成
+**本网段内**的实际网关（例如 `172.10.10.1`），再 `/etc/init.d/network restart`。
+
+
+刷前边界不变：64 位不死 U-Boot 是硬门槛、VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区、
+刷前备份 `0:ART`(mtd13) 与 `0:TRAINING`(mtd14)、RAX3000Q 板级未在 6.12 实机验证首次务必 TTL、
+WDS 机器狗默认启用（5 分钟 / 3 次上限），AP 模式仍停用。
+
+## 第 48 次：管理网段统一 172.10.10.241 / 255.255.252.0（2026-11-25）
+
+**所有设备、两种模式、两台机型的管理 IP 统一为 `172.10.10.241`，掩码 `255.255.252.0`**
+（`/22`，网络 `172.10.8.0 ~ 172.10.11.255`）。覆盖 28 个文件：network 源文件、
+首启兜底、CGI、状态页、banner、`bridge-ap`、Release NOTES 与全部说明文档。
+
+| 项 | 值 |
+|---|---|
+| AP / WDS 主 / VS010 / RAX3000Q | `172.10.10.241` / `255.255.252.0` |
+| WDS 备机（唯一例外） | `172.10.10.242`，仅成对部署时由 `bridge-role` 自动顺延，防 ARP 冲突 |
+| PC 直连调试 | 设 `172.10.10.10/22` → `http://172.10.10.241` |
+| 链路本地兜底 | `169.254.240.1/16` 不变 |
+| NTP 两源 | `192.168.1.254` / `172.10.10.254` 不变 |
+
+⚠️ **两台机器（VS010 + RAX3000Q）若都刷 AP 且同时在线，会都是 `172.10.10.241` 而冲突**。
+第二台刷后 SSH/串口改：`uci set network.lan.ipaddr='172.10.10.243'; uci commit network; /etc/init.d/network restart`
+（或任意 `/22` 内未占用地址）。WDS 成对部署不受影响，备机自动 `.242`。
+
+⚠️ **第 47 次的 `config route 'ntp172'` 已删除**：`/22` 下 `172.10.10.254` 同网段二层直连，
+而 `192.168.1.254` 不是同网段网关，netifd 会拒绝该路由。纯二层桥无默认网关时
+`192.168.1.254` 不可达，但 busybox ntpd 多 `-p peer`，会自动用可达的
+`172.10.10.254` 校时，不影响功能。需要两个源都可达时，在 `/etc/config/network`
+取消 `config route 'ntp192'` 注释，把 `gateway` 改成本网段内实际网关后
+`/etc/init.d/network restart`。
+
+其余配置（SSH :22 / TTYD :7681 / LuCI :80、无线 DHCP 防护、防火墙与 IPv6 关闭、
+删 wan/wan6、WAN+LAN 同桥、STP、NTP 客户端、WDS 机器狗按第 49 次口径、简洁日志）全部不变。
+
+## 第 49 次：机器狗恢复启用 + 时间可自定义 + 防误重启/防无限重启（2026-11-25）
+
+> 用户问：「机器狗是不是被删了？网桥还是要机器狗，5 分钟不通自动重启；
+> 能不能改成我自定义时间？怎么保证它不乱重启？是不是要互相 ping IP？」
+
+### ① 没删，文件一直都在
+
+`/usr/sbin/bridge-watchdog`、`/etc/init.d/bridge-watchdog`、`/etc/config/wdsdog`、
+首启 `99-bridge-ready` 的启用链、状态页机器狗面板，**一个都没删**。
+第 45 次只是把 WDS 默认从 `enabled=1` 改成 `0`（外加 `dryrun=1`、首启 stop+disable、
+代码缺省也改成安全值），原因是你当时实测「刷机后约 11 分钟自动重启」。
+第 49 次按你要求**恢复 WDS 默认启用**，但不是简单改回 `1`，而是补齐三条防误伤机制。
+
+### ② 出厂值（WDS 网桥）
+
+| 项 | 值 | 含义 |
+|---|---|---|
+| `enabled` | `1` | WDS 网桥默认启用；**AP 模式仍 `0`**（刷 AP 不会自动重启） |
+| `delay` | `5` | 连续不通 **5 分钟**才 `sync; reboot -f` |
+| `grace` | `6` | 开机宽限 6 分钟，等 ath11k 校准 + 主备收敛；这段可从容 SSH 改配置 |
+| `interval` | `30` | 每 30 秒检查一次 |
+| `mode` | `or` | 三条判据任一通即通 |
+| `peer` | `auto` | 自动推导**对端**管理 IP |
+| `anchor` | 空 | 可选额外锚点 |
+| `max_reboots` | `3` | 连续重启 3 次仍不通 → 自动转 `dryrun=1` 停手 |
+| `dryrun` | `0` | 真重启（调试可 `dryrun on`） |
+
+### ③ 时间怎么自定义（两种，都不用重编）
+
+**刷后 SSH / TTYD（推荐，立即生效、UCI 持久化）：**
+
+```sh
+bridge-watchdog set-delay 10        # 5 → 10 分钟（1~120）
+bridge-watchdog set-grace 8         # 开机宽限
+bridge-watchdog set-interval 60     # 检查间隔
+bridge-watchdog set-max-reboots 5   # 重启上限
+bridge-watchdog status              # 看当前配置 / 连续不通多久 / 距重启还剩多久
+bridge-watchdog once                # 逐条检测一次，绝不重启
+```
+
+**编译期**：`build-wds.yml` 手动 Run 时新增两个输入框
+`wds_delay`（默认 5）、`wds_peer`（默认 auto），`prepare.sh` 写进 UCI。
+非法值（0 / 非数字 / >120）自动回落 5。
+
+**临时不重启**：`bridge-watchdog dryrun on`（只记日志），恢复 `dryrun off`；
+彻底关 `bridge-watchdog off`。开机 6 分钟宽限期内随便改。
+
+### ④ 怎么保证「通的时候不误重启」
+
+默认 `mode=or`，**三条判据任一通就算通**，计时立刻清零：
+
+1. WDS 接口的无线关联（`iw link` 有 `Connected to` / `iw station dump` 有 `Station`）
+2. ping **对端**管理 IP
+3. ping 可选锚点（如 `172.10.10.254` 或上级网关）
+
+另外：无线接口压根没注册 = 驱动未就绪，返回「未就绪」**不计故障、不重启**；
+计时用 `/proc/uptime` 单调时钟，不受 NTP 跳变误判。
+
+### ⑤ 是不是要互相 ping IP？——是 ping **对方**，不是 ping 自己
+
+⚠️ **ping 自己的 IP（或 127.0.0.1）永远通，判不出桥断没断，没有意义。**
+要 ping 的是**对端那台路由器的管理 IP**：主 `172.10.10.241` ↔ 备 `172.10.10.242`。
+
+`peer=auto` 已经自动做了这件事：读 `/etc/bridge_role` 和本机 `network.lan.ipaddr`，
+`ap`(主 .241) → ping .242；`sta`(备 .242) → ping .241。不用手填。
+想显式指定或加锚点：
+
+```sh
+bridge-watchdog set-peer 172.10.10.242     # 本机是主，填备的 IP
+bridge-watchdog set-anchor 172.10.10.254   # 再加一个稳定锚点（NTP 服务器/网关）
+bridge-watchdog set-mode ping               # 只按 ping 判（or 更稳，不建议改）
+```
+
+### ⑥ 怎么保证「不通时不会无限重启」
+
+`max_reboots=3` + 持久计数 `/etc/wdsdog-reboot-count`：
+每次真重启前 +1，**网络一恢复就自动清零**；连续 3 次仍不通，自动把 `dryrun` 置 1、
+写日志「已连续重启 3 次仍不通 → 自动转 dryrun 停手」，不再循环。
+状态页 `/bridge/` 会显示重启计数并在达上限时给出排障提示。
+配合 `grace=6` 的开机窗口，即使真出问题也有充足时间 SSH/TTL 进去 `off`。
+
+### ⑦ 状态页同步
+
+`/bridge/` 机器狗面板新增：判据模式、对端（含 ping 结果）、重启计数 / 上限，
+CGI 的 `peer=auto` 解析与脚本同口径，并把开机宽限缺省从 3 改成 6。
+AP 页面仍显示「停用，不会循环重启」。
+
+其余配置（SSH :22 / TTYD :7681 / 管理 `172.10.10.241/22`、无线 DHCP 防护、
+防火墙与 IPv6 关闭、删 wan/wan6、WAN+LAN 同桥、STP、NTP 客户端、简洁日志、
+第 46 次 TARGET_DEVICES 裁剪）全部不变。
+
+## 第 50 次：改网桥 IP 不会误重启 + 自动发现对端 + 下载页红字说明（2026-11-25）
+
+> 用户追问：「网桥要是变 IP 地址是不是会导致重启？修改网桥 IP 要提示我去改
+> 机器狗那的设置及 IP，或是网桥客户端自动检测主网桥的 IP；编译后在固件下载
+> 日志那说明并标红。」
+
+### ① 先直接回答：改 IP 本身**不会**触发重启
+
+- 机器狗 `mode=or`，**无线关联**判据仍在；改 IP 后只要 WDS 关联正常，计时立刻清零。
+- 必须**连续**不通满 `delay`(5) 分钟才重启；`network restart` 只是秒级断链。
+- 开机 `grace=6` 分钟内根本不判故障。
+- **但**旧 `peer` 指向 `.241/.242`：若「改 IP 后 + 无线也断」，互 ping 会失效 → 三条全不通才可能重启。这就是本轮要堵的口子。
+
+### ② 三件套：与管理 IP 完全解耦
+
+**ⓐ WDS 角色链路本地别名（最稳的兜底）**
+
+| 角色 | 自己挂 | 互 ping 对方 |
+|---|---|---|
+| 主 `ap` | `169.254.241.1/16` | `169.254.241.2` |
+| 备 `sta` | `169.254.241.2/16` | `169.254.241.1` |
+
+避开 AP 模式调试别名 `169.254.240.1`。**管理 IP 改成任何地址，这两个别名都不变**，
+`_wd_ping_ok` 优先 ping 别名 → 改 IP 不会让 ping 判据失效。
+挂载点三处冗余：`bridge-netfix`(开机)、`role.sh`(角色收敛后)、
+`health-fix`(手动自检)；`bridge-watchdog` loop 启动时还会 `_ensure_ll_alias` 补挂。
+
+**ⓑ 网桥客户端自动检测主网桥 IP**
+
+`_discover_peer()`：从 WDS 链路对端射频 MAC（`iw link` / `station dump`）取前 5 组字节，
+在 `ip neigh show dev br-lan` 里反查同前缀的管理 IP（排除自己 / 链路本地 / 组播），
+写入 `/tmp/wdsdog-peer-discovered`；loop **每 10 轮自动刷新**，`_resolve_peer()` 优先用它。
+`status` 与 `/bridge/` 状态页都显示「自动发现对端」。
+
+> 如实边界：NSS 卸载下 `station dump` 可能为空、neigh 可能还没学到对端 → 静默失败，
+> 由 ⓐ 别名 + 角色推导 `.241/.242` 兜底，**绝不会因此误重启**。
+
+**ⓒ `bridge-watchdog resync`（改完 IP 手动跑，两台各一次）**
+
+重挂自身别名 → 重新发现对端新 IP → 写缓存 → 打印红字提示 → 重启机器狗。
+
+### ③ 改 IP 的提示，四个地方都有（含「标红」）
+
+| 位置 | 形式 |
+|---|---|
+| **固件下载页 Release NOTES** | 开头 `🔴 **【改 IP 必读】**` + `> ⚠️` 引用块（GitHub 不支持 CSS 字体色，用红圆+加粗+引用达到最醒目） |
+| **Actions 编译日志** | `printf '\033[31m' ... '\033[0m'`，GitHub Actions 渲染 **ANSI 真红** |
+| **随固件附的 `CHANGE-IP-NOTICE.txt`** | 和 `.bin/.ubi` 一起上传、进 `sha256sums`，下载时直接可见 |
+| **设备端** | `bridge-watchdog status`（ANSI 红字）、`/bridge/` 状态页红色告警条（本机 IP 不是 .241/.242 时自动显示）、两份登录 banner、`health-fix`、`bridge-ap ip` |
+
+`/bridge/` 新增显示：本机 IP、自身↔对端别名（含 ping 结果）、自动发现的对端 IP、改 IP 红条。
+
+### ④ 改 IP 操作清单
+
+```sh
+uci set network.lan.ipaddr='172.10.10.243'; uci commit network; /etc/init.d/network restart
+bridge-watchdog resync            # 本机：自动发现对端新 IP
+# 另一台也改了 IP 的话，在另一台同样跑一次 resync
+bridge-watchdog status            # 复核；IP 非 .241/.242 会打印红字
+# 或显式指定（两台互相指向对方）：
+bridge-watchdog set-peer 172.10.10.244
+```
+
+⚠️ **ping 自己 / 127.0.0.1 永远通，判不出断链；必须 ping【对端】**。
+`peer=auto` 已自动做到主 `.241` ↔ 备 `.242` 互指。
+
+### ⑤ 没动的东西
+
+第 49 次全部保留：WDS 默认启用、5 分钟、时间可自定义（`set-delay` / `wds_delay`）、
+`mode=or` 三判据、`max_reboots=3` 防无限重启、`dryrun`、`grace=6`。
+AP 模式机器狗仍停用。网段 `172.10.10.241/22`、SSH/TTYD、DHCP 防护、防火墙/IPv6 关、
+WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪全部不变。
+
+## 第 51 次：NTP 改成「每 5 分钟循环同步一次」（2026-11-25）
+
+> 用户要求：「帮我设置一下 NTP，5 分钟同步一次。5 分钟同步是这样循环的同步。」
+> 即不是开机同步一次、也不是自适应轮询，而是**固定每 300 秒一轮、无限循环**。
+
+### ① 为什么不能只改 `/etc/config/system`
+
+OpenWrt 的 `sysntpd` 常驻跑的是 **busybox ntpd**：轮询间隔是编译期常量
+`MINPOLL`(32s) 起步、稳定后自适应拉长到几十分钟，**没有任何 UCI 参数能钉成 5 分钟**，
+也不接受「立刻重新查询」信号。加 cron 做 `*/5` 固然可行，但会重新启用之前刻意停用的
+cron，和「干净系统 / 低资源」冲突。
+
+### ② 做法：`ntp-poller` 顶替 `sysntpd`
+
+```
+/usr/sbin/ntp-poller        # 周期触发器（sh 循环）
+/etc/init.d/ntp-poller      # procd 常驻，START=96
+```
+
+每轮调用 `ntpd -q -n -p <server>`（`-q` = 设完时钟就退出），
+**成功后 `sleep 300` → 下一轮 → 无限循环**：
+
+```
+开机立即同步一次
+   ├─ 任一源成功 → sleep 300 秒 → 下一轮（严格 5 分钟周期，循环往复）
+   └─ 两个源都不通 → sleep 30 秒快速重试；恢复成功后自动回到 300 秒周期
+```
+
+- **不启用 cron**、不装任何额外包/插件；一个 sh 循环 + `sleep`，几乎不占 CPU/内存。
+- **日志简洁**：成功每 12 轮（1 小时）才写一条，失败每 6 轮写一条，
+  `/tmp/ntp-poller.log` 上限 120 行；`status` 随时可查。
+- **源不变**：仍是 `192.168.1.254` / `172.10.10.254`，`enabled=1`、
+  `enable_server=0`（不对外服务）、`use_dhcp=0`（不收 DHCP 下发的源）、无公网 NTP。
+- **源智能排序**：上次成功的源 > 与本机同 `/22` 网段的源 > 其余，去重。
+  `172.10.10.254` 同网段直连，会排第一，开机第一次就同步成功，不用白等
+  `192.168.1.254`（跨网段不可达）的超时。一个源不通自动用另一个。
+- **带超时**：单源最多等 12 秒；busybox 没编 `timeout` 时用后台进程 + 轮询兜底。
+- **单调时钟**：`status` 的「距下次同步」用 `/proc/uptime` 算，不用 `date`。
+  NTP 每次校时都会改 wall clock，用它算倒计时会乱跳；
+  机器狗 `bridge-watchdog` 同样用单调时钟，**NTP 跳变不会造成误重启**。
+- **两个源都不通**：只记日志、继续循环，不改时间、不影响网络、绝不重启。
+
+### ③ 服务切换（带兜底）
+
+`sysntpd` 常驻必须停 —— 两个进程同时改系统时间会打架。切换在四处保证：
+`99-bridge-ready`(WDS/AP 首启) + `rc.local` + `health-fix`(每次开机/手检)，
+专治 sysupgrade「保留配置」把旧 `rc.d` 链接带回来。
+**兜底**：`ntp-poller` 没编进固件时**不碰 sysntpd**，避免彻底没有 NTP。
+`ntp-poller` 与 init.d 在 `prepare.sh` 里显式补 755 执行位。
+
+### ④ 怎么改间隔（都不用重编）
+
+```sh
+ntp-poller status                # 看周期 / 上次同步 / 成功失败次数 / 距下次还剩多久
+ntp-poller once                  # 立刻校时一次（绝不循环、绝不常驻）
+ntp-poller set-minutes 10        # 5 → 10 分钟（1~1440），立即生效、UCI 持久化
+ntp-poller set-interval 300      # 直接按秒改（30~86400）
+ntp-poller set-retry 30          # 失败重试间隔
+ntp-poller set-timeout 12        # 单源等待上限
+ntp-poller on | off              # 启用 / 停用
+```
+
+**编译期**：两份 workflow 新增 `ntp_poll_minutes` 输入框（默认 5，1~1440 分钟），
+`prepare.sh` 转成秒 → `port-overlay.sh` 写进 `system.ntp.poll_interval`；
+非法值（0 / 非数字 / >1440）自动回落 5 分钟。
+Prepare 日志会打印 `✓ system → … + 每 5 分钟循环校时（300s）`。
+
+### ⑤ 配置项
+
+`/etc/config/system` 新增一行，其余不变：
+
+```
+config timeserver 'ntp'
+    option enabled '1'
+    option enable_server '0'
+    option use_dhcp '0'
+    option poll_interval '300'    ← 第 51 次：固定 300 秒 = 5 分钟
+    list server '192.168.1.254'
+    list server '172.10.10.254'
+```
+
+`retry_interval` / `sync_timeout` 不写 UCI，脚本自带缺省（30 / 12），
+`ntp-poller set-retry` / `set-timeout` 改时才会写入。
+
+⚠️ 刷后别在 LuCI「系统 → 系统属性」里点 NTP 开关（那套 UI 面向 sysntpd）；
+用 `ntp-poller` 的 CLI 或直接 `uci set system.ntp.poll_interval=...` 后 restart。
+
+### ⑥ 没动的东西
+
+第 50 次全部保留：改 IP 不误重启 + 自动发现对端 + 下载页红字说明；
+第 49 次机器狗（5 分钟 / `set-delay` / `mode=or` / `max_reboots=3`）；
+管理网段 `172.10.10.241/22`、SSH/TTYD、DHCP 防护、防火墙/IPv6 关、
+WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪。
+
+## 第 52 次：插件 / 服务冻结基线（只增不减）+ 详细日志（标红）（2026-11-25）
+
+> 用户原话：「以后插件就以这版为准，不能再减少了，以后只能增加或保持，
+> 并出具一版详细的日志，重要地方标红。」
+
+### ① 冻结口径：取广义，不只锁一个 `luci-app-ttyd`
+
+如果只锁「LuCI 插件」，这版本来就只有 `luci-app-ttyd` 一个，所谓「不能再减少」
+几乎等于没约束。所以把**这版固件实际具备的全部能力**纳入冻结：
+
+| 类别 | 数量 | 例子 |
+|---|---|---|
+| 编译包 | 29 | dropbear / ttyd / luci-app-ttyd / ath11k-firmware-ipq5018-qcn6122… |
+| 全局开关 | 4 | 256M 低内存 profile / squashfs / 不编 initramfs / CONFIG_IPV6=n |
+| init.d 服务 | 9 | ntp-poller / bridge-watchdog / l2-guard / luci-fix… |
+| usr/sbin 工具 | 20 | health-fix / bridge-ap / wifi-heal / accel-check… |
+| 状态页 / CGI | 4 | /bridge/ / /ap/ 两个页面 + 两个只读 CGI |
+| 首启 uci-defaults | 4 | 99-bridge-ready / 99-no-firewall / 99-no-ipv6… |
+| 关键 UCI 配置 | 12 | wdsdog enabled=1 / poll_interval=300 / stp=1 / 管理 IP… |
+| **合计** | **82 项** | 逐项硬校验 |
+
+### ② 单一数据源：`baseline/frozen-baseline.conf`
+
+```
+[pkg]|dropbear
+[pkg]|luci-app-ttyd
+[initd]|ntp-poller
+[cfg]|files/etc/config/system|option poll_interval '300'
+```
+
+🔴 **铁律：只允许【追加新行】，禁止删除 / 改名 / 改值任何已有行。**
+`scripts/verify.sh` 里 `FROZEN_MIN=82` 是硬编码下限 —— 就算有人把清单和代码
+一起删掉一行，也会被「81 项 < 下限 82」拦住；另有锚点复核（TTYD / SSH /
+l2-guard / 机器狗 / ntp-poller）硬编码再查一遍，防整个清单被替换。
+
+### ③ 三重校验（少一项就出不了固件）
+
+| 层 | 位置 | 少一项的结果 |
+|---|---|---|
+| 上传前自检 | `verify.sh` 第 52 次判据段 | `🔴 冻结基线…丢失` → `RESULT: FAIL` |
+| 编译期 | `gen-config.sh` 读同一份清单的 `[pkg]` 段 | defconfig 后 `::error::🔴 冻结基线包缺失` + `exit 1` |
+| 防篡改 | `FROZEN_MIN=82` + 锚点复核 | 连清单一起删行 / 整体替换也 FAIL |
+
+`gen-config.sh` 的 `REQUIRED_PKGS` 从旧版写死 5 个（SSH / TTYD / 射频固件）
+改成**读清单全量 29 个**；核对从「只警告」升级为「阻断」。
+`verify.sh` 里旧判据 `luci-app 数量 == 1` 改成 `>= 1 且基线项在位` ——
+以后新增 LuCI 插件不会再被自检误杀，符合「只能增加」。
+
+实测五种场景：原样不动 → PASS（82/82）；删 `nic-guard` → FAIL；
+把 `luci-app-ttyd` 从 seed 注释掉 → FAIL（自检 + 编译期双层）；
+从清单删一行 → FAIL（81 < 82）；新增一个 init.d + 一个 sbin → PASS
+且提示「基线外新增项（允许）」。
+
+### ④ 以后怎么加插件（正确姿势）
+
+1. 在 `baseline/frozen-baseline.conf` 的 `[pkg]` 段**追加**一行 `[pkg]|新包名`
+2. 在 `config/plugins.seed`（或 common.seed）把对应包写成 `=y`
+3. `sh scripts/verify.sh` 会显示「基线外新增项（允许）」，编译期也会自动核对
+4. 若新增的是服务 / 页面，往 `[initd]` / `[sbin]` / `[www]` 段追加即可
+
+🔴 **不要删旧行、不要把 `=y` 注释掉、不要改 `=n`。**
+关闭项（防火墙 / IPv6 / 第三方 luci-app-\*）不在这份清单里，属于这版的
+「行为红线」，详见详细日志第十节；要变更需单独显式确认。
+
+### ⑤ 详细日志（重要处标红）—— 三份，覆盖三种媒介
+
+| 文件 | 标红方式 | 用在哪 |
+|---|---|---|
+| `baseline/插件基线冻结报告.html` | **CSS 真红** `color:#d00` + 红底警示框 | 手机 / 浏览器直接打开，最直观（主交付） |
+| `baseline/插件与服务冻结基线-详细日志.md` | 🔴 + **加粗** | GitHub / 编辑器阅读 |
+| `baseline/基线摘要.log` | **ANSI `[31m` 真红** | SSH / 终端 `cat` 出来就是红的 |
+
+内容包含：10 条标红重点、三重校验、29 个包逐个用途与定位文件、
+9 个服务 / 20 个工具 / 4 个页面 / 4 个首启 / 12 项关键配置 / 4 个全局开关、
+🔴 明确关闭项（红线）、访问与网络速查、五种校验场景实测、变更记录。
+
+**编译后在固件下载页也能看到**：两份 Release NOTES 开头新增
+`🔴 【插件基线已冻结】` 段；Actions 的 Organize 步骤用 ANSI 真红打印
+`🔴【插件基线已冻结】…82 项只增不减…`，和上一轮「改 IP 必读」的红字一起出现。
+
+### ⑥ 没动的东西
+
+第 51 次（NTP 每 5 分钟循环）、第 50 次（改 IP 不误重启 / 自动发现对端）、
+第 49 次（机器狗 5 分钟 / set-delay / mode=or / max_reboots=3）、
+管理网段 `172.10.10.241/22`、SSH/TTYD、DHCP 防护、防火墙/IPv6 关、
+WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪 —— 全部原样保留。
+本轮**没有删任何插件，也没有加任何插件**，纯粹把现状冻结成基线。
