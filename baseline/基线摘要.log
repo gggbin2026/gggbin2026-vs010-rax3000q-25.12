@@ -1,0 +1,134 @@
+==================================================================
+[31m[1m  插件与服务冻结基线 · 详细日志  |  基准 第51次 · 出具 第52次[0m
+==================================================================
+
+[31m[1m🔴 铁律：以后插件就以这版为准，不能再减少，只能增加或保持[0m
+
+  单一数据源 : baseline/frozen-baseline.conf
+  冻结项     : 82 项 = 29 编译包 + 4 全局 + 9 服务 + 20 工具 + 4 页面 + 4 首启 + 12 配置
+  三重校验   : verify.sh(FAIL) / gen-config.sh(::error:: exit 1) / FROZEN_MIN=82 防篡改
+
+[33m【一】重要事项（标红）[0m
+[31m[1m  🔴 1. 铁律：插件 / 服务以【第 51 次】为冻结基线，以后只能【增加或保持】，【不能再减少】。[0m
+[31m[1m  🔴 2. 唯一 LuCI 插件 = luci-app-ttyd；SSH = dropbear；网页终端 = ttyd :7681。这三项删任何一个，编译期与自检都会直接失败。[0m
+[31m[1m  🔴 3. 冻结基线共 82 项（29 编译包 + 4 全局开关 + 9 服务 + 20 工具 + 4 页面 + 4 首启 + 12 关键配置），逐项硬校验。[0m
+[31m[1m  🔴 4. 任何基线项消失 → sh scripts/verify.sh 报「🔴 冻结基线…丢失」并 FAIL；gen-config.sh 在 defconfig 后直接 ::error:: 退出 1，不会产出缺插件的固件。[0m
+[31m[1m  🔴 5. 只允许往 baseline/frozen-baseline.conf【追加行】；禁止删除、改名、改值任何已有行（条目数下限 82 硬编码在 verify.sh，连清单一起删也拦得住）。[0m
+[31m[1m  🔴 6. 防火墙 / IPv6 关闭是红线：属于这版的行为基线，变更需单独显式确认，别顺手打开。[0m
+[31m[1m  🔴 7. 登录 root / admin 是弱密码，刷完第一件事 passwd 改掉（SSH / LuCI / TTYD 同步生效）。[0m
+[31m[1m  🔴 8. 改网桥管理 IP 后必须两台各跑一次 bridge-watchdog resync；虽已用 169.254.241.1/.2 别名保证不会因改 IP 误重启，但互 ping 判据要跟上新地址。[0m
+[31m[1m  🔴 9. 机器狗 WDS 默认启用：连续不通 5 分钟重启；AP 模式停用。刷 AP 不会自动重启。[0m
+[31m[1m  🔴 10. NTP 默认每 5 分钟循环校时一次（开机先同步一次，之后 sleep 300 无限循环）。[0m
+
+[33m【二】编译包 29 项[0m
+  ── LuCI 底座 / 插件（9）
+     luci-app-ttyd                          ★唯一 LuCI 插件：LuCI 里的网页终端入口[31m[1m ★唯一LuCI插件[0m
+     luci-base                              LuCI 核心框架
+     luci-i18n-base-zh-cn                   LuCI 中文语言包
+     luci-mod-admin-full                    LuCI 管理模块
+     luci-mod-network                       LuCI 网络模块
+     luci-mod-status                        LuCI 状态模块
+     luci-mod-system                        LuCI 系统模块
+     luci-theme-bootstrap                   官方主题（默认；防主题白屏）
+  ── 访问入口（6）
+     dropbear                               SSH 服务端，0.0.0.0:22
+     ttyd                                   网页终端本体，:7681
+     uhttpd                                 HTTP 服务，:80（LuCI + 状态页）
+     rpcd-mod-luci                          LuCI 的 ubus/RPC 后端
+     rpcd-mod-iwinfo                        无线信息的 ubus 后端
+     cgi-io                                 CGI 输入输出（状态页用）
+  ── 网络 / 无线（8）
+     dnsmasq                                DHCP / DNS（AP 关 DHCP 服务端；WDS 主开 1h
+     bridge                                 网桥工具
+     kmod-bridge                            内核网桥模块
+     ethtool                                端口状态 / 速率查询
+     iw                                     无线配置工具（机器狗判据依赖）
+     iwinfo                                 无线信息查询
+     wireless-regdb                         无线 regulatory 数据库（CN）
+     wpad-basic-mbedtls                     双频 hostapd / WPA2-PSK
+  ── 无线防护（3）
+     nftables                               nft 用户态工具（l2-guard 用）
+     kmod-nft-bridge                        nft bridge 表内核模块（不装 firewall4）
+     hostapd-common                         hostapd 公共文件
+  ── 驱动 / 固件（4）
+     kmod-ath11k-ahb                        ath11k AHB 总线驱动
+     kmod-ath11k-pci                        ath11k PCI 驱动
+     ath11k-firmware-ipq5018-qcn6122        QCN6122 射频固件（2.4G probe 必需，第45次被误删
+     ipq-wifi-cucc_vs010                    VS010 本机 BDF 板级数据
+
+[33m【三】运行期 init.d 服务 9 项[0m
+     bridge-netfix        每次开机综合兜底：br-lan / eth0+eth1 / 管理 IP / WDS 角色
+     bridge-role          WDS 自动「一主一备」收敛（主 .241 / 备 .242）
+     bridge-watchdog      WDS 机器狗：连续不通 5 分钟重启（WDS 启用 / AP 停用）
+     l2-guard             无线端 rogue DHCP 拦截（独立 nft bridge 表，不碰 firewal
+     luci-fix             LuCI 主题下拉按真实目录重建，杜绝 500 / 白屏
+     nic-guard            网卡 / 交换芯片开机自检 + 自愈
+     ntp-poller           NTP 每 5 分钟循环校时（第 51 次顶替 sysntpd 常驻）
+     wifi-fullspeed       无线满速 / NSS 固件兜底（START=24）
+     ap-rssi-guard        AP 模式弱信号剔除守护（默认停用，config enabled=0）
+
+[33m【四】usr/sbin 工具 20 项[0m
+     accel-check          「无线/有线加速」状态自检
+     ap-rssi-guard        AP 弱信号剔除守护 + 命令行工具
+     art-check            实机只读自检 0:ART（不改 flash / 不重启）
+     bridge-ap            普通 AP 模式现场配置工具
+     bridge-dhcp          管 dnsmasq 开关与租期（默认 1h）
+     bridge-role          WDS 一主一备命令行
+     bridge-watchdog      机器狗命令行（status / set-delay / resync / dryrun）
+     dhcp-guard           无线 DHCP Snooping（防无线客户端私开 DHCP 抢答）
+     health-fix           串口一键自检修（LuCI / CGI / SSH / 无线）
+     l2-guard             无线 DHCP 防护命令行（apply / off / status / on）
+     luci-entry           可选：把状态页入口加进 LuCI 页脚
+     luci-fix             LuCI 主题自修工具
+     nic-guard            网卡自检 + 自愈
+     ntp-poller           NTP 周期校时命令行（status / set-minutes / once）
+     oem-stack-check      QSDK 好固件对照自检（只读）
+     portstat             看真实端口速率（别看 LuCI 格子）
+     tty-diag             一条命令定位「进系统后串口按不动」
+     wifi-bdf-check       无线板级数据 / 校准自检
+     wifi-fullspeed       无线加速自检（只读打印）
+     wifi-heal            无线诊断 + 温和自愈（开机后台调）
+
+[33m【五】状态页 4 / 首启 4 / 关键配置 12 / 全局开关 4[0m
+     www/bridge/index.html        WDS 状态页 /bridge/
+     www/cgi-bin/bridge           WDS 状态页数据 CGI（只读）
+     www/ap/index.html            AP 状态页 /ap/
+     www/cgi-bin/apstatus         AP 状态页数据 CGI（只读）
+     uci-defaults/99-bridge-ready  首启总装：密码 / 时区 / NTP / 服务启停 / STP / 机器狗
+     uci-defaults/99-bridge-status 状态页版本档案
+     uci-defaults/99-no-firewall   运行期清空 firewall + 关软硬 flow offload
+     uci-defaults/99-no-ipv6       运行期关 IPv6 / 清 ULA / RA / DHCPv6 / wan6
+     option enabled '1'                             WDS 机器狗默认启用
+     option delay '5'                               连续不通 5 分钟重启
+     option max_reboots '3'                         3 次不通自动停手
+     option enabled '0'                             AP 模式机器狗停用
+     option poll_interval '300'                     NTP 每 5 分钟循环校时
+     list server '192.168.1.254'                    NTP 内网源 ①
+     list server '172.10.10.254'                    NTP 内网源 ②（/22 直连）
+     option enable_server '0'                       NTP 不对外服务
+     option enabled '1'                             无线 DHCP 防护开启
+     option stp '1'                                 STP 开启（写在 device 段）
+     option ipaddr '172.10.10.241'                  管理 IP
+     option netmask '255.255.252.0'                 掩码 /22
+     CONFIG_ATH11K_MEM_PROFILE_256M=y               256MB 板低内存 profile（ath11k 起得来的前提）
+     CONFIG_TARGET_ROOTFS_SQUASHFS=y                squashfs 根文件系统
+     CONFIG_TARGET_ROOTFS_INITRAMFS=n               不编 initramfs
+     CONFIG_IPV6=n                                  全局关闭 IPv6（官方全局符号）
+
+[31m[1m🔴 明确关闭项（红线，别顺手打开）[0m
+[31m[1m     🔴 firewall4 / firewall 编译期 is not set + 运行期 99-no-firewall 清空并 disable[0m
+[31m[1m     🔴 IPv6 全套          odhcpd / odhcp6c / luci-proto-ipv6 / ip6tables / kmod-ip6tables 全 n[0m
+[31m[1m     🔴 第三方 luci-app-*   adblock / sqm / wireguard / statistics / dashboard / librespeed 全不编[0m
+[31m[1m     🔴 社区主题             argon / footstrap / material / edge 全 n（防 LuCI 指向空气 → 500）[0m
+[31m[1m     🔴 杂项工具             smartdns / https-dns-proxy / iperf3 / htop / nano / curl / wget-ssl 全不编[0m
+[31m[1m     🔴 常驻精简             cron / ucitrack / led / gpio_switch 开机停用[0m
+
+[33m【六】校验结果（实测）[0m
+  [32m✅ 原样不动                    [0m PASS（0 警告），82/82 在位
+  [32m✅ 删 nic-guard             [0m FAIL 被拦
+  [32m✅ 注释 luci-app-ttyd        [0m FAIL 被拦（自检+编译期）
+  [32m✅ 删清单一行                   [0m FAIL 被拦（81<82）
+  [32m✅ 新增服务/工具                 [0m PASS，提示「基线外新增项（允许）」
+
+[31m[1m🔴 刷完第一件事：passwd 改掉 admin 弱密码[0m
+==================================================================
