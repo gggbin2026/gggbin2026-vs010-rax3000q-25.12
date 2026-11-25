@@ -7,52 +7,17 @@
 #
 # 安全：不接收任何 query / POST 参数，不 eval、不 source 外部文件，
 #       /etc/bridge.conf 只按 KEY=VALUE 逐项 sed 解析。
-# 兼容：OpenWrt 21.02 / QSDK 5.4 / uhttpd 默认 cgi_prefix=/cgi-bin。
+# 兼容：OpenWrt 25.12（6.12+）/ uhttpd 默认 cgi_prefix=/cgi-bin。
 
 CONF=/etc/bridge.conf
 # uhttpd 拉起 CGI 时 PATH 可能很短，显式补上 uci / iw / swconfig / ping 所在目录
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 export PATH
-
-# ── 第 44 次：双栈无线关联读取（开源 ath11k / 官方闭源 qca-wifi 通用）──
-# 官方 5.4.213 没有 /sys/class/ieee80211，VAP 常叫 ath0/ath1/wifi0/wifi1，
-# 用 wlanconfig / iwinfo 兜底；输出统一成 iw station dump 格式给下游解析。
-wsd_dump(){
-    _if=$1; _out=''
-    if command -v iw >/dev/null 2>&1 && [ -d "/sys/class/net/$_if" ]; then
-        _out=$(iw dev "$_if" station dump 2>/dev/null)
-    fi
-    if ! printf '%s\n' "$_out" | grep -q '^Station ' && command -v iwinfo >/dev/null 2>&1; then
-        _out=$(iwinfo "$_if" assoclist 2>/dev/null | awk '
-          /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{
-            print "Station " $1; s=$2; gsub(/[^0-9-]/,"",s)
-            print "\tsignal: " s; print "\ttx bitrate: - MBit/s"; print "\trx bitrate: - MBit/s"}')
-    fi
-    if ! printf '%s\n' "$_out" | grep -q '^Station ' && command -v wlanconfig >/dev/null 2>&1; then
-        _out=$(wlanconfig "$_if" list 2>/dev/null | awk '
-          /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{
-            mac=$1; sig=""; for(i=2;i<=NF;i++) if($i ~ /^-?[0-9]+$/){sig=$i;break}
-            print "Station " mac; print "\tsignal: " sig
-            print "\ttx bitrate: - MBit/s"; print "\trx bitrate: - MBit/s"}')
-    fi
-    printf '%s\n' "$_out"
-}
-wsd_link(){
-    _if=$1; _out=''
-    command -v iw >/dev/null 2>&1 && _out=$(iw dev "$_if" link 2>/dev/null)
-    [ -n "$_out" ] || { command -v iwinfo >/dev/null 2>&1 && _out=$(iwinfo "$_if" info 2>/dev/null); }
-    [ -n "$_out" ] || { command -v wlanconfig >/dev/null 2>&1 && _out=$(wlanconfig "$_if" list 2>/dev/null); }
-    printf '%s\n' "$_out"
-}
-wsd_ifaces(){
-    # 第 46 次实机：wifi0/wifi1 是 radio、soc0/1 是内部口，VAP 只认 ath*/wlan*
-    ls /sys/class/net 2>/dev/null | grep -E '^(ath|wlan)[0-9]' | sort -u
-    command -v iw >/dev/null 2>&1 && \
-      iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E '^(ath|wlan)[0-9]'
-}
-
 SYSFS=/sys/class/net
 PORTS='br-lan eth0 eth1 wlan1'
+# 参考 PZ-L8「Resolve ports through netifd instead of the default route」：
+# 不靠默认路由猜 WAN/LAN，直接读 sysfs 把实际存在的桥成员 / eth / 无线口补齐。
+# 写死的 PORTS 仍作为兜底，动态项去重后追加。
 WDS_IF=auto
 SWITCH_DEV=switch1
 SWITCH_TYPE='QCA AR8337'
@@ -67,6 +32,17 @@ get_conf() {
 }
 v=$(get_conf BRIDGE_SYSFS);   [ -n "$v" ] && SYSFS="$v"
 v=$(get_conf PORTS);          [ -n "$v" ] && PORTS="$v"
+
+# 动态端口发现放在配置解析之后，避免被 /etc/bridge.conf 的 PORTS 覆盖
+# 动态端口发现：br-lan 成员 + 存在的 eth* + wlan* / phy*-ap*
+DYN_PORTS=''
+for p in /sys/class/net/br-lan/brif/* /sys/class/net/eth* /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
+    [ -e "$p" ] || continue
+    n=$(basename "$p")
+    case " $PORTS $DYN_PORTS " in *" $n "*) ;; *) DYN_PORTS="$DYN_PORTS $n" ;; esac
+done
+[ -n "$DYN_PORTS" ] && PORTS="$PORTS $DYN_PORTS"
+
 v=$(get_conf WDS_IF);         [ -n "$v" ] && WDS_IF="$v"
 v=$(get_conf SWITCH_DEV);     [ -n "$v" ] && SWITCH_DEV="$v"
 v=$(get_conf SWITCH_TYPE);    [ -n "$v" ] && SWITCH_TYPE="$v"
@@ -97,64 +73,6 @@ human() { # 字节 → 人读
 }
 readf() { [ -r "$1" ] && cat "$1" 2>/dev/null | head -n 1 || echo ''; }
 
-# ── 第 45 次 · 网口速率：不再显示误导值，改给「实测吞吐」───────────
-# 官方 QSDK12.2 闭源 qca-nss-dp 的 netdev->phydev 为 NULL，
-# .get_link_ksettings 直连 phy_ethtool_get_link_ksettings 返回 -ENODEV，
-# /sys/class/net/ethX/speed 会报 -1 或 10M/Half —— 实际链路是通的（NSS 满速）。
-# 本仓自编译版有编译期补丁修它；产物级融合固件 kernel FIT 逐字节原样，
-# 闭源 .ko 无源码可打补丁，所以这里在【显示层】纠偏：不假装 1000M，
-# 也不显示 10M 误导，改为标注「未上报」+ 按字节计数器给实测吞吐。
-STACK_CLOSED=0
-case "$(uname -r 2>/dev/null)" in *5.4.213*) STACK_CLOSED=1 ;; esac
-[ -e /lib/modules/5.4.213/qca-nss-dp.ko ] && STACK_CLOSED=1
-[ "$STACK_CLOSED" = 0 ] && grep -q 'qca_ol' /proc/modules 2>/dev/null && STACK_CLOSED=1
-
-# ── 第 47 次 · 从交换芯片 PHY 读【真实协商速率】───────────────────
-#  netdev 不上报 ≠ 链路没速率：官方 rootfs 带 swconfig，dtb 里有
-#  qcom,ess-switch-qca83xx + qcom,port_phyinfo，PHY 是通的。
-#  读不到就保持「未上报」，绝不写死 1000 冒充 —— 这是真值不是推断。
-PHY_SPEED=''; PHY_DUPLEX=''; PHY_SRC=''
-phy_link_probe() {
-    _sw=$(command -v swconfig 2>/dev/null)
-    [ -z "$_sw" ] && _sw=/sbin/swconfig
-    [ -x "$_sw" ] || return 0
-    _devs=$("$_sw" list 2>/dev/null \
-        | sed -n 's/.*Found:[[:space:]]*\([^[:space:],]*\).*/\1/p' | tr '\n' ' ')
-    for _d in $_devs; do
-        [ -n "$_d" ] || continue
-        _o=$("$_sw" dev "$_d" show 2>/dev/null) || continue
-        _s=$(printf '%s\n' "$_o" | grep -oE 'speed:[[:space:]]*[0-9]+' \
-             | grep -oE '[0-9]+' | sort -n | tail -n 1)
-        _u=$(printf '%s\n' "$_o" | grep -oE 'duplex:[[:space:]]*(full|half)' \
-             | head -n 1 | sed 's/.*://;s/[[:space:]]//g')
-        case "$_s" in ''|*[!0-9]*) continue ;; esac
-        [ "$_s" -gt 0 ] 2>/dev/null || continue
-        PHY_SPEED=$_s; PHY_DUPLEX=${_u:-full}
-        PHY_SRC="交换芯片 PHY 实测（$_d / swconfig），非 netdev ethtool 上报"
-        return 0
-    done
-    return 0
-}
-[ "$STACK_CLOSED" = 1 ] && phy_link_probe
-
-# 用跨请求缓存算两次刷新间的平均吞吐，不 sleep、不阻塞 CGI
-port_rate() {
-    _if=$1; _d="$SYSFS/$_if"; _c="/tmp/.port-rate.$_if"
-    [ -r "$_d/statistics/tx_bytes" ] || { echo '-'; return; }
-    _tx=$(num "$(readf "$_d/statistics/tx_bytes")")
-    _rx=$(num "$(readf "$_d/statistics/rx_bytes")")
-    _now=$(awk '{printf "%d", $1*1000}' /proc/uptime 2>/dev/null || echo 0)
-    if [ -r "$_c" ]; then
-        IFS=' ' read -r _pt _pr _pn < "$_c" 2>/dev/null
-        _dt=$(( _now - _pn ))
-        if [ "$_dt" -ge 200 ] 2>/dev/null; then
-            awk -v a="$_pt" -v b="$_pr" -v c="$_tx" -v d="$_rx" -v t="$_dt" \
-              'BEGIN{v=((c-a)+(d-b))*8/(t/1000)/1000000; if(v<0)v=0; printf "%.2f", v}'
-        else echo '-'; fi
-    else echo '-'; fi
-    printf '%s %s %s\n' "$_tx" "$_rx" "$_now" > "$_c"
-}
-
 # ── 第 29 次校准：dBm → 百分比 + 四段配色（三页同一口径）──────────
 # 映射：pct = clamp(round(2*(rssi+100)), 0, 100)  —— -100dBm=0%、-50dBm=100%
 # 配色：80-100 绿 / 60-79 黄绿 / 50-59 黄 / 0-49 红
@@ -183,7 +101,7 @@ HOST=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo OpenWrt)
 [ -z "$HOST" ] && HOST=$(uci -q get system.@system[0].hostname 2>/dev/null || echo OpenWrt)
 MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo '')
 [ -z "$MODEL" ] && MODEL=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
-[ -z "$MODEL" ] && MODEL='IPQ50xx / 5.4-QSDK WDS Bridge' 
+[ -z "$MODEL" ] && MODEL='IPQ50xx / 新内核 WDS Bridge' 
 BOARD=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo 'ipq50xx')
 
 UP=$(num "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)")
@@ -197,26 +115,17 @@ if [ "$YEAR" -ge 2000 ]; then SYNCED=1; else SYNCED=0; fi
 BR_NAME=br-lan
 BR_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo "$ADMIN_IP")
 [ -z "$BR_IP" ] && BR_IP="$ADMIN_IP"
-BR_STP=$(uci -q get network.lan.stp 2>/dev/null || echo '0')
+BR_STP=$(uci -q get network.br_lan.stp 2>/dev/null || uci -q get network.lan.stp 2>/dev/null || echo '0')
 BR_MEMBERS=''
 [ -d "$SYSFS/$BR_NAME/brif" ] && BR_MEMBERS=$(ls "$SYSFS/$BR_NAME/brif" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//')
-[ -z "$BR_MEMBERS" ] && BR_MEMBERS=$(uci -q get network.lan.ifname 2>/dev/null || echo 'eth0 eth1')
+[ -z "$BR_MEMBERS" ] && BR_MEMBERS=$(uci -q get network.br_lan.ports 2>/dev/null || echo 'lan1 lan2 lan3 wan')
 
 # ── 端口四宫格 ──────────────────────────────────────────────────
-# ★ 第 46 次实机纠错：配置里写死的 wlan1 在官方 5.4.213 上不存在，
-#   真实 VAP 是 ath0/ath1。这里去掉不存在的 wlan1、自动补上实际 VAP，
-#   否则页面会显示一张「接口未注册」灰卡并漏掉两个无线口。
-case " $PORTS " in *' wlan1 '*) PORTS=$(echo "$PORTS" | sed 's/ wlan1 / /g;s/^ *//;s/ *$//') ;; esac
-AUTO_VAP=$(ls "$SYSFS" 2>/dev/null | grep -E '^(ath|wlan)[0-9]' | sort -u | tr '\n' ' ')
-for v in $AUTO_VAP; do
-  case " $PORTS " in *" $v "*) ;; *) PORTS="$PORTS $v" ;; esac
-done
-PORTS=$(echo "$PORTS" | tr ' ' '\n' | grep -v '^$' | awk '!seen[$0]++' | tr '\n' ' ')
 # kinds: bridge / eth / wifi
 port_kind() {
     case "$1" in
         br-*|*br*) echo bridge ;;
-        wlan*|ath*|phy*-ap*) echo wifi ;;
+        wlan*|phy*-ap*) echo wifi ;;
         *) echo eth ;;
     esac
 }
@@ -236,63 +145,72 @@ for n in $PORTS; do
         tx=$(num "$(readf "$d/statistics/tx_bytes")")
         rx=$(num "$(readf "$d/statistics/rx_bytes")")
         tx_h=$(human "$tx"); rx_h=$(human "$rx")
-        # 闭源 NSS 栈把固定链路误报成 10M/Half 或 -1：判为「未上报」
-        speed_note=''; speed_src=''; rate=$(port_rate "$n")
-        if [ "$link" = up ] && [ "$STACK_CLOSED" = 1 ]; then
-            if [ "$speed" = '-' ] || { [ "$speed" -le 10 ] 2>/dev/null && [ "$duplex" = half ]; }; then
-                if [ -n "$PHY_SPEED" ]; then
-                    # 真值来自交换芯片 PHY，不再显示「10M/半双工」也不空着
-                    speed="$PHY_SPEED"; duplex="$PHY_DUPLEX"
-                    speed_note="$PHY_SRC"; speed_src='phy'
-                else
-                    speed_note='NSS 固定链路：驱动不上报协商速率，实际链路正常'
-                    speed='-'; duplex='未上报'
-                fi
-            fi
-        fi
-        [ "$speed" = '-' ] && [ -z "$speed_note" ] && speed_note='速率未上报（以实测吞吐与链路状态为准）'
     else
         present=0; link=down; speed='-'; duplex='-'; mac=''
-        tx=0; rx=0; tx_h='-'; rx_h='-'; speed_note=''; rate='-'
+        tx=0; rx=0; tx_h='-'; rx_h='-'
     fi
     [ -n "$PORT_JSON" ] && PORT_JSON="$PORT_JSON,"
     PORT_JSON="$PORT_JSON
-      {\"name\":\"$(jesc "$n")\",\"kind\":\"$k\",\"present\":$present,\"link\":\"$link\",\"speed\":\"$(jesc "$speed")\",\"duplex\":\"$(jesc "$duplex")\",\"speed_note\":\"$(jesc "$speed_note")\",\"speed_src\":\"$speed_src\",\"rate_mbps\":\"$(jesc "$rate")\",\"rate_note\":\"实测吞吐（两次刷新间），非协商速率\",\"mac\":\"$(jesc "$mac")\",\"tx_bytes\":$tx,\"rx_bytes\":$rx,\"tx\":\"$(jesc "$tx_h")\",\"rx\":\"$(jesc "$rx_h")\"}"
+      {\"name\":\"$(jesc "$n")\",\"kind\":\"$k\",\"present\":$present,\"link\":\"$link\",\"speed\":\"$(jesc "$speed")\",\"duplex\":\"$(jesc "$duplex")\",\"mac\":\"$(jesc "$mac")\",\"tx_bytes\":$tx,\"rx_bytes\":$rx,\"tx\":\"$(jesc "$tx_h")\",\"rx\":\"$(jesc "$rx_h")\"}"
 done
 
 # ── WDS 链路 ────────────────────────────────────────────────────
 if [ "$WDS_IF" = 'auto' ] || [ -z "$WDS_IF" ]; then
-    WDS_IF=ath1
-    [ -d "$SYSFS/$WDS_IF" ] || WDS_IF=$(wsd_ifaces 2>/dev/null | tail -n 1)
-    [ -z "$WDS_IF" ] && WDS_IF='wlan1'
+    WDS_IF=wlan1
+    [ -d "$SYSFS/$WDS_IF" ] || WDS_IF=$(ls "$SYSFS" 2>/dev/null | grep '^wlan' | tail -n 1)
 fi
-[ -z "$WDS_IF" ] && WDS_IF='ath1'
+[ -z "$WDS_IF" ] && WDS_IF='wlan1'
 WDS_MODE=$(uci -q get wireless.default_radio1.mode 2>/dev/null || echo '')
 [ -z "$WDS_MODE" ] && WDS_MODE=$(uci -q get wireless.@wifi-iface[1].mode 2>/dev/null || echo 'ap')
 WDS_SSID=$(uci -q get wireless.default_radio1.ssid 2>/dev/null || echo '')
 [ -z "$WDS_SSID" ] && WDS_SSID=$(uci -q get wireless.@wifi-iface[1].ssid 2>/dev/null || echo 'WDS_AP')
 WDS_ASSOC=0
 WDS_PEER=''
-if [ -d "$SYSFS/$WDS_IF" ]; then
-    L=$(wsd_link "$WDS_IF" 2>/dev/null)
-    echo "$L" | grep -qi 'Connected to' && {
+if command -v iw >/dev/null 2>&1 && [ -d "$SYSFS/$WDS_IF" ]; then
+    L=$(iw dev "$WDS_IF" link 2>/dev/null)
+    echo "$L" | grep -qi '^Connected to' && {
         WDS_ASSOC=1
         WDS_PEER=$(echo "$L" | sed -n 's/^Connected to \([0-9a-fA-F:]*\).*/\1/p' | head -n 1)
     }
-    D=$(wsd_dump "$WDS_IF" 2>/dev/null)
-    [ "$WDS_ASSOC" = '0' ] && echo "$D" | grep -qi '^Station ' && {
+    [ "$WDS_ASSOC" = '0' ] && iw dev "$WDS_IF" station dump 2>/dev/null | grep -qi '^Station ' && {
         WDS_ASSOC=1
-        WDS_PEER=$(echo "$D" | sed -n 's/^Station \([0-9a-fA-F:]*\).*/\1/p' | head -n 1)
+        WDS_PEER=$(iw dev "$WDS_IF" station dump 2>/dev/null | sed -n 's/^Station \([0-9a-fA-F:]*\).*/\1/p' | head -n 1)
     }
 fi
-# 机器狗填了 peer 时以它为准展示
-WD_PEER_IP=$(uci -q get wdsdog.main.peer 2>/dev/null || echo '')
-# 【第 53 次】peer=auto 是「自动发现」，不是可 ping 的地址，别拿去 ping 字面量
-[ "$WD_PEER_IP" = 'auto' ] && WD_PEER_IP=''
+# ── 机器狗对端（第 49 次：与 /usr/sbin/bridge-watchdog 的 peer=auto 同口径）──
+# ⚠ 展示的是【对端】管理 IP，不是本机 IP；ping 自己永远通，判不出断链。
+WD_PEER_CFG=$(uci -q get wdsdog.main.peer 2>/dev/null || echo 'auto')
+case "$WD_PEER_CFG" in
+    ''|none|off) WD_PEER_IP='' ;;
+    auto)
+        WD_ROLE=$(cat /etc/bridge_role 2>/dev/null || echo '')
+        WD_MYIP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+        case "$WD_ROLE" in
+            ap)  WD_PEER_IP='172.10.10.242' ;;
+            sta) WD_PEER_IP='172.10.10.241' ;;
+            *)   case "$WD_MYIP" in
+                     '172.10.10.242') WD_PEER_IP='172.10.10.241' ;;
+                     *)               WD_PEER_IP='172.10.10.242' ;;
+                 esac ;;
+        esac ;;
+    *) WD_PEER_IP="$WD_PEER_CFG" ;;
+esac
 WD_OK=0
 if [ -n "$WD_PEER_IP" ] && command -v ping >/dev/null 2>&1; then
     ping -c 1 -W 2 -q "$WD_PEER_IP" >/dev/null 2>&1 && WD_OK=1
 fi
+# 第 50 次：链路本地别名 / 自动发现对端 / 改 IP 告警（与 bridge-watchdog 同口径）
+WD_MYIP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+WD_ROLE=$(cat /etc/bridge_role 2>/dev/null || echo '')
+case "$WD_ROLE" in
+    sta) WD_LL_SELF='169.254.241.2'; WD_LL_PEER='169.254.241.1' ;;
+    *)   WD_LL_SELF='169.254.241.1'; WD_LL_PEER='169.254.241.2' ;;
+esac
+WD_DISCOVERED=$(cat /tmp/wdsdog-peer-discovered 2>/dev/null || echo '')
+WD_LL_OK=0
+ping -c 1 -W 2 -q "$WD_LL_PEER" >/dev/null 2>&1 && WD_LL_OK=1
+WD_IP_WARN=0
+case "$WD_MYIP" in ''|'172.10.10.241'|'172.10.10.242') ;; *) WD_IP_WARN=1 ;; esac
 
 # ── 射频链路强度 / 速率 / 估算距离（第 23 次校准）────────────────
 # 全部只读：iw station dump / iw link / iwinfo / iw survey / /sys。
@@ -309,15 +227,12 @@ RF_PEER=''; BUDGET=0; D_FREE=0; D_INDOOR=0; DIST_TXT='—'
 DIST_NOTE='Wi-Fi 无法直接测距。此值按 RSSI + 路径损耗模型估算，室内遮挡/多径下误差可达数倍，仅供相对比较；调试请以 RSSI、SNR、协商速率、重传率为准。'
 STA=''; LNK=''; IWI=''; IWD=''
 
-if [ -d "$SYSFS/$RF_IF" ]; then
+if [ -d "$SYSFS/$RF_IF" ] && command -v iw >/dev/null 2>&1; then
   RF_AVAIL=1
-  STA=$(wsd_dump "$RF_IF" 2>/dev/null)
-  LNK=$(wsd_link "$RF_IF" 2>/dev/null)
+  STA=$(iw dev "$RF_IF" station dump 2>/dev/null)
+  LNK=$(iw dev "$RF_IF" link 2>/dev/null)
   IWD=$(iw dev "$RF_IF" info 2>/dev/null)
   command -v iwinfo >/dev/null 2>&1 && IWI=$(iwinfo "$RF_IF" info 2>/dev/null)
-  # 闭源栈 iw survey 常为空：底噪用 wlanconfig / iwinfo 再兜一次
-  [ -z "$IWI" ] && command -v wlanconfig >/dev/null 2>&1 && \
-    IWI=$(wlanconfig "$RF_IF" list 2>/dev/null | head -n 20)
 
   # 对端 MAC：station dump 优先，回退 link / 已有 WDS_PEER
   RF_PEER=$(printf '%s\n' "$STA" | sed -n 's/^Station \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n 1)
@@ -431,15 +346,20 @@ else
 fi
 
 # ── 机器狗状态（与 bridge-watchdog status 同口径）─────────────────
-# 第 53 次：缺省与编译期一致（已启用）。防误重启靠 ever_ok / 宽限 / 连续计时。
 WD_ENABLED=$(uci -q get wdsdog.main.enabled 2>/dev/null || echo '1')
 WD_DELAY=$(uci -q get wdsdog.main.delay 2>/dev/null || echo '5')
 WD_GRACE=$(uci -q get wdsdog.main.grace 2>/dev/null || echo '6')
 WD_DRY=$(uci -q get wdsdog.main.dryrun 2>/dev/null || echo '0')
+WD_MODE=$(uci -q get wdsdog.main.mode 2>/dev/null || echo 'or')
+WD_ANCHOR=$(uci -q get wdsdog.main.anchor 2>/dev/null || echo '')
+WD_MAXRB=$(uci -q get wdsdog.main.max_reboots 2>/dev/null || echo '3')
+WD_RB=$(cat /etc/wdsdog-reboot-count 2>/dev/null || echo '0')
 BR_ROLE=$(cat /etc/bridge_role 2>/dev/null || echo '-')
 BR_ROLE_MODE=$(cat /etc/bridge_role_mode 2>/dev/null || echo 'auto')
 case "$WD_DELAY" in ''|*[!0-9]*) WD_DELAY=5 ;; esac
-case "$WD_GRACE" in ''|*[!0-9]*) WD_GRACE=3 ;; esac
+case "$WD_GRACE" in ''|*[!0-9]*) WD_GRACE=6 ;; esac
+case "$WD_MAXRB" in ''|*[!0-9]*) WD_MAXRB=3 ;; esac
+case "$WD_RB" in ''|*[!0-9]*) WD_RB=0 ;; esac
 WD_FIRST=$(num "$(cat /tmp/bridge-watchdog.state 2>/dev/null)")
 WD_DOWN=0; WD_LEFT='-'
 if [ "$WD_FIRST" -gt 0 ] 2>/dev/null; then
@@ -448,7 +368,7 @@ if [ "$WD_FIRST" -gt 0 ] 2>/dev/null; then
 fi
 
 # ── swconfig 说明（README 坑 3）──────────────────────────────────
-SW_NOTE='端口 TX/RX 读的是 CPU 侧 netdev 统计；交换芯片逐端口计数在 swconfig 机型不可得'
+SW_NOTE='端口 TX/RX 读的是 CPU 侧 netdev 统计；25.12 DSA 下交换芯片逐端口计数不可得'
 if command -v swconfig >/dev/null 2>&1; then
     # 只取目标 switch 那一行，别把 switch0(QCA MP) 也塞进页面
     SW_LINE=$(swconfig list 2>/dev/null | grep -i "$SWITCH_DEV" | head -n 1 | sed 's/^[[:space:]]*//')
@@ -519,44 +439,131 @@ set -- $MEM_LINE
 M_TOTAL=$1; M_AVAIL=$2; M_USED=$3; M_PCT=$4
 SW_TOTAL=$5; SW_USED=$6; M_TOTAL_H=$7; M_AVAIL_H=$8; M_USED_H=$9
 MEM_HAS=0; [ "$M_TOTAL" -gt 0 ] 2>/dev/null && MEM_HAS=1
-# 温度（第 37 次增强）：遍历全部 thermal_zone 取有效读数中的最大值，
-# 再回退 hwmon；读不到就 has=0，页面显示「— / 无传感器」而不是编造数值。
-# 兼容毫摄氏度（QSDK tsens 常见）与少数直接报整数摄氏度的平台。
-TEMP_C=0; TEMP_HAS=0; TEMP_SRC=''; TEMP_ZONES=0
-for t in /sys/class/thermal/thermal_zone*/temp \
-         /sys/devices/virtual/thermal/thermal_zone*/temp; do
-    [ -r "$t" ] || continue
-    v=$(num "$(cat "$t" 2>/dev/null)")
-    [ "$v" -gt 0 ] 2>/dev/null || continue
-    if [ "$v" -gt 1000 ] 2>/dev/null; then c=$(( v / 1000 )); else c=$v; fi
-    if [ "$c" -gt 0 ] && [ "$c" -lt 150 ]; then
-        TEMP_ZONES=$(( TEMP_ZONES + 1 ))
-        if [ "$c" -gt "$TEMP_C" ]; then TEMP_C=$c; TEMP_SRC='thermal_zone'; fi
+# ── 温度（PZ-L8 口径：CPU 取 thermal type 含 cpu；射频取 ath11k_hwmon）────
+# 参考 mufeng05/openwrt-cmcc-pz-l8-nss：CPU 温度读 /sys/class/thermal 里 type 含 cpu
+# 的热区；Wi-Fi 温度读 /sys/class/hwmon 里 name=ath11k_hwmon 的项（每个 radio 一个），
+# 按设备树节点（c000000.wifi / b00a040.wifi）标注，而不是 phy 编号——
+# 实测一次 wifi reload 就能让 2.4G 从 phy0 变成 phy1。
+TEMP_C=0; TEMP_HAS=0; TEMP_MAX_C=0
+TEMP_ZONES_JSON=''; TEMP_WIFI_JSON=''
+add_zone() {
+    nm="$1"; c="$2"; kind="$3"
+    [ -n "$TEMP_ZONES_JSON" ] && TEMP_ZONES_JSON="$TEMP_ZONES_JSON,"
+    TEMP_ZONES_JSON="$TEMP_ZONES_JSON{\"name\":\"$(jesc "$nm")\",\"c\":$c,\"kind\":\"$kind\"}"
+    [ "$c" -gt "$TEMP_MAX_C" ] && TEMP_MAX_C=$c
+    if [ "$kind" = 'wifi' ]; then
+        [ -n "$TEMP_WIFI_JSON" ] && TEMP_WIFI_JSON="$TEMP_WIFI_JSON,"
+        TEMP_WIFI_JSON="$TEMP_WIFI_JSON{\"name\":\"$(jesc "$nm")\",\"c\":$c}"
     fi
+}
+# 1) CPU 热区：只认 type 含 cpu
+for z in /sys/class/thermal/thermal_zone*; do
+    [ -r "$z/temp" ] || continue
+    nm=$(cat "$z/type" 2>/dev/null || basename "$z")
+    case "$nm" in *cpu*|*CPU*) ;; *) continue ;; esac
+    v=$(num "$(cat "$z/temp" 2>/dev/null)"); c=$(( v / 1000 ))
+    [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
+    add_zone "$nm" "$c" 'cpu'
+    [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
 done
-if [ "$TEMP_C" -eq 0 ]; then
-    TEMP_ZONES=0
-    for t in /sys/class/hwmon/hwmon*/temp*_input \
-             /sys/class/hwmon/hwmon*/device/temp*_input; do
+# 2) 射频：ath11k_hwmon，按设备树节点命名（不是 phy 编号）
+TEMP_RF_COUNT=0
+for h in /sys/class/hwmon/hwmon*; do
+    [ -r "$h/name" ] || continue
+    hn=$(cat "$h/name" 2>/dev/null)
+    case "$hn" in ath11k*) ;; *) continue ;; esac
+    dt=$(basename "$(readlink -f "$h/device" 2>/dev/null)" 2>/dev/null || echo '')
+    case "$dt" in *wifi*|*c000000*|*b00a040*) ;; *) dt="${hn}#$(basename "$h")" ;; esac
+    for t in "$h"/temp*_input; do
         [ -r "$t" ] || continue
-        v=$(num "$(cat "$t" 2>/dev/null)")
-        [ "$v" -gt 1000 ] 2>/dev/null || continue
-        c=$(( v / 1000 ))
-        if [ "$c" -gt 0 ] && [ "$c" -lt 150 ]; then
-            TEMP_ZONES=$(( TEMP_ZONES + 1 ))
-            if [ "$c" -gt "$TEMP_C" ]; then TEMP_C=$c; TEMP_SRC='hwmon'; fi
-        fi
+        v=$(num "$(cat "$t" 2>/dev/null)"); c=$(( v / 1000 ))
+        [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
+        add_zone "$dt" "$c" 'wifi'; TEMP_RF_COUNT=$(( TEMP_RF_COUNT + 1 ))
     done
+done
+# 3) 兜底：其它 hwmon temp*_input（归 cpu，只在完全没 CPU 热区时用）
+if [ "$TEMP_HAS" = '0' ]; then
+  for t in /sys/class/hwmon/hwmon*/temp*_input; do
+      [ -r "$t" ] || continue
+      v=$(num "$(cat "$t" 2>/dev/null)"); c=$(( v / 1000 ))
+      [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
+      nm=$(cat "$(dirname "$t")/name" 2>/dev/null || basename "$(dirname "$t")")
+      add_zone "$nm" "$c" 'cpu'; [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
+  done
 fi
-[ "$TEMP_C" -gt 0 ] && TEMP_HAS=1
-[ -z "$TEMP_SRC" ] && TEMP_SRC='无传感器'
+# 4) 兜底：thermal_zone 非 cpu 类型（tsens / SoC，如实列出来但不冒充 CPU）
+for z in /sys/class/thermal/thermal_zone*; do
+    [ -r "$z/temp" ] || continue
+    nm=$(cat "$z/type" 2>/dev/null || basename "$z")
+    case "$nm" in *cpu*|*CPU*) continue ;; esac
+    v=$(num "$(cat "$z/temp" 2>/dev/null)"); c=$(( v / 1000 ))
+    [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
+    add_zone "$nm" "$c" 'soc'
+    [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
+done
+[ "$TEMP_HAS" = '0' ] && [ "$TEMP_MAX_C" -gt 0 ] && { TEMP_C=$TEMP_MAX_C; TEMP_HAS=1; }
 
+# ── NSS 硬件加速实况（ECM→NSS / 双射频 wifili）─────────────────────
+# 参考 PZ-L8：判速看 eth0/eth1 + debugfs，不看 br-lan——被卸载的流量
+# 根本不经过 Linux 网桥（实测 eth0/eth1 各 989 Mbps 时 br-lan 只有 52）。
+NSS_MODS=$(awk '{print $1}' /proc/modules 2>/dev/null | tr '\n' ' ')
+nss_mod(){ case " $NSS_MODS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+NSS_DRV=0; NSS_ECM=0; NSS_WIFILI=0; NSS_SFE=0
+nss_mod qca_nss_drv && NSS_DRV=1
+nss_mod qca_nss_ecm && NSS_ECM=1
+nss_mod wifili      && NSS_WIFILI=1
+nss_mod shortcut_fe && NSS_SFE=1
+[ -d /sys/kernel/debug/qca-nss-drv ] && NSS_DRV=1
+NSS_LOAD=$(grep -oE '[0-9]+' /sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi 2>/dev/null | head -1)
+NSS_CONN=$(grep -oE '[0-9]+' /sys/kernel/debug/ecm/ecm_db/connection_count 2>/dev/null | head -1)
+[ -z "$NSS_LOAD" ] && NSS_LOAD=-1
+[ -z "$NSS_CONN" ] && NSS_CONN=-1
+NSS_FW=$(dmesg 2>/dev/null | grep -oE 'NSS[._]FW[._]?[0-9]+\.[0-9]+(-[0-9]+)?' | tail -1)
+[ -z "$NSS_FW" ] && NSS_FW=$(ls /lib/firmware/ 2>/dev/null | grep -iE 'nss.*12\.5|12\.2' | head -1)
+[ -z "$NSS_FW" ] && NSS_FW='unknown'
+NSS_ACTIVE=0
+[ "$NSS_DRV" = '1' ] && [ "$NSS_ECM" = '1' ] && [ "$NSS_WIFILI" = '1' ] && NSS_ACTIVE=1
+# eth0/eth1 字节计数，前端两次采样算实时速率；br-lan 不参与
+NSS_ETH_JSON=''
+for e in eth0 eth1; do
+    d=/sys/class/net/$e; [ -d "$d" ] || continue
+    tx=$(num "$(cat "$d/statistics/tx_bytes" 2>/dev/null)")
+    rx=$(num "$(cat "$d/statistics/rx_bytes" 2>/dev/null)")
+    [ -n "$NSS_ETH_JSON" ] && NSS_ETH_JSON="$NSS_ETH_JSON,"
+    NSS_ETH_JSON="$NSS_ETH_JSON{\"name\":\"$e\",\"tx_bytes\":$tx,\"rx_bytes\":$rx}"
+done
+
+# ── 内核 / 基线 / 无线 / 防护状态（状态页用）────────────────────────
+KERNEL_VER=$(uname -r 2>/dev/null || echo unknown)
+FW_MODE=$(cat /etc/firmware_mode 2>/dev/null || echo unknown)
+BASELINE=$(sed -n 's/^BASELINE=//p' /etc/build-info 2>/dev/null | head -1)
+[ -z "$BASELINE" ] && BASELINE=$(sed -n 's/^BASELINE=//p' /etc/wifi-profile 2>/dev/null | head -1)
+[ -z "$BASELINE" ] && BASELINE='unknown'
+WIFI_OFFLOAD='n/a'
+if command -v uci >/dev/null 2>&1; then
+    cur=$(uci -q get nss.general.wifi_offload 2>/dev/null || echo '')
+    [ -n "$cur" ] && WIFI_OFFLOAD="$cur"
+fi
+ATH_NSS=$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null || echo '')
+RF_CHAN=$(uci -q get wireless.radio1.channel 2>/dev/null || echo '')
+RF_HT=$(uci -q get wireless.radio1.htmode 2>/dev/null || echo '')
+RF_CC=$(uci -q get wireless.radio1.country 2>/dev/null || echo '')
+RF_NOSCAN=$(uci -q get wireless.radio0.noscan 2>/dev/null || echo '0')
+GUARD=$(head -1 /tmp/l2guard.state 2>/dev/null || echo unknown)
+FW_STATE='off'
+for s in firewall4 firewall; do
+    [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" enabled 2>/dev/null && FW_STATE='on'
+done
+TTYD_STATE='off'; [ -x /etc/init.d/ttyd ] && /etc/init.d/ttyd enabled 2>/dev/null && TTYD_STATE='on'
+SSH_STATE='off'; [ -x /etc/init.d/dropbear ] && /etc/init.d/dropbear enabled 2>/dev/null && SSH_STATE='on'
 # ── /系统资源 ────────────────────────────────────────────────────────
 
 
-# ── 无线/有线加速状态（第 25 次校准）：只读，不启用、不改配置 ─────────
-# 纯二层桥不做三层转发，NSS/ECM/SFE 的 offload 规则用不上；这里只如实报告
-# 模块/规则有没有，绝不假装「加速已开」。完整说明见 /usr/sbin/accel-check。
+# ── 无线/有线加速状态：只读，不启用、不改配置 ───────────────────────
+# 参考 mufeng05/openwrt-cmcc-pz-l8-nss：本平台真实加速路径是 ECM→NSS，
+# 双射频经 wifili 卸载；SFE/shortcut_fe 连接表为空属预期。
+# 被卸载的流量根本不经过 Linux 网桥，所以「br-lan 计数低」不等于「没加速」。
+# 判据看 nss.* 字段（cpu_load_ubi / connection_count / wifili）与 eth0/eth1。
 ACC_MODS_ALL=$(awk '{print $1}' /proc/modules 2>/dev/null | tr '\n' ' ')
 acc_has() { case " $ACC_MODS_ALL " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 ACC_NSS=0; ACC_ECM=0; ACC_SFE=0; ACC_DP=0; ACC_QWIFI=0; ACC_ATH=0; ACC_CNSS=0
@@ -574,19 +581,22 @@ ACC_DM=$(dmesg 2>/dev/null | grep -iE 'nss|ecm|sfe|shortcut|qca-nss' \
          | tail -n 3 | tr '\n' ' ' | cut -c1-240)
 [ -z "$ACC_DM" ] && ACC_DM='（无匹配日志）'
 ACC_RULE='（无）'
-for f in /sys/kernel/debug/qca-nss-drv/stats /sys/kernel/debug/ecm/ecm_nss_ipv4 \
+for f in /sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi \
+         /sys/kernel/debug/qca-nss-drv/stats \
+         /sys/kernel/debug/ecm/ecm_db/connection_count \
+         /sys/kernel/debug/ecm/ecm_nss_ipv4 \
          /sys/module/qca_nss_ecm/parameters/enable; do
     [ -e "$f" ] && { [ "$ACC_RULE" = '（无）' ] && ACC_RULE="$f" || ACC_RULE="$ACC_RULE $f"; }
 done
 if [ "$ACC_NSS" = '0' ] && [ "$ACC_ECM" = '0' ]; then
     ACC_STATE='未启用'
-    ACC_HINT='未检测到 NSS/ECM 模块。纯二层桥不走三层 offload，属预期；无线不注册请查 BDF/board_id，与加速无关。'
+    ACC_HINT='未检测到 NSS/ECM 模块：本基线无 NSS，射频走 host CPU（官方主线属预期）。无线不注册先查 DEVICE_PACKAGES 是否含 ath11k 固件 + board data。'
 elif [ "$ACC_ECM" = '1' ] && [ "$ACC_RULE" = '（无）' ]; then
     ACC_STATE='模块在但未注册规则'
-    ACC_HINT='qca-nss-ecm 已编入只为依赖自洽，无 ECM rule / debugfs 节点；纯二层桥不产生三层流，属预期。'
+    ACC_HINT='qca-nss-ecm 已加载但无规则节点；纯二层桥不产生三层路由流，ECM 规则为空属预期。请看 NSS 占用 / 连接数与 eth0/eth1 计数，不要看 br-lan。'
 else
     ACC_STATE='已加载'
-    ACC_HINT='检测到 NSS 模块与规则节点；只有路由/NAT 场景才可能生效，WDS/AP 桥仍按二层转发。'
+    ACC_HINT='检测到 NSS/ECM 模块。双射频是否真卸载看 wifili + cpu_load_ubi + connection_count；判速用 eth0/eth1，不要用 br-lan。'
 fi
 # ── /加速状态 ────────────────────────────────────────────────────────
 
@@ -598,7 +608,6 @@ printf '\r\n'
 cat <<EOF
 {
   "ok": 1,
-  "build": "$(jesc "$(cat /etc/firmware_build 2>/dev/null || echo 'unknown')")",
   "accel": {
     "state": "$(jesc "$ACC_STATE")",
     "hint": "$(jesc "$ACC_HINT")",
@@ -635,9 +644,18 @@ cat <<EOF
     "swap_used_kb": $SW_USED,
     "temp_c": $TEMP_C,
     "temp_has": $TEMP_HAS,
-    "temp_src": "$(jesc "$TEMP_SRC")",
-    "temp_zones": $TEMP_ZONES
+    "temp_max_c": $TEMP_MAX_C,
+    "temp_zones": [$TEMP_ZONES_JSON],
+    "temp_wifi": [$TEMP_WIFI_JSON],
+    "temp_rf_count": $TEMP_RF_COUNT,
+    "temp_source": "CPU: thermal type=cpu / 射频: ath11k_hwmon 按设备树节点"
   },
+  "nss": {"active":$NSS_ACTIVE,"drv":$NSS_DRV,"ecm":$NSS_ECM,"wifili":$NSS_WIFILI,"sfe":$NSS_SFE,"cpu_load_ubi":$NSS_LOAD,"conn_count":$NSS_CONN,"fw":"$(jesc "$NSS_FW")","path":"ecm-nss","eth":[$NSS_ETH_JSON],"note":"被卸载流量不经过 Linux 网桥，判速看 eth0/eth1 + debugfs"},
+  "kernel": "$(jesc "$KERNEL_VER")",
+  "fw_mode": "$(jesc "$FW_MODE")",
+  "baseline": "$(jesc "$BASELINE")",
+  "wifi": {"target":"fullspeed","offload":"$(jesc "$WIFI_OFFLOAD")","ath11k_nss":"$(jesc "$ATH_NSS")","channel":"$(jesc "$RF_CHAN")","htmode":"$(jesc "$RF_HT")","country":"$(jesc "$RF_CC")","noscan":"$(jesc "$RF_NOSCAN")","dfs_cac":"CN+HE160 覆盖 DFS，开机 5G 约 60s CAC 不可见","nss_fw":"12.5 优先 / 12.2 回退"},
+  "protect": {"dhcp_guard":"$(jesc "$GUARD")","firewall":"$(jesc "$FW_STATE")","ssh":"$(jesc "$SSH_STATE")","ttyd":"$(jesc "$TTYD_STATE")"},
   "host": "$(jesc "$HOST")",
   "model": "$(jesc "$MODEL")",
   "board": "$(jesc "$BOARD")",
@@ -709,8 +727,6 @@ cat <<EOF
     "modules": "$(jesc "$MODS")",
     "dt_board_id": "$(jesc "$DT_BID")",
     "dt_bdf_addr": "$(jesc "$DT_BDF")",
-    "role": "$(jesc "$(cat /etc/qsdk_role 2>/dev/null || echo '-')")",
-    "role_note": "$(jesc "$([ -f /etc/qsdk_role ] && echo '自动一主一备：ap=主 / sta=备；官方无线配置未改动' || echo '本固件未启用自动主备收敛')")",
     "dmesg": "$(jesc "$DM_WIFI")",
     "hint": "$(jesc "$DIAG_HINT")"
   },
@@ -719,6 +735,18 @@ cat <<EOF
     "delay": "$(jesc "$WD_DELAY")",
     "grace": "$(jesc "$WD_GRACE")",
     "dryrun": "$(jesc "$WD_DRY")",
+    "mode": "$(jesc "$WD_MODE")",
+    "peer": "$(jesc "$WD_PEER_IP")",
+    "peer_cfg": "$(jesc "$WD_PEER_CFG")",
+    "anchor": "$(jesc "$WD_ANCHOR")",
+    "max_reboots": "$(jesc "$WD_MAXRB")",
+    "reboots": "$(jesc "$WD_RB")",
+    "my_ip": "$(jesc "$WD_MYIP")",
+    "ll_self": "$(jesc "$WD_LL_SELF")",
+    "ll_peer": "$(jesc "$WD_LL_PEER")",
+    "ll_ping_ok": $WD_LL_OK,
+    "discovered": "$(jesc "$WD_DISCOVERED")",
+    "ip_changed": $WD_IP_WARN,
     "down_sec": $WD_DOWN,
     "left_sec": "$(jesc "$WD_LEFT")"
   },
@@ -729,6 +757,8 @@ cat <<EOF
   "notes": [
     "纯二层 WDS 桥：已关 VLAN，eth0 / eth1 同属 br-lan，无 WAN/LAN 隔离",
     "$(jesc "$SW_NOTE")",
+    "NSS 判速口径：被卸载的流量不经过 Linux 网桥，看 eth0/eth1 + NSS debugfs；br-lan 计数偏低不代表没加速",
+    "CN + HE160 覆盖 DFS，开机 5G 约 60 秒 CAC 期间不可见；2.4G HE40 默认因共存退 20MHz",
     "TIME 停在 1970 属预期（板子无 RTC + 桥不供时），不影响桥转发",
     "「桥接距离」为 RSSI 路径损耗估算，非实测测距；室内误差可达数倍，调试请以 RSSI / SNR / 速率为准",
     "管理页 /cgi-bin/luci 与本页互不干扰；CGI 只读，不修改任何配置",

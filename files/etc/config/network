@@ -1,12 +1,12 @@
-# QSDK 5.4 / OpenWrt 21.02 + swconfig —— 编译期网络配置（双仓通用）
-# 直接进 squashfs，不再依赖首启 board.d/02_network 生成。
-# ⚠ 21.02 只认 option ifname / option type='bridge'；
-#   22.03+ 的 `config device` + `list ports` netifd 完全不解析 → br-lan 建不出来。
-# 【有线修复】关 VLAN 当傻交换；eth0 + eth1 两个 GMAC 都进桥，
-#   不管 RAX3000Q / VS010 的 CPU 口映射正反，有线帧都到得了 br-lan。
+# OpenWrt 25.12 DSA —— 编译期网络配置（WDS 主 172.10.10.241 / 备 172.10.10.242 由 bridge-role 收敛）
+# 第 47 次：源文件与 scripts/port-overlay.sh 产物保持一致（DSA 原生写法），
+#   不再保留 21.02 的 option type='bridge' + option ifname='eth0 eth1'。
+# WAN 物理端口作为 list ports 'wan' 与 lan1/lan2/lan3 一起进 br-lan（WAN+LAN 同桥），
+# 但【没有】config interface 'wan' / 'wan6' 三层接口（用户要求删除）。
+# 本机 ipv6=0；STP 写在 device 段才生效；NTP 两源可达性见末尾第 48 次说明。
 
 config interface 'loopback'
-	option ifname 'lo'
+	option device 'lo'
 	option proto 'static'
 	option ipaddr '127.0.0.1'
 	option netmask '255.0.0.0'
@@ -14,17 +14,31 @@ config interface 'loopback'
 config globals 'globals'
 	option ula_prefix ''
 
-config switch 'switch1'
-	option name 'switch1'
-	option reset '1'
-	option enable_vlan '0'
+config device 'br_lan'
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'lan1'
+	list ports 'lan2'
+	list ports 'lan3'
+	list ports 'wan'
+	option stp '1'
+	option ipv6 '0'
 
 config interface 'lan'
-	option type 'bridge'
-	option ifname 'eth0 eth1'
+	option device 'br-lan'
 	option proto 'static'
 	option ipaddr '172.10.10.241'
 	option netmask '255.255.252.0'
-	option stp '1'
 	option force_link '1'
-	option ipv6 '0'
+
+# ── 第 48 次：网段已改为 172.10.10.241 / 255.255.252.0（/22 = 172.10.8.0~172.10.11.255）──
+# NTP 源 172.10.10.254 就在本网段，二层直连可达，【不需要任何路由】。
+# 另一个源 192.168.1.254 跨网段；纯二层桥没有默认网关时它不可达，
+# 但 busybox ntpd 以多个 -p peer 启动，一个不通会自动用另一个，不影响校时。
+# ★ 第 47 次那条 ntp172 的 /32 路由（目标 172.10.10.254、网关 192.168.1.254）已删除：
+#   目标本来就在 /22 内，而 192.168.1.254 不是同网段网关，netifd 会拒绝该路由。
+# 若确实要让 192.168.1.254 也可达，取消下面注释，把 gateway 改成【本网段内】的实际网关：
+# config route 'ntp192'
+#   option target '192.168.1.254/32'
+#   option gateway '172.10.10.1'
+#   option interface 'lan'

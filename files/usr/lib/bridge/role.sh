@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【双仓通用 · 21.02 option ifname 版】
+# 【双仓通用 · 25.12 DSA 版（第 47 次）】
 # bridge_apply_role <ap|sta>
 # 把整机刷成 UBNT airOS「Bridge 模式」等价行为：
 #   纯二层透明桥（无 NAT）+ 一条 5G WDS(4addr) 链路；IPv6 关闭
@@ -12,34 +12,8 @@ BRIDGE_CHAN='36'                     # ★ HE160 必须用 36~64 连续段；149
 BRIDGE_HTMODE='HE160'                # ★ 5G 160MHz（不支持时驱动回落 HE80）
 BRIDGE_DIST='550'                    # 500 m × 110%；按实际距离用 bridge-distance 改
 BRIDGE_TXPWR='20'                    # 原装天线保守值；改 14dBi 平板改 19
-BRIDGE_AP_IP='172.10.10.241'         # 【第 52 次】所有设备统一地址
-BRIDGE_NETMASK='255.255.252.0'      # /22
-BRIDGE_STA_IP="$BRIDGE_AP_IP"        # 默认与主机相同（用户要求全统一）
-# 若两台 WDS 同时插同一交换机、需要错开：把 SPLIT_ROLE_IP=1 写进
-# /etc/bridge.conf，备端自动改用 BRIDGE_STA_SPLIT；只影响 IP，不影响配对。
-BRIDGE_STA_SPLIT='172.10.10.242'
-SPLIT_ROLE_IP=0
-
-# 【第 53 次】改管理 IP → 提示同步机器狗 peer，并自动把旧 peer 迁到 auto。
-# 不这么做的话：手工填的旧对端 IP 会 ping 不通 → 连续 5 分钟误判「链路断了」→ 重启。
-_wd_ip_changed(){
-    NEW=${1:-$(uci -q get network.lan.ipaddr 2>/dev/null)}
-    command -v uci >/dev/null 2>&1 || return 0
-    P=$(uci -q get wdsdog.main.peer 2>/dev/null)
-    echo "⚠ 管理 IP 已改为 $NEW。机器狗（连续不通 5 分钟重启）不会因此误重启：" >&2
-    echo "  · 循环会自动检测到 IP 变化 → 重置计时并重新发现对端；" >&2
-    echo "  · 若你设了对端 IP，请同步改：bridge-watchdog set-peer <对端新IP>" >&2
-    echo "  · 或直接用自动发现：bridge-watchdog set-peer auto（推荐）" >&2
-    echo "  · 改 IP 前建议先 bridge-watchdog off，改完再 on" >&2
-    if [ -n "$P" ] && [ "$P" != auto ]; then
-        uci -q set wdsdog.main.peer='auto' 2>/dev/null
-        uci -q commit wdsdog 2>/dev/null
-        echo "  ✓ 旧 peer '$P' 已自动改为 auto（自动重新发现对端）" >&2
-    fi
-    logger -t bridge-watchdog "管理 IP 改为 $NEW，peer 已检查/迁移，连续计时已重置" 2>/dev/null || true
-}
-[ -r /etc/bridge.conf ] && SPLIT_ROLE_IP=$(sed -n 's/^SPLIT_ROLE_IP=//p' /etc/bridge.conf 2>/dev/null | head -1)
-[ "$SPLIT_ROLE_IP" = 1 ] && BRIDGE_STA_IP="$BRIDGE_STA_SPLIT" || BRIDGE_STA_IP="$BRIDGE_AP_IP"
+BRIDGE_AP_IP='172.10.10.241'         # 主（ap）
+BRIDGE_STA_IP='172.10.10.242'        # 备（sta）—— 自动错开，不用刷完手改
 BRIDGE_LEASE='1h'                    # ★ DHCP 租期 1 小时
 
 bridge_find_5g() {
@@ -102,39 +76,38 @@ bridge_apply_role() {
     uci set "wireless.@wifi-iface[$idx].key"="$BRIDGE_KEY"
     uci set "wireless.@wifi-iface[$idx].disabled"='0'
 
-    # ── 3. 纯二层桥：LAN 口 + 无线都在 br-lan ──
-    # 【有线修复】删 WAN/WAN6、关 VLAN、两个 CPU 口都进 br-lan（傻交换桥）。
-    # 纯二层桥不做 NAT、无 WAN/LAN 隔离；防火墙已整体移除（第 3 次更新）。
+    # ── 3. 纯二层桥：LAN+WAN 口 + 无线都在 br-lan（25.12 DSA，第 47 次）──
+    # ★ 旧版写 lan.type=bridge / ifname=eth0 eth1，25.12 netifd 不解析 → 桥建不出来。
+    #   改为保留 config device 'br_lan' 并只改 lan.device；STP 必须写在 device 段。
     uci -q delete network.wan
     uci -q delete network.wan6
     uci -q delete dhcp.wan
     uci -q delete dhcp.wan6
     uci -q delete network.globals.ula_prefix
-    # QSDK 5.4 / 21.02 不支持 `config device` / `list ports`，
-    # 必须直接写 lan 段的 option ifname，br-lan 才会被 netifd 建出来。
-    uci -q set network.lan.type='bridge'
-    uci -q set network.lan.ifname='eth0 eth1'
-    uci -q set network.lan.stp='1'
-    uci -q set network.lan.force_link='1' 
-    uci -q get network.@switch[0] >/dev/null 2>&1 && {
-        uci -q set network.@switch[0].enable_vlan='0'
-        uci -q set network.@switch[0].reset='1'; }
+    uci -q get network.br_lan >/dev/null 2>&1 || {
+        uci -q set network.br_lan='device'
+        uci -q set network.br_lan.name='br-lan'
+        uci -q set network.br_lan.type='bridge'
+        for p in lan1 lan2 lan3 wan; do uci -q add_list network.br_lan.ports="$p"; done
+    }
+    uci -q set network.br_lan.stp='1'
+    uci -q set network.br_lan.ipv6='0'
+    uci -q delete network.lan.type
+    uci -q delete network.lan.ifname
+    while uci -q get network.@switch[0] >/dev/null 2>&1; do uci -q delete network.@switch[0]; done
     while [ -n "$(uci -q get network.@switch_vlan[0].vlan 2>/dev/null)" ]; do
         uci -q delete network.@switch_vlan[0]
     done
-    uci set network.lan.type='bridge'
-    uci set network.lan.ifname='eth0 eth1'
-    uci set network.lan.stp='1'
-    uci set network.lan.force_link='1'
-    uci set network.lan.proto='static'
-    # ★ 第 52 次：默认主备统一 .241（用户要求）；SPLIT_ROLE_IP=1 时才错开防 ARP 冲突
+    uci -q set network.lan.device='br-lan'
+    uci -q set network.lan.proto='static'
+    uci -q set network.lan.force_link='1'
+    # ★ 主/备自动错开管理 IP，刷完不用再手动改，避免两台都 172.10.10.241 的 ARP 冲突
     if [ "$role" = 'sta' ]; then
         uci set network.lan.ipaddr="$BRIDGE_STA_IP"
     else
         uci set network.lan.ipaddr="$BRIDGE_AP_IP"
     fi
-    uci set network.lan.netmask="$BRIDGE_NETMASK"
-    _wd_ip_changed "$(uci -q get network.lan.ipaddr 2>/dev/null)"
+    uci set network.lan.netmask='255.255.252.0'
     uci -q delete network.lan.gateway
     uci -q delete network.lan.dns
 
@@ -173,5 +146,17 @@ bridge_apply_role() {
     printf '%s\n' "$role" > /etc/bridge_role
     local ip
     if [ "$role" = 'sta' ]; then ip="$BRIDGE_STA_IP"; else ip="$BRIDGE_AP_IP"; fi
-    echo "  ✓ 角色 $role | 5G=$r | iface=$idx | ch=$BRIDGE_CHAN/$BRIDGE_HTMODE | IP=$ip | DHCP=$([ "$role" = sta ] && echo 关 || echo "$BRIDGE_LEASE") | WDS/4addr"
+
+    # 第 50 次：WDS 角色链路本地别名（与管理 IP 解耦，机器狗互 ping 用）
+    #   主(ap) 挂 169.254.241.1/16、备(sta) 挂 169.254.241.2/16。
+    #   避开 AP 模式调试别名 169.254.240.1；改管理 IP 后这两个别名不变。
+    #   两台都刷 WDS 时各挂各的，不冲突；bridge-netfix / health-fix 还会兜底补挂。
+    local _ll_self='169.254.241.1' _ll_other='169.254.241.2'
+    [ "$role" = 'sta' ] && { _ll_self='169.254.241.2'; _ll_other='169.254.241.1'; }
+    ip addr show br-lan 2>/dev/null | grep -qF "$_ll_self/16" \
+      || ip addr add "$_ll_self/16" dev br-lan 2>/dev/null || true
+    ip addr show br-lan 2>/dev/null | grep -qF "$_ll_other/16" \
+      && ip addr del "$_ll_other/16" dev br-lan 2>/dev/null || true
+
+    echo "  ✓ 角色 $role | 5G=$r | iface=$idx | ch=$BRIDGE_CHAN/$BRIDGE_HTMODE | IP=$ip | 别名=$_ll_self/16 | DHCP=$([ "$role" = sta ] && echo 关 || echo "$BRIDGE_LEASE") | WDS/4addr"
 }

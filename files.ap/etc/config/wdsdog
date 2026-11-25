@@ -1,12 +1,15 @@
-# 【AP 模式】没有 5G WDS 链路可盯，机器狗保持停用。
-# 用户第 53 次说的「网桥还是要机器狗」指 WDS 网桥版（files/etc/config/wdsdog 已启用）；
-# 哑 AP 上没有对端 WDS，启用只会误重启，所以这里继续 enabled=0。
-# 配置文件保留只是为了让 bridge-watchdog status 不至于报「配置缺失」。
+# 【AP 模式】没有 5G WDS 链路可盯，机器狗保持停用（刷 AP 不会自动重启）。
+# 第 49 次：字段与 WDS 版对齐，方便 bridge-watchdog status 显示一致。
+# 若你在 AP 模式也想要「网络不通自动重启」，SSH 执行：
+#   bridge-watchdog set-peer 172.10.10.254 && bridge-watchdog set-mode ping && bridge-watchdog on
 config wdsdog 'main'
 	option enabled '0'
 	option delay '5'
 	option grace '6'
 	option interval '30'
 	option iface 'auto'
-	option peer 'auto'
-	option dryrun '1'
+	option peer 'off'
+	option anchor ''
+	option mode 'or'
+	option max_reboots '3'
+	option dryrun '0'

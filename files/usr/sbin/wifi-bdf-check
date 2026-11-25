@@ -43,7 +43,6 @@ echo ' [2] rootfs 里的板级数据（board-2.bin）'
 for p in \
   /lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin \
   /lib/firmware/ath11k/qcn6122/hw1.0/board-2.bin \
-  /lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin \
   /lib/firmware/IPQ5018/hw1.0/board-2.bin \
   /lib/firmware/qcn6122/hw1.0/board-2.bin ; do
   [ -e "$p" ] || continue
@@ -53,15 +52,13 @@ for p in \
 done
 B2G=$(md5of /lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin)
 B5G=$(md5of /lib/firmware/ath11k/qcn6122/hw1.0/board-2.bin)
-# 第 39 次：上游 ipq-wifi 用大写 QCN6122 目录，小写缺失时回退大写
-[ "$B5G" = '缺失' ] && B5G=$(md5of /lib/firmware/ath11k/QCN6122/hw1.0/board-2.bin)
 case "$BOARD" in
   *vs010*)
     ok=1
     [ "$B2G" = "$MD5_VS010_2G" ] || ok=0
     [ "$B5G" = "$MD5_VS010_5G" ] || ok=0
     if [ "$ok" = 1 ]; then
-      echo '     ✅ 两份都是 VS010 原厂 BDF（本地落盘已生效；大小写双目录已覆盖）'
+      echo '     ✅ 两份都是 VS010 原厂 BDF（ipq-wifi-cucc_vs010 已生效）'
     else
       echo '     ⚠ 与 VS010 原厂 BDF 的 MD5 不一致：'
       echo "       期望 2.4G $MD5_VS010_2G"
@@ -124,12 +121,3 @@ echo '   ① iw phy1 info 各信道 dBm 上限差值 ≤ 1dB'
 echo '   ② 1 米 iperf3 5G 下行差值 ≤ 15%'
 echo '   ③ 2.4G station dump 的 RSSI 差值 ≤ 3dB'
 echo '============================================================'
-
-# ── 6. 第 39 次：ART 实证状态（只读）─────────────────────────────
-hr
-echo ' [6] 本机 ART 校准实证（第 39 次）'
-if [ -x /usr/sbin/wifi-art-cal ]; then
-  /usr/sbin/wifi-art-cal status 2>/dev/null | sed 's/^/     /'
-else
-  echo '     wifi-art-cal 未安装（旧固件）；实证登记见 vs010/art-truth.conf'
-fi

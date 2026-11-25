@@ -1,28 +1,9 @@
 #!/bin/sh
-
-# 【第 53 次】改管理 IP → 提示同步机器狗 peer，并自动把旧 peer 迁到 auto。
-# 不这么做的话：手工填的旧对端 IP 会 ping 不通 → 连续 5 分钟误判「链路断了」→ 重启。
-_wd_ip_changed(){
-    NEW=${1:-$(uci -q get network.lan.ipaddr 2>/dev/null)}
-    command -v uci >/dev/null 2>&1 || return 0
-    P=$(uci -q get wdsdog.main.peer 2>/dev/null)
-    echo "⚠ 管理 IP 已改为 $NEW。机器狗（连续不通 5 分钟重启）不会因此误重启：" >&2
-    echo "  · 循环会自动检测到 IP 变化 → 重置计时并重新发现对端；" >&2
-    echo "  · 若你设了对端 IP，请同步改：bridge-watchdog set-peer <对端新IP>" >&2
-    echo "  · 或直接用自动发现：bridge-watchdog set-peer auto（推荐）" >&2
-    echo "  · 改 IP 前建议先 bridge-watchdog off，改完再 on" >&2
-    if [ -n "$P" ] && [ "$P" != auto ]; then
-        uci -q set wdsdog.main.peer='auto' 2>/dev/null
-        uci -q commit wdsdog 2>/dev/null
-        echo "  ✓ 旧 peer '$P' 已自动改为 auto（自动重新发现对端）" >&2
-    fi
-    logger -t bridge-watchdog "管理 IP 改为 $NEW，peer 已检查/迁移，连续计时已重置" 2>/dev/null || true
-}
 # bridge-ap —— 普通 AP 模式的现场配置工具（第 20 次校准）
 #
 # 出厂是「哑 AP」：br-lan 固定 172.10.10.241/22，本机 DHCP 服务端关，
 # 终端地址由上级路由分配。但上级路由如果不是 172.10.8.0/22 网段，
-# .240 就够不着管理页 —— 这时用本工具切到 DHCP 客户端或改静态地址。
+# 172.10.10.241 就够不着管理页 —— 这时用本工具切到 DHCP 客户端或改静态地址。
 #
 # 纯 UCI 操作，不碰无线 / 防火墙 / 机器狗，改完自动 restart network。
 # 所有改动即时生效并落盘；串口逐行敲，别整段粘贴。
@@ -70,7 +51,7 @@ _status() {
     echo "★ 没有 DHCP 也能连：PC 设 172.10.10.10/22 直连 LAN 口 → http://172.10.10.241"
     echo "                     或设 169.254.240.2/16 → http://169.254.240.1"
     echo "上级网段不是 172.10.8.0/22 → bridge-ap dhcp（自动取址）"
-    echo "                              或 bridge-ap ip 192.168.50.2（改成同级静态）"
+    echo "                              或 bridge-ap ip 172.10.10.2（改成同级静态）"
     echo "不接上级独立调试 → bridge-ap rescue（临时开本机 DHCP）"
     echo "调试完回哑 AP   → bridge-ap ap"
     echo "改回出厂        → bridge-ap ip 172.10.10.241"
@@ -84,16 +65,19 @@ bridge-ap —— 普通 AP 模式现场配置
   bridge-ap status                 查看当前协议 / 地址 / DHCP / 桥实际地址
   bridge-ap dhcp                   ★ 切成 DHCP 客户端：br-lan 从上级路由自动取址
                                    （上级不是 172.10.8.0/22 时用；去上级客户端列表找它）
-  bridge-ap ip 192.168.50.2        改静态管理 IP 到上级同网段（自动设 /24）
+  bridge-ap ip 172.10.10.2        改静态管理 IP 到上级同网段（自动设 /22）
   bridge-ap dhcp-server on|off     临时开/关本机 DHCP 服务端（默认 off；不接上级时可开）
-  bridge-ap rescue                 ★ 临时进调试态：静态 .240 + 开本机 DHCP（不接上级时 PC 自动拿地址）
-  bridge-ap ap                     ★ 回哑 AP 出厂态：静态 .240 + 关本机 DHCP
+  bridge-ap rescue                 ★ 临时进调试态：静态 172.10.10.241 + 开本机 DHCP（不接上级时 PC 自动拿地址）
+  bridge-ap ap                     ★ 回哑 AP 出厂态：静态 172.10.10.241 + 关本机 DHCP
   bridge-ap static 172.10.10.241   回出厂静态地址（等价于 ip 172.10.10.241）
+
+  ★ 改 IP 后：管理入口/SSH(:22)/LuCI(:80)/TTYD(:7681) 全部换新地址，PC 设同网段。
+    若手动执行过 bridge-watchdog on，改完必须 bridge-watchdog resync 或 set-peer。
 
 出厂默认：静态 172.10.10.241/22 + 本机 DHCP 关 + 网线插任意 LAN 口。
 ★ 本机 DHCP 关 ≠ 连不上：静态管理地址不依赖 DHCP，PC 手动设 172.10.10.10/22 即可直连；
   另外 br-lan 常挂 169.254.240.1/16，PC 设 169.254.240.2/16 也能连，任何上级网段都不冲突。
-注意：bridge-ap dhcp 后静态 .240 会消失，请从上级路由的客户端列表找新地址。
+注意：bridge-ap dhcp 后静态 172.10.10.241 会消失，请从上级路由的客户端列表找新地址。
 EOF
 }
 
@@ -118,16 +102,17 @@ case "$cmd" in
         a=${2:-}
         if [ "$cmd" = static ] && [ -z "$a" ]; then a=172.10.10.241; fi
         if ! _ip_ok "$a"; then
-            echo "用法: bridge-ap ip <合法 IPv4>，例如 bridge-ap ip 192.168.50.2" >&2
+            echo "用法: bridge-ap ip <合法 IPv4>，例如 bridge-ap ip 172.10.10.2" >&2
             exit 1
         fi
         uci -q set network.lan.proto='static'
         uci -q set network.lan.ipaddr="$a"
-        _wd_ip_changed "$a"
         uci -q set network.lan.netmask='255.255.252.0'
         uci -q delete network.lan.gateway
         uci -q delete network.lan.dns
-        echo "管理地址已设为 $a/24（请确认它和上级路由同网段且没被占用）。"
+        echo "管理地址已设为 $a/22（请确认它和上级路由同网段且没被占用）。"
+        echo "🔴【改 IP 必读】管理入口/SSH/LuCI/TTYD 已换新址；PC 需设同网段。"
+        echo "   若手动开过机器狗：bridge-watchdog resync 或 set-peer <对端IP>。"
         _apply
         ;;
     dhcp-server)
@@ -143,7 +128,6 @@ case "$cmd" in
         # 一次性把「地址 + 本机 DHCP」成对设好，避免用户开了 DHCP 却忘了改地址。
         uci -q set network.lan.proto='static'
         uci -q set network.lan.ipaddr='172.10.10.241'
-        _wd_ip_changed '172.10.10.241'
         uci -q set network.lan.netmask='255.255.252.0'
         uci -q delete network.lan.gateway
         uci -q delete network.lan.dns

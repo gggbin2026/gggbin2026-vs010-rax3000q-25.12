@@ -1,4 +1,9 @@
 # 「最新插件」候选清单 —— 2026-11-24 起【默认全部不编】
+# 🔴 第 52 次：插件/服务以第 51 次为冻结基线，只增不减。
+#    想【加】插件：① 在 baseline/frozen-baseline.conf 的 [pkg] 段追加一行，
+#    ② 在此文件把对应包写成 =y。verify.sh 与 gen-config.sh 会自动识别为新增，不阻断。
+#    想【删】基线里已有的包：不允许 —— 自检 FAIL + 编译期 ::error:: 退出 1。
+#    全量清单与红字说明见 baseline/插件基线冻结报告.html
 # 用户要求：不要编译无用插件进去、要最稳、最少系统问题。
 # 只保留 SSH(dropbear) + TTYD(ttyd / luci-app-ttyd)，已在 common.seed。
 # 以下仅供以后按需开启，开启前先把对应 feed 加进 feeds.conf.default，

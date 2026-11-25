@@ -1,15 +1,23 @@
-# QSDK 5.4 / LuCI 21.02 —— 编译期 LuCI 配置（双仓通用）
-# 【为什么必须打包】luci-base 自带 /etc/config/luci 是 conffile；若首启时该文件
-# 缺失/被清空（firstboot、旧 overlay、preinit 分叉都会），99-bridge-ready 里的
+# OpenWrt 25.12（apk / ucode）—— 编译期 LuCI 配置（双机型、双模式通用）
+#
+# 【为什么必须打包成 named section】
+# luci-base 自带 /etc/config/luci 是 conffile。首启 / 旧 overlay / preinit 分叉
+# 都可能让它缺失或被清空；此时任何一句
 #   uci -q set luci.main.mediaurlbase=...
-# 会触发 UCI 的 extended lookup：自动创建一个【匿名、type=main】的 config main 段，
-# 而不是 config core 'main'（named section）。LuCI 的 dispatcher.lua:427 按名字找
-# 'main' 找不到 → 报 "seems to be corrupt, unable to find section 'main'"，WEB 打不开。
-# 编译期写死，uci-defaults 只是改值，不再有机会造出畸形段。
+# 都会触发 UCI extended lookup，自动创建一个【匿名、type=main】的 config main 段，
+# 而不是 config core 'main'（named section）。LuCI 按名字找 'main' 找不到 →
+# dispatcher.lua:427 "seems to be corrupt, unable to find section 'main'"，WEB 打不开。
+#
+# 【为什么默认只能是 bootstrap】
+# luci-theme-argon / luci-theme-footstrap 是社区主题，不在官方 25.12 luci feed 里；
+# 写成 =y 会被 make defconfig 静默丢掉。若这里仍写 mediaurlbase=/luci-static/argon，
+# 或者在「系统 → 语言与样式」里能选到不存在的主题，页面就会白屏 / 500 / 进不去。
+# 默认指向一定存在的 bootstrap；装了 argon 时由开机脚本 /usr/sbin/luci-fix
+# 按实际目录探测后自动切过去，且只把真实存在的主题写进下拉列表。
 
 config core 'main'
 	option lang 'zh_cn'
-	option mediaurlbase '/luci-static/argon'
+	option mediaurlbase '/luci-static/bootstrap'
 	option resourcebase '/luci-static/resources'
 
 config internal 'sauth'
@@ -17,5 +25,4 @@ config internal 'sauth'
 	option sessiontime '3600'
 
 config internal 'themes'
-	option Argon '/luci-static/argon'
 	option Bootstrap '/luci-static/bootstrap'

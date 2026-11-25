@@ -60,14 +60,12 @@ DHCP_IGNORE=$(uci -q get dhcp.lan.ignore 2>/dev/null || echo '0')
 # 枚举真实无线口（wifi-heal 之后才有）；没有就回落通配
 list_wlan(){
     _s=''
-    # 第 50 次：开源 ath11k 是 wlan*，5.4.213 闭源 qca-wifi 是 ath*，都要覆盖
-    for _p in /sys/class/net/wlan* /sys/class/net/ath*; do
+    for _p in /sys/class/net/wlan*; do
         [ -e "$_p" ] || continue
         _s="$_s ${_p##*/}"
     done
     [ -n "$_s" ] && { echo $_s; return 0; }
-    # 接口还没注册（开机早期）也不漏：ebtables --in-if 支持 '+' 后缀通配
-    echo 'wlan+ ath+'
+    echo 'wlan+'
 }
 
 # ── 能力探测（本轮已移除 AP 端口隔离档）────────────────────────────

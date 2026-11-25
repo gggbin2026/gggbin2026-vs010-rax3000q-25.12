@@ -73,7 +73,7 @@ for e in eth0 eth1; do
 done
 echo "[nic-guard] 自愈: eth0/eth1 已拉起并并入 br-lan" > /dev/console
 
-# 桥没管理地址时补上（不写 uci，重启即失效；正常情况编译期配置已带 .241）
+# 桥没管理地址时补上（不写 uci，重启即失效；正常情况编译期配置已带 172.10.10.241）
 if ! ip addr show br-lan 2>/dev/null | grep -q '172.10.10.241'; then
   ip addr add 172.10.10.241/22 dev br-lan 2>/dev/null || true
   echo "[nic-guard] 自愈: br-lan 补 172.10.10.241/22（临时）" > /dev/console

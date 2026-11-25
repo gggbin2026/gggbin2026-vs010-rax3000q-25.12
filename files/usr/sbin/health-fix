@@ -26,7 +26,7 @@ say "主机名   : $(cat /proc/sys/kernel/hostname 2>/dev/null || echo '—')"
 line
 
 # ① LuCI
-say "[1/4] LuCI 主题配置 /etc/config/luci"
+say "[1/7] LuCI 主题配置 /etc/config/luci"
 if grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+('main'|\"main\")" /etc/config/luci 2>/dev/null; then
     say "  ✓ named section core 'main' 在位（427 不会复现）"
 else
@@ -43,10 +43,22 @@ if command -v uci >/dev/null 2>&1; then
     [ -n "$m" ] && [ ! -d "/www$m" ] && [ ! -d "$m" ] \
         && say "  ⚠ 主题目录不存在会白屏（不是 427）；luci-fix 会自动回落 bootstrap"
 fi
+# 主题下拉里若列了不存在的目录，用户在「系统 → 语言与样式」点一下就 500，
+# 之后再也进不去 LuCI。逐项核对目录是否真的存在（luci-fix 会清理幽灵项）。
+# 只认 option 里带引号的真实路径：注释里的示例 /luci-static/argon、
+# 以及 resourcebase '/luci-static/resources' 都不算主题，避免误报
+for t in $(grep -oE "'/luci-static/[^']+'" /etc/config/luci 2>/dev/null | tr -d "'" \
+           | grep -v '/luci-static/resources' | sort -u); do
+    if [ -d "/www$t" ]; then
+        say "  ✓ 主题目录 $t 存在"
+    else
+        say "  ✗ 主题 $t 目录不存在 → 选它会白屏/500，跑 luci-fix 清理"
+    fi
+done
 line
 
 # ② uhttpd / CGI
-say "[2/4] uhttpd 与 CGI"
+say "[2/7] uhttpd 与 CGI"
 if grep -qE "^[[:space:]]*config[[:space:]]+uhttpd[[:space:]]+'main'" /etc/config/uhttpd 2>/dev/null; then
     say "  ✓ uhttpd named main 在位"
 else
@@ -60,7 +72,7 @@ done
 line
 
 # ③ SSH
-say "[3/5] SSH / dropbear（第 34 次深修）"
+say "[3/7] SSH / dropbear"
 if grep -qE "^[[:space:]]*config[[:space:]]+dropbear[[:space:]]+" /etc/config/dropbear 2>/dev/null; then
     say "  ✓ dropbear named section 在位"
 else
@@ -77,7 +89,7 @@ EOF
     chmod 644 /etc/config/dropbear
 fi
 # ★ 真根因：21.02 dropbear.init 在 BOOT 阶段遇到 Interface 直接 return 0（不建实例），
-#   network_get_ipaddrs_all 失败也 return 1；主备把 .241 改 .242 后不会自动重绑。
+#   network_get_ipaddrs_all 失败也 return 1；主备把 172.10.10.241 改 172.10.10.242 后不会自动重绑。
 if grep -qiE "^[[:space:]]*option[[:space:]]+Interface[[:space:]]" /etc/config/dropbear 2>/dev/null; then
     say "  ✗ 发现 option Interface（这就是 22 连不上的根因）→ 就地删除，改监听 0.0.0.0:22"
     sed -i '/^[[:space:]]*option[[:space:]]*Interface[[:space:]]/d' /etc/config/dropbear 2>/dev/null || true
@@ -103,11 +115,11 @@ ip=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '172.10.10.241')
 role=$(cat /etc/bridge_role_mode 2>/dev/null || echo '')
 fmode=$(cat /etc/firmware_mode 2>/dev/null || echo '')
 say "  当前管理 IP : $ip ${role:+· 角色 $role} · 模式 $fmode"
-say "  ★ 请用：ssh root@$ip   （WDS 主 .241 / 备 .242 / AP .240，连错 IP 也会像「连不上」）"
+say "  ★ 请用：ssh root@$ip   （主 172.10.10.241 / 备 172.10.10.242，连错 IP 也会像「连不上」）"
 say "  密码 admin（首启 hash 已校验）；仍失败把本段输出整段贴回来"
 line
 
-say "[4/5] DHCP 私设防护（无线侧）"
+say "[4/7] DHCP 私设防护（无线侧）"
 if [ -f /usr/sbin/dhcp-guard ]; then
     sh /usr/sbin/dhcp-guard --status 2>/dev/null | sed 's/^/  /'
     say "  应用/重下规则：sh /usr/sbin/dhcp-guard"
@@ -117,7 +129,7 @@ fi
 line
 
 # ④ 无线
-say "[5/5] 无线（完整诊断见 wifi-heal）"
+say "[5/7] 无线（完整诊断见 wifi-heal）"
 if [ -f /usr/sbin/wifi-heal ]; then
     sh /usr/sbin/wifi-heal
 else
@@ -126,6 +138,74 @@ else
     say "  wlan: $(ls /sys/class/net 2>/dev/null | grep '^wlan' | tr '\n' ' ' || echo '无')"
 fi
 line
+
+say "[6/7] ART / 本机校准（只读，不改 flash）"
+if [ -x /usr/sbin/art-check ]; then
+    sh /usr/sbin/art-check 2>/dev/null | grep -E '分区|大小|整片MD5|机型判定|MAC@|2G @|5G @|Caldata|默认' | sed 's/^/  /'
+else
+    say "  · /usr/sbin/art-check 缺失（固件不是本仓版本？）"
+fi
+line
+
+say "[7/7] OEM QSDK 栈对照（只读，第 41 次新增）"
+if [ -x /usr/sbin/oem-stack-check ]; then
+    sh /usr/sbin/oem-stack-check 2>/dev/null | grep -E '内核|好固件内核|QSDK 闭源|QSDK 残留|NSS/ECM|ECM debugfs|结论|不能|判速|可迁移|现实路径' | sed 's/^/  /'
+else
+    say "  · /usr/sbin/oem-stack-check 缺失（固件不是本仓版本？）"
+fi
+line
 say "完成。浏览器强刷 http://$(uci -q get network.lan.ipaddr 2>/dev/null || echo 172.10.10.241)/cgi-bin/luci/"
 say "状态页：/bridge/（WDS）或 /ap/（AP）。把本输出整段贴回来即可定位剩余问题。"
+
+# ── 第 47 次兜底：精简常驻服务（health-fix 手动执行时同样生效）───────────────────────────────
+# 全仓无任何 crontab / at 任务，以下 4 个常驻服务对「纯二层 AP / 网桥」无用：
+#   cron         —— 没有定时任务
+#   ucitrack     —— 老版 LuCI 配置联动；25.12 走 ubus/rpcd，且未编任何第三方 app
+#   led          —— 不点灯（DTS 里 LED 节点保留，不影响射频/网口）
+#   gpio_switch  —— 不处理按键（VS010 仅 WPS 键，哑 AP 用不到）
+# ★ 刻意保留：network / dropbear / ttyd / uhttpd / rpcd / dnsmasq / wpad /
+#   ntp-poller(NTP 周期校时) / urngd(SSH 熵) / sysfixtime / ubihealthd / log /
+#   system / qca-nss-drv / qca-nss-pbuf / skb_recycler + 本仓 5 个开机自检。
+# ★ packet_steering 不关：official-25.12.6 基线无 NSS，软转发仍需它做多核 RPS。
+# 想恢复任一服务：/etc/init.d/<名字> enable && /etc/init.d/<名字> start
+for s in cron ucitrack led gpio_switch; do
+    [ -x "/etc/init.d/$s" ] || continue
+    "/etc/init.d/$s" stop    2>/dev/null || true
+    "/etc/init.d/$s" disable 2>/dev/null || true
+done
+
+
+# ── 第 50 次：WDS 角色别名自检 + 改管理 IP 提示 ──────────────────
+if [ "$(cat /etc/firmware_mode 2>/dev/null)" = 'wds' ]; then
+    _h_role=$(cat /etc/bridge_role 2>/dev/null || echo '')
+    case "$_h_role" in sta) _h_ll='169.254.241.2' ;; *) _h_ll='169.254.241.1' ;; esac
+    if ip addr show br-lan 2>/dev/null | grep -qF "$_h_ll/16"; then
+        say "  ✓ WDS 角色别名 $_h_ll/16 在（机器狗互 ping 与管理 IP 解耦）"
+    else
+        ip addr add "$_h_ll/16" dev br-lan 2>/dev/null || true
+        say "  ⚠ WDS 角色别名缺失，已补挂 $_h_ll/16"
+    fi
+    _h_ip=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+    case "$_h_ip" in ''|'172.10.10.241'|'172.10.10.242') ;; *)
+        say "  🔴【改 IP 必读】本机管理 IP=$_h_ip 已改；链路本地别名保证不会误重启，"
+        say "     但请执行 bridge-watchdog resync（自动发现对端新 IP），两台都要各跑一次。"
+        say "     或 bridge-watchdog set-peer <对端新管理IP>；改完 status 复核。"
+        ;;
+    esac
+fi
+
+
+# ── 第 51 次（自检也校验）：NTP 每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）──
+# 开机每次都校验一遍，专治 sysupgrade「保留配置」把旧 rc.d 链接带回来。
+# 兜底：ntp-poller 没编进固件时不碰 sysntpd，避免彻底没有 NTP。
+if [ -f /etc/init.d/ntp-poller ]; then
+    chmod 755 /etc/init.d/ntp-poller /usr/sbin/ntp-poller 2>/dev/null || true
+    /etc/init.d/sysntpd stop     2>/dev/null || true
+    /etc/init.d/sysntpd disable  2>/dev/null || true
+    /etc/init.d/ntp-poller enable  2>/dev/null || true
+    /etc/init.d/ntp-poller restart 2>/dev/null || true
+else
+    [ -x /etc/init.d/sysntpd ] && { /etc/init.d/sysntpd enable 2>/dev/null || true; /etc/init.d/sysntpd restart 2>/dev/null || true; }
+fi
+
 exit 0

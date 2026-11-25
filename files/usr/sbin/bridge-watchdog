@@ -1,93 +1,83 @@
 #!/bin/sh
-# bridge-watchdog —— WDS 无线看门狗（机器狗）
+# bridge-watchdog —— WDS 无线看门狗（机器狗）· 第 49 次
 #
-# 干什么：只盯 5G WDS 链路。连续「不通」达到 delay 分钟就 sync + reboot -f。
+# 干什么：盯 WDS 网桥通不通。**连续**不通达到 delay 分钟就 sync + reboot -f。
 #         中间恢复立刻清零重新计时，不是「累计」，是「连续」。
-# 怎么改：bridge-watchdog set-delay 10     # 5 分钟 → 10 分钟（0~120 任意整数）
-#         bridge-watchdog dryrun on       # 先只记日志不重启，观察一两天
-#         bridge-watchdog off             # 刷机 / TTL 调试前务必先关
-#         bridge-watchdog status          # 看当前接口、连续不通多久、还剩多久重启
+#         出厂：enabled=1 / delay=5 分钟 / grace=6 分钟 / dryrun=0（真重启）。
+#
+# ★ 用户最关心的三件事（第 49 次）：
+#   ① 时间可自定义：bridge-watchdog set-delay 10   （0~120 分钟，立即生效，不用重编）
+#                   bridge-watchdog set-grace 8    （开机宽限）
+#                   bridge-watchdog set-interval 60（检查间隔秒）
+#   ② 保证「通的时候不误重启」：默认 mode=or，三条判据任一通就算通：
+#        无线关联(iw link / station dump)  OR  ping 对端  OR  ping anchor
+#      peer=auto 会按 /etc/bridge_role 与本机管理 IP 自动推导对端
+#      （主 172.10.10.241 ↔ 备 172.10.10.242），不用手填。
+#      注意：ping **自己**的 IP 永远通，没有意义，必须 ping **对端**。
+#   ③ 保证「不通时不会无限重启」：max_reboots=3。连续重启 3 次仍不通，
+#      自动把 dryrun 置 1 并停手（日志写明原因），网络恢复后计数自动清零。
+#      调试/刷机前：bridge-watchdog dryrun on 或 off，开机 grace 分钟内可从容 SSH。
+#
+# ★ 第 50 次：改网桥管理 IP 会不会导致重启？—— 不会仅因改 IP 就重启。
+#   mode=or 还有「无线关联」判据，改 IP 后只要 WDS 关联正常就不计时；
+#   且每次 network restart 只是短暂断链，需【连续】delay 分钟才重启。
+#   但若「改 IP 后 + 无线也断」，旧 peer 指向 .241/.242 会 ping 不通 → 才可能重启。
+#   为此补三件套（与管理 IP 完全解耦）：
+#     ⓐ WDS 角色链路本地别名：主挂 169.254.241.1/16、备挂 169.254.241.2/16，
+#        两端互 ping 对方别名。管理 IP 改成什么都不影响这条判据（避开 AP 的 .240.1）。
+#     ⓑ 动态发现对端管理 IP：从 WDS 对端射频 MAC → br-lan 邻居表反查真实管理 IP，
+#        loop 每 10 轮自动刷新，写入 /tmp/wdsdog-peer-discovered，status 可见。
+#     ⓒ bridge-watchdog resync：改完 IP 手动跑一次，重算 + 打印红字提示。
+#   status / banner / Release NOTES / Actions 日志都带「改 IP 必读」红字告警。
 #
 # ★ 计时用 /proc/uptime（单调时钟），不用 date：
 #   这板子没有 RTC，开机后 NTP 一同步 date 会跳几小时，用 wall clock 会瞬间误判
 #   「已经断了 5 分钟」而误重启。date 只用来给日志打可读时间。
 #
-# 判据（二选一，由 peer 决定）：
-#   peer 为空  → 查 WDS 接口的无线关联：STA 端 `iw link` 有 Connected to，
-#                或 AP 端 `iw station dump` 有 Station。只看 WDS 接口，
-#                2.4G 的 BRIDGE-SETUP 调试 AP 有没有人连都不算数。
-#   peer 非空  → 直接 ping 对端管理 IP，通就算通（最贴近「桥到底通不通」）。
-#                成对部署强烈建议填：AP 端 .241 / STA 端 .242。
-#
-# 【第 53 次】恢复出厂启用（enabled=1 / dryrun=0 / delay=5 分钟）。
-#   防误重启三道保险仍在，一条没删：
-#     ① 开机宽限 grace 分钟内不判故障（等无线校准 / 角色收敛）
-#     ② ★ ever_ok：从未成功关联过 = 单机/未配对/无线没起来 → 只记日志，绝不重启
-#     ③ 连续（不是累计）不通才计时，中途恢复立刻清零
-#   peer=auto 自动发现对端 IP，且【排除本机地址】—— 第 52 次所有设备统一
-#   172.10.10.241，ping 自己会永远通，必须防住。查不到对端就退回无线关联。
-#   本机管理 IP 变化时重置计时并重新发现，不重启。
+# 接口根本没注册 = ath11k / wifi up 尚未就绪，不是「WDS 链路断了」→ 返回 2，
+# 清零计时、只记日志、绝不重启（第 18 次校准保留）。
 
 CONF_PKG=wdsdog
 STATE=/tmp/bridge-watchdog.state
 LOG=/tmp/bridge-watchdog.log
+RCNT=/etc/wdsdog-reboot-count
+# 第 50 次：与管理 IP 解耦的 WDS 角色链路本地别名（AP 调试别名是 169.254.240.1，避开）
+LL_AP='169.254.241.1'
+LL_STA='169.254.241.2'
+DISCOVERED=/tmp/wdsdog-peer-discovered
 
-# ── 配置读取（带缺省）────────────────────────────────────────────
+# ── 配置读取（带缺省；第 49 次缺省 = WDS 出厂启用的安全值）────────
 _cfg() {  # $1=key $2=默认值
     v=$(uci -q get "$CONF_PKG.main.$1" 2>/dev/null)
     [ -n "$v" ] && { echo "$v"; return; }
     echo "$2"
 }
 load_cfg() {
-    # 【第 49 次】缺省一律取安全侧：配置缺失/被旧 overlay 盖掉时也不会误重启
+    # 配置文件丢了（sysupgrade / 首次刷机 / 手删）也按 WDS 出厂语义走：
+    # 启用 + 5 分钟 + 真重启；AP 模式由 files.ap/etc/config/wdsdog 显式 enabled=0 覆盖。
     ENABLED=$(_cfg enabled 1)
     DELAY=$(_cfg delay 5)
     GRACE=$(_cfg grace 6)
     INTERVAL=$(_cfg interval 30)
     IFACE_CFG=$(_cfg iface auto)
-    PEER_CFG=$(_cfg peer auto)
+    PEER=$(_cfg peer auto)
+    ANCHOR=$(_cfg anchor '')
+    MODE=$(_cfg mode or)
+    MAXRB=$(_cfg max_reboots 3)
     DRYRUN=$(_cfg dryrun 0)
-    # 防呆：非法值一律回落到安全缺省
+    # 防呆：非法值一律回落到出厂缺省
     case "$DELAY" in ''|*[!0-9]*) DELAY=5 ;; esac
-    case "$GRACE" in ''|*[!0-9]*) GRACE=3 ;; esac
+    case "$GRACE" in ''|*[!0-9]*) GRACE=6 ;; esac
     case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=30 ;; esac
+    case "$MAXRB" in ''|*[!0-9]*) MAXRB=3 ;; esac
     [ "$INTERVAL" -ge 1 ] 2>/dev/null || INTERVAL=30
+    # delay=0 会让「不通」瞬间触发重启，危险；一律回落到出厂 5 分钟
+    [ "$DELAY" -ge 1 ]    2>/dev/null || DELAY=5
     [ "$DELAY" -le 120 ]  2>/dev/null || DELAY=120
-    PEER=''
-    _refresh_peer
-}
-
-# ── 【第 53 次】对端 IP 自动发现（peer=auto）─────────────────────
-# 从 5G WDS 接口的 station dump / iw link 取对端 MAC，再从邻居表/ARP 反查 IP。
-# 统一地址（所有设备都 .241）时解析出的可能是本机地址 → 必须排除，否则
-# ping 自己永远通，机器狗形同虚设；解析不到就返回空，由 _health_ok 退回
-# 「无线关联」判据，绝不因为查不到就判成不通。
-_local_ip_main() { uci -q get network.lan.ipaddr 2>/dev/null; }
-_local_ips() {
-    ip -4 addr show 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2}'
-    _local_ip_main
-}
-_resolve_peer() {
-    i=$(_pick_iface 2>/dev/null) || return 0
-    [ -n "$i" ] || return 0
-    mac=$(iw dev "$i" station dump 2>/dev/null | awk '$1=="Station"{print $2; exit}')
-    [ -z "$mac" ] && mac=$(iw dev "$i" link 2>/dev/null | awk '/Connected to/{print $3; exit}')
-    [ -z "$mac" ] && return 0
-    for cand in $(ip -4 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}') \
-                $(awk -v m="$mac" 'tolower($4)==tolower(m){print $1}' /proc/net/arp 2>/dev/null); do
-        _local_ips 2>/dev/null | grep -qx "$cand" && continue
-        case "$cand" in *.*.*.*) echo "$cand"; return 0 ;; esac
-    done
-    return 0
-}
-_refresh_peer() {
-    case "$PEER_CFG" in
-      auto) PEER=$(_resolve_peer) ;;
-      '')   PEER='' ;;
-      *)    PEER="$PEER_CFG"
-            # 手工填了本机地址 → 视为无效，退回无线关联，避免永远「通」
-            _local_ips 2>/dev/null | grep -qx "$PEER" && PEER='' ;;
-    esac
+    [ "$MAXRB" -le 20 ]   2>/dev/null || MAXRB=20
+    case "$MODE" in or|ping|wireless) ;; *) MODE=or ;; esac
+    [ "$ENABLED" = 1 ] || ENABLED=0
+    [ "$DRYRUN" = 1 ] || DRYRUN=0
 }
 
 # ── 单调时钟 / 到期判定 ──────────────────────────────────────────
@@ -101,16 +91,101 @@ _due() {  # $1=now $2=首次失败时刻 $3=delay(分钟)
 _pick_iface() {
     [ "$IFACE_CFG" != "auto" ] && { echo "$IFACE_CFG"; return; }
     all=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')
-    [ -z "$all" ] && all=$(ls /sys/class/net 2>/dev/null | grep -E '^(wlan|ath)')
-    # 【第 49 次】旧版最后 `echo "$all" | tail -n 1` 会把 2.4G 调试 AP 的
-    # wlan0 顶替成「WDS 接口」，于是 _health_ok 不再返回 2（未就绪），
-    # 单机刷完被判「WDS 不通」→ 循环 reboot -f。现在只认 5G WDS 候选口，
-    # 找不到就返回空，由 _health_ok 返回 2：不计故障、不重启。
-    # ath1 是 5.4.213 闭源 qca-wifi 线的 VAP 名，一并兼容。
-    for n in wlan1 phy1-ap0 wlan1-1 ath1; do
+    [ -z "$all" ] && all=$(ls /sys/class/net 2>/dev/null | grep '^wlan')
+    for n in wlan1 phy1-ap0 wlan1-1; do
         echo "$all" | grep -qx "$n" && { echo "$n"; return; }
     done
-    return 0
+    echo "$all" | tail -n 1
+}
+
+# ── 第 50 次：链路本地角色别名（改 IP 也不会失效的兜底判据）──────
+_my_role() { cat /etc/bridge_role 2>/dev/null || echo ''; }
+_ll_peer() {   # 我要 ping 的【对方】别名
+    case "$(_my_role)" in
+        ap)  echo "$LL_STA" ;;
+        sta) echo "$LL_AP" ;;
+        *)   case "$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')" in
+                 '172.10.10.242') echo "$LL_AP" ;;
+                 *)               echo "$LL_STA" ;;
+             esac ;;
+    esac
+}
+_ll_self() {   # 我自己要挂的别名
+    case "$(_my_role)" in sta) echo "$LL_STA" ;; *) echo "$LL_AP" ;; esac
+}
+_ensure_ll_alias() {
+    [ "$(cat /etc/firmware_mode 2>/dev/null)" = 'wds' ] || return 0
+    wd_self=$(_ll_self)
+    ip addr show br-lan 2>/dev/null | grep -qF "$wd_self/16" && return 0
+    ip addr add "$wd_self/16" dev br-lan 2>/dev/null || true
+    _log "已补挂 WDS 角色链路本地别名 $wd_self/16（与管理 IP 解耦，改 IP 不影响互 ping）"
+}
+
+# ── 第 50 次：动态发现【对端真实管理 IP】（网桥客户端自动找主网桥）──
+# 思路：WDS 链路对端射频 MAC 与它 br-lan 的 MAC 通常只差最后一组字节，
+#       取前 5 组做前缀，在 br-lan 邻居表里反查 IP，排除自己 / 链路本地 / 组播。
+# 边界：NSS offload 下 station dump 可能为空、neigh 可能还没学到 → 静默失败，
+#       由链路本地别名 + 角色推导兜底，绝不影响「通的时候不误重启」。
+_discover_peer() {
+    wd_i=$(_pick_iface)
+    [ -n "$wd_i" ] || return 1
+    wd_mac=$(iw dev "$wd_i" link 2>/dev/null | sed -n 's/^Connected to \([0-9a-fA-F:]*\).*/\1/p' | head -1)
+    [ -z "$wd_mac" ] && wd_mac=$(iw dev "$wd_i" station dump 2>/dev/null | sed -n 's/^Station \([0-9a-fA-F:]*\).*/\1/p' | head -1)
+    [ -n "$wd_mac" ] || return 1
+    wd_pre=$(echo "$wd_mac" | cut -d: -f1-5 | tr 'A-F' 'a-f')
+    wd_my=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+    wd_found=$(ip neigh show dev br-lan 2>/dev/null | awk -v p="$wd_pre" -v my="$wd_my" '
+        { ip=$1; mac="";
+          for(i=1;i<=NF;i++) if($i=="lladdr"){mac=tolower($(i+1)); break}
+          if(mac!="" && index(mac,p)==1 && ip!=my && ip !~ /^169\.254\./ && ip !~ /^127\./ && ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print ip
+        }' | head -1)
+    [ -n "$wd_found" ] || return 1
+    echo "$wd_found"
+}
+_refresh_discovery() {
+    wd_new=$(_discover_peer) || return 0
+    wd_old=$(cat "$DISCOVERED" 2>/dev/null || echo '')
+    [ "$wd_new" = "$wd_old" ] && return 0
+    echo "$wd_new" > "$DISCOVERED" 2>/dev/null || true
+    _log "自动发现对端管理 IP：${wd_old:-无} → $wd_new（主网桥改 IP 后无需手填）"
+}
+
+# ── 改 IP 红字告警（SSH / TTYD 里 ANSI 真红；日志里纯文本）────────
+_red() { printf '\033[31m%s\033[0m\n' "$*"; }
+_ip_warn() {
+    wd_my=${1:-$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')}
+    case "$wd_my" in ''|'172.10.10.241'|'172.10.10.242') return 0 ;; esac
+    _red "🔴【改 IP 必读】本机管理 IP = $wd_my，已不是出厂 .241/.242"
+    _red "   机器狗仍启用；链路本地别名 $(_ll_peer) 已保证【不会因改 IP 误重启】"
+    _red "   但互 ping 对方管理 IP 的判据可能失效，请执行：bridge-watchdog resync"
+    _red "   或显式指定：bridge-watchdog set-peer <对端新管理 IP>（两台都要各指对方）"
+    _red "   改完用 bridge-watchdog status 复核；临时停手用 dryrun on"
+}
+
+# ── 对端解析：auto = 按角色/本机 IP 推导「对方」管理 IP ──────────
+# ⚠ 不是 ping 自己：本机 IP 永远能 ping 通，判不出桥断没断。
+#   ap(主 .241) → ping .242 ；sta(备 .242) → ping .241
+#   第 50 次：优先用自动发现到的真实对端 IP，回落角色推导。
+_resolve_peer() {
+    case "$PEER" in
+        ''|none|off) return 0 ;;
+        auto) ;;
+        *) echo "$PEER"; return 0 ;;
+    esac
+    # ① 自动发现到的对端真实管理 IP（改 IP 后 resync / loop 自动刷新）
+    wd_d=$(cat "$DISCOVERED" 2>/dev/null || echo '')
+    case "$wd_d" in ''|*[!0-9.]*) ;; *) echo "$wd_d"; return 0 ;; esac
+    # ② 回落：按角色推导出厂对端
+    wd_role=$(cat /etc/bridge_role 2>/dev/null || echo '')
+    wd_my=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+    case "$wd_role" in
+        ap)  echo '172.10.10.242' ;;
+        sta) echo '172.10.10.241' ;;
+        *)   case "$wd_my" in
+                 '172.10.10.242') echo '172.10.10.241' ;;
+                 *)               echo '172.10.10.242' ;;
+             esac ;;
+    esac
 }
 
 # ── 健康判据 ─────────────────────────────────────────────────────
@@ -123,20 +198,36 @@ _wireless_ok() {
     return 1
 }
 _peer_ok() { ping -c 1 -W 2 -q "$1" >/dev/null 2>&1; }
-_health_ok() {
-    if [ -n "$PEER" ]; then _peer_ok "$PEER"; return $?; fi
-    i=$(_pick_iface)
-    # 【第 18 次校准】接口根本没注册 = ath11k / wifi up 尚未就绪，
-    # 不是「WDS 链路断了」。旧版把它当不通并开始计时 → 无线没起来时
-    # 每 (grace+delay) 分钟循环重启，串口刚敲两行就断，没法排障。
-    # 返回 2 由 loop 单独处理：清零计时、只记日志、绝不重启。
-    [ -z "$i" ] && return 2
-    [ -d "/sys/class/net/$i" ] || return 2
-    _wireless_ok "$i" && return 0
+_wd_ping_ok() {
+    # ⓐ 链路本地角色别名：管理 IP 改成任何值都不变（第 50 次）
+    wd_ll=$(_ll_peer)
+    [ -n "$wd_ll" ] && _peer_ok "$wd_ll" && return 0
+    # ⓑ 对端管理 IP（显式 / 自动发现 / 角色推导）
+    wd_p=$(_resolve_peer)
+    [ -n "$wd_p" ] && _peer_ok "$wd_p" && return 0
+    # ⓒ 可选锚点
+    [ -n "$ANCHOR" ] && _peer_ok "$ANCHOR" && return 0
     return 1
 }
+# 返回 0=通 / 1=不通（开始计时）/ 2=接口未就绪（不计故障、不重启）
+_health_ok() {
+    i=$(_pick_iface)
+    if [ -z "$i" ] || [ ! -d "/sys/class/net/$i" ]; then
+        # 无线口压根没注册：先看 ping 判据，通就算通（有线桥正常时不误重启）
+        _wd_ping_ok && return 0
+        return 2
+    fi
+    case "$MODE" in
+        ping)     _wd_ping_ok && return 0; return 1 ;;
+        wireless) _wireless_ok "$i" && return 0; return 1 ;;
+        *)        # or：任一判据通即通 —— 这是「保证通的时候不误重启」的关键
+                  _wireless_ok "$i" && return 0
+                  _wd_ping_ok && return 0
+                  return 1 ;;
+    esac
+}
 
-# ── 日志 / 重启动作（测试可覆盖 _do_reboot）────────────────────────
+# ── 日志 / 重启次数护栏 / 重启动作 ────────────────────────────────
 _log() {
     logger -t bridge-watchdog "$*" 2>/dev/null || true
     printf '%s %s\n' "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$LOG"
@@ -144,39 +235,55 @@ _log() {
     [ "$n" -gt 200 ] 2>/dev/null && { tail -n 100 "$LOG" > "$LOG.tmp"; mv "$LOG.tmp" "$LOG"; }
     :
 }
+_rb_count() {
+    wd_c=$(cat "$RCNT" 2>/dev/null || echo 0)
+    case "$wd_c" in ''|*[!0-9]*) wd_c=0 ;; esac
+    echo "$wd_c"
+}
+_rb_reset() {  # 网络恢复时清零；已经是 0 就不写，减少 overlay 写入
+    [ "$(_rb_count)" = "0" ] || echo 0 > "$RCNT" 2>/dev/null || true
+}
 _do_reboot() {
     _log "连续不通达到 ${DELAY} 分钟 → 执行重启"
     sync 2>/dev/null || true
     /sbin/reboot -f 2>/dev/null || busybox reboot -f 2>/dev/null || reboot -f
+}
+_maybe_reboot() {
+    if [ "$DRYRUN" = "1" ]; then
+        _log "dryrun=1：达到 ${DELAY} 分钟，本应重启，已跳过（dryrun off 才真重启）"
+        first=0; echo 0 > "$STATE"; return
+    fi
+    wd_c=$(_rb_count)
+    if [ "$wd_c" -ge "$MAXRB" ]; then
+        _log "已连续重启 $wd_c 次仍不通 → 自动转 dryrun=1，停止重启循环；请查对端/peer/网线"
+        uci -q set wdsdog.main.dryrun='1' 2>/dev/null || true
+        uci -q commit wdsdog 2>/dev/null || true
+        DRYRUN=1
+        first=0; echo 0 > "$STATE"; return
+    fi
+    echo $(( wd_c + 1 )) > "$RCNT" 2>/dev/null || true
+    _log "重启计数 $(( wd_c + 1 ))/$MAXRB（网络恢复会自动清零）"
+    _do_reboot
+    first=$now
 }
 
 # ── 常驻循环（由 init.d 调）───────────────────────────────────────
 loop() {
     load_cfg
     first=0
-    ever_ok=0
     grace_logged=0
     notready_logged=0
-    notpaired_logged=0
-    LAST_LOCAL=$(_local_ip_main)
-    _log "机器狗启动: delay=${DELAY}分 grace=${GRACE}分 interval=${INTERVAL}秒 iface=${IFACE_CFG} peer_cfg=${PEER_CFG} peer=${PEER:-未解析/用关联} dryrun=${DRYRUN}"
+    _ensure_ll_alias
+    _refresh_discovery
+    _ip_warn "$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')" >/dev/null 2>&1 || true
+    _log "机器狗启动: enabled=$ENABLED delay=${DELAY}分 grace=${GRACE}分 interval=${INTERVAL}秒 mode=$MODE peer=$PEER -> $(_resolve_peer) 别名=$(_ll_peer) 发现=$(cat $DISCOVERED 2>/dev/null || echo 无) anchor=${ANCHOR:-无} max_reboots=$MAXRB dryrun=$DRYRUN"
+    tick=0
     while :; do
         now=$(_now)
-        # ★ 第 53 次：本机管理 IP 变了（改地址 / 角色收敛）→ 重置连续计时、
-        #   重新发现对端，绝不因为旧 peer 失效而误重启。
-        CUR_LOCAL=$(_local_ip_main)
-        if [ "$CUR_LOCAL" != "$LAST_LOCAL" ]; then
-            _log "本机管理 IP 变化 ${LAST_LOCAL:-空} → ${CUR_LOCAL:-空}：重置连续计时并重新发现对端（不重启）"
-            LAST_LOCAL=$CUR_LOCAL
-            first=0
-            echo 0 > "$STATE"
-            _refresh_peer
-            sleep "$INTERVAL"
-            continue
-        fi
-        _refresh_peer
+        tick=$(( tick + 1 ))
+        [ $(( tick % 10 )) -eq 0 ] && _refresh_discovery
         if [ "$now" -lt $(( GRACE * 60 )) ]; then
-            [ "$grace_logged" = 0 ] && { _log "开机宽限 ${GRACE} 分钟内（等 ath11k 校准 / wifi up），暂不判故障"; grace_logged=1; }
+            [ "$grace_logged" = 0 ] && { _log "开机宽限 ${GRACE} 分钟内（等 ath11k 校准 / bridge-role 收敛），暂不判故障"; grace_logged=1; }
             sleep "$INTERVAL"
             continue
         fi
@@ -184,62 +291,53 @@ loop() {
         rc=$?
         if [ "$rc" -eq 2 ]; then
             [ "$notready_logged" = 0 ] && {
-                _log "WDS 接口尚未注册（ath11k / wifi up 未就绪），暂不计故障、不重启"
+                _log "WDS 接口尚未注册且 ping 不通（驱动未就绪），暂不计故障、不重启"
                 notready_logged=1
             }
             first=0
             echo 0 > "$STATE"
         elif [ "$rc" -eq 0 ]; then
             notready_logged=0
-            notpaired_logged=0
-            ever_ok=1
-            [ "$first" -ne 0 ] && _log "WDS 链路恢复，连续失败计时清零"
+            [ "$first" -ne 0 ] && _log "WDS/网络恢复，连续失败计时清零"
             first=0
             echo 0 > "$STATE"
+            _rb_reset
         else
             notready_logged=0
-            # 【第 49 次】从未成功关联过 = 单机 / 尚未配对 / 无线没起来，
-            # 不是「链路断了」。这种情况绝不重启，否则开机 11 分钟后无限循环。
-            if [ "$ever_ok" != 1 ]; then
-                [ "$notpaired_logged" = 0 ] && {
-                    _log "WDS 从未成功关联（单机/未配对/无线未就绪）：只计日志，不重启。两台配对后本保护自动解除"
-                    notpaired_logged=1
-                }
-                first=0
-                echo 0 > "$STATE"
-                sleep "$INTERVAL"
-                continue
-            fi
             if [ "$first" -eq 0 ]; then
                 first=$now
-                _log "WDS 不通（iface=$(_pick_iface) peer=${PEER:-关联判据}），开始连续计时 ${DELAY} 分钟"
+                _log "判为不通（iface=$(_pick_iface) mode=$MODE 对端=$(_resolve_peer) anchor=${ANCHOR:-无}），开始连续计时 ${DELAY} 分钟"
             fi
             echo "$first" > "$STATE"
             if _due "$now" "$first" "$DELAY"; then
-                if [ "$DRYRUN" = "1" ]; then
-                    _log "dryrun=1：达到 ${DELAY} 分钟，本应重启，已跳过（把 dryrun 设 0 才真重启）"
-                    first=0
-                    echo 0 > "$STATE"
-                else
-                    _do_reboot
-                    # reboot 未立刻生效时也别疯狂刷；等下一轮
-                    first=$now
-                fi
+                _maybe_reboot
             fi
         fi
         sleep "$INTERVAL"
     done
 }
 
-# ── 单次检测 / 状态 ──────────────────────────────────────────────
+# ── 单次检测（逐条判据，绝不重启）────────────────────────────────
 once() {
     load_cfg
-    i=$(_pick_iface)
-    printf '检测接口 : %s\n' "$i"
-    printf '判据     : %s\n' "$( [ -n "$PEER" ] && echo "ping $PEER" || echo '无线关联(iw link / station dump)' )"
-    printf '对端配置 : %s\n' "$PEER_CFG  ->  ${PEER:-（未解析到，退回关联判据）}"
-    if _health_ok; then echo '结果     : 通 (OK)'; return 0
-    else echo '结果     : 不通 (DOWN)'; return 1; fi
+    wd_i=$(_pick_iface)
+    wd_p=$(_resolve_peer)
+    printf '检测接口   : %s\n' "$wd_i"
+    printf '判据模式   : %s（任一通即通）\n' "$MODE"
+    printf '① 无线关联 : '
+    if [ -n "$wd_i" ] && [ -d "/sys/class/net/$wd_i" ] && _wireless_ok "$wd_i"; then echo '通'; else echo '不通/未就绪'; fi
+    printf '② 对端 ping: %s -> ' "${wd_p:-未设}"
+    if [ -n "$wd_p" ] && _peer_ok "$wd_p"; then echo '通'; else echo '不通'; fi
+    printf '③ 锚点 ping: %s -> ' "${ANCHOR:-未设}"
+    if [ -n "$ANCHOR" ] && _peer_ok "$ANCHOR"; then echo '通'; else echo '不通/未设'; fi
+    _health_ok; wd_rc=$?
+    case "$wd_rc" in
+        0) echo '综合结果   : 通 (OK，不会重启)' ;;
+        2) echo '综合结果   : 未就绪（不计故障，不会重启）' ;;
+        *) echo '综合结果   : 不通 (DOWN，开始连续计时)' ;;
+    esac
+    [ "$wd_rc" -eq 1 ] && return 1
+    return 0
 }
 status() {
     load_cfg
@@ -247,14 +345,17 @@ status() {
     first=$(cat "$STATE" 2>/dev/null || echo 0)
     case "$first" in ''|*[!0-9]*) first=0 ;; esac
     echo '========== bridge-watchdog 状态 =========='
-    echo "  启用        : $ENABLED   (bridge-watchdog on / off)"
-    echo "  重启延时    : $DELAY 分钟  ★连续不通才重启，set-delay 10 可改成 10 分钟"
-    echo "  开机宽限    : $GRACE 分钟"
-    echo "  检查间隔    : $INTERVAL 秒"
+    echo "  启用        : $ENABLED   (on / off)"
+    echo "  重启延时    : $DELAY 分钟  ★ set-delay 10 可改成 10 分钟，立即生效"
+    echo "  开机宽限    : $GRACE 分钟  (set-grace N)"
+    echo "  检查间隔    : $INTERVAL 秒 (set-interval N)"
+    echo "  判据模式    : $MODE   (or / ping / wireless，set-mode 改)"
     echo "  检测接口    : $IFACE_CFG -> $(_pick_iface 2>/dev/null)"
-    echo "  对端配置    : $PEER_CFG"
-    echo "  对端实际    : ${PEER:-（未解析到，退回无线关联判据）}"
-    echo "  本机管理 IP : $(_local_ip_main 2>/dev/null || echo '-')"
+    echo "  对端配置    : $PEER -> 实际 $(_resolve_peer)"
+    echo "  链路本地别名: 自己 $(_ll_self)  ↔  互 ping $(_ll_peer)（改 IP 不变）"
+    echo "  自动发现对端: $(cat $DISCOVERED 2>/dev/null || echo '尚未发现（用别名兜底）')  (resync 刷新)"
+    echo "  锚点(可选)  : ${ANCHOR:-未设}  (set-anchor IP)"
+    echo "  重启计数    : $(_rb_count) / $MAXRB  (set-max-reboots N；网络恢复自动清零)"
     echo "  试运行      : $DRYRUN  (1=只记日志不重启)"
     echo "  开机时长    : $now 秒（单调时钟，不受 NTP 跳变影响）"
     if [ "$first" -gt 0 ]; then
@@ -269,9 +370,10 @@ status() {
     echo '  ---------- 最近日志 ----------'
     tail -n 6 "$LOG" 2>/dev/null || echo '  (暂无)'
     echo '=========================================='
+    _ip_warn
 }
 
-# ── 配置 CLI ─────────────────────────────────────────────────────
+# ── 配置 CLI（全部 UCI 持久化，立即生效，无需重编）────────────────
 _restart_if_running() {
     [ -x /etc/init.d/bridge-watchdog ] && /etc/init.d/bridge-watchdog restart >/dev/null 2>&1 || true
 }
@@ -280,32 +382,35 @@ _set() {  # $1=key $2=value
     uci commit "$CONF_PKG" 2>/dev/null
     _restart_if_running
 }
+_num_or_die() {  # $1=value $2=max $3=label
+    case "$1" in ''|*[!0-9]*) echo "用法错误：$3 需要 0..$2 的整数"; exit 1 ;; esac
+    [ "$1" -le "$2" ] || { echo "$3 最大 $2"; exit 1; }
+}
 usage() {
     cat <<'EOF'
-bridge-watchdog —— WDS 无线看门狗（机器狗）· 第 53 次
+bridge-watchdog —— WDS 无线看门狗（机器狗）
 
-  bridge-watchdog status            看当前延时 / 判据 / 对端 / 连续不通多久 / 还剩多久重启
-  bridge-watchdog once             立刻检测一次（通=0，不通=1，绝不重启）
-  ★ 自定义时间（立即生效，不用重编）：
-      bridge-watchdog set-delay N       连续不通 N 分钟才重启（0~120，默认 5）
-      bridge-watchdog set-interval N    每 N 秒检查一次（默认 30）
-      bridge-watchdog set-grace N       开机宽限 N 分钟（默认 6）
-  ★ 判据 / 对端：
-      bridge-watchdog set-peer auto     自动发现对端 IP（默认，推荐）
-      bridge-watchdog set-peer IP       手工指定对端管理 IP（互相 ping）
-      bridge-watchdog set-peer ''       留空 = 只查 5G WDS 无线关联
-      bridge-watchdog rebind           立刻重新发现对端并打印结果
-  bridge-watchdog on | off         启用 / 停用（刷机、TTL 调试前先 off）
-  bridge-watchdog dryrun on|off    只记日志不重启 / 恢复真重启
-  bridge-watchdog set-iface NAME   固定 WDS 接口（默认 auto）
-  bridge-watchdog loop             内部使用，由 init.d 调，别手敲
+  status / once          看状态 / 立刻逐条检测一次（绝不重启）
+  set-delay N            ★自定义「连续不通多少分钟才重启」，1~120，默认 5
+  set-grace N            开机宽限分钟数，默认 6（这段时间内可从容 SSH 改配置）
+  set-interval N         检查间隔秒数，默认 30
+  set-peer IP|auto|off   ★对端管理 IP。auto=按主备自动推导（.241↔.242）
+                          ⚠ 不要填自己的 IP，自己永远 ping 得通，判不出断链
+  set-anchor IP|off      额外锚点（如 172.10.10.254 / 上级网关），任一通即算通
+  set-mode or|ping|wireless   判据组合，默认 or（最不容易误重启）
+  set-max-reboots N      连续重启上限，默认 3；达到后自动转 dryrun 停手
+  on | off               启用 / 彻底停用
+  dryrun on|off          只记日志不重启 / 恢复真重启
+  set-iface NAME         固定 WDS 接口（默认 auto）
+  resync                 ★改完网桥管理 IP 必跑：重挂别名、自动发现对端新 IP、打印红字提示
+  loop                   内部使用，由 init.d 调，别手敲
 
-  出厂默认（第 53 次）：启用 / 连续不通 5 分钟重启 / 自动发现对端。
-  ★ 不会误重启：开机宽限 6 分钟 + 从未成功关联过绝不重启 + 连续计时
-    （中途恢复清零）。单机刷完、无线没起来、改管理 IP，都只记日志不重启。
-  ★ 改管理 IP 前建议先 off，改完 set-peer auto（或填对端新 IP）再 on；
-    循环本身也会检测到 IP 变化自动重置计时、重新发现对端。
-  想改成 10 分钟：bridge-watchdog set-delay 10
+  出厂：连续不通 5 分钟重启，开机宽限 6 分钟，3 次不通后自动停手。
+  ★ 改网桥管理 IP 后：bridge-watchdog resync
+    链路本地别名 169.254.241.1(主)/.2(备) 与管理 IP 解耦，改 IP 不会误重启；
+    但仍建议 resync 让「互 ping 对方管理 IP」跟上新地址，两台都要各指对方。
+  例：bridge-watchdog set-delay 10 && bridge-watchdog set-peer auto
+  临时不重启：bridge-watchdog dryrun on   （恢复：dryrun off）
 EOF
 }
 main() {
@@ -314,49 +419,51 @@ main() {
         loop)      loop ;;
         once)      once ;;
         status)    status ;;
-        set-delay)
-            n=${2:-}
-            case "$n" in ''|*[!0-9]*) echo '用法: bridge-watchdog set-delay 0..120（单位分钟）'; exit 1 ;; esac
-            [ "$n" -le 120 ] || { echo '最大 120 分钟'; exit 1; }
-            _set delay "$n"
-            echo "已设：连续无线不通 $n 分钟后重启（立即生效，无需重编）"
+        resync)
+            load_cfg
+            wd_my=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
+            wd_role=$(cat /etc/bridge_role 2>/dev/null || echo '未定')
+            _ensure_ll_alias
+            wd_new=$(_discover_peer) || wd_new=''
+            [ -n "$wd_new" ] && echo "$wd_new" > "$DISCOVERED" 2>/dev/null || true
+            echo '========== 改 IP 后重同步 =========='
+            echo "  本机管理 IP : $wd_my"
+            echo "  当前角色    : $wd_role"
+            echo "  自身别名    : $(_ll_self)/16"
+            echo "  互 ping 别名: $(_ll_peer)（★改 IP 不影响这条判据）"
+            echo "  对端管理 IP : ${wd_new:-未自动发现，回落 $(_resolve_peer)}"
+            echo '===================================='
+            _ip_warn "$wd_my"
+            _restart_if_running
+            echo '已重同步并重启机器狗；两台网桥都改了 IP 就各跑一次 resync。'
             ;;
+        set-delay)
+            _num_or_die "${2:-}" 120 'set-delay'
+            [ "$2" -ge 1 ] || { echo 'set-delay 至少 1 分钟（0 会立刻重启，已拒绝）'; exit 1; }
+            _set delay "$2"; echo "已设：连续不通 $2 分钟后重启（立即生效）" ;;
+        set-grace)
+            _num_or_die "${2:-}" 120 'set-grace'
+            _set grace "$2"; echo "已设：开机宽限 $2 分钟" ;;
+        set-interval)
+            _num_or_die "${2:-}" 3600 'set-interval'
+            [ "$2" -ge 1 ] || { echo '间隔至少 1 秒'; exit 1; }
+            _set interval "$2"; echo "已设：每 $2 秒检查一次" ;;
+        set-max-reboots)
+            _num_or_die "${2:-}" 20 'set-max-reboots'
+            _set max_reboots "$2"; echo "已设：连续重启上限 $2 次" ;;
+        set-mode)
+            case "${2:-}" in or|ping|wireless) _set mode "$2"; echo "判据模式已设为 $2" ;;
+                             *) echo '用法: set-mode or|ping|wireless'; exit 1 ;; esac ;;
+        set-peer)
+            _set peer "${2:-off}"; echo "对端已设为 '${2:-off}'（auto=自动推导；off=不 ping）" ;;
+        set-anchor)
+            _set anchor "${2:-}"; echo "锚点已设为 '${2:-}'（空=不启用）" ;;
         on)   _set enabled 1; echo '已启用机器狗'; /etc/init.d/bridge-watchdog start >/dev/null 2>&1 || true ;;
         off)  _set enabled 0; echo '已停用机器狗（重启后也不会自启）'; /etc/init.d/bridge-watchdog stop >/dev/null 2>&1 || true ;;
         dryrun)
             case "${2:-}" in on|1) _set dryrun 1; echo 'dryrun=1：只记日志，不会真重启' ;;
                              off|0) _set dryrun 0; echo 'dryrun=0：达到延时会真重启' ;;
-                             *) echo '用法: bridge-watchdog dryrun on|off'; exit 1 ;; esac
-            ;;
-        set-interval)
-            n=${2:-}
-            case "$n" in ''|*[!0-9]*) echo '用法: bridge-watchdog set-interval 秒数（≥1）'; exit 1 ;; esac
-            [ "$n" -ge 1 ] || { echo '最小 1 秒'; exit 1; }
-            _set interval "$n"; echo "已设：每 $n 秒检查一次（立即生效）"
-            ;;
-        set-grace)
-            n=${2:-}
-            case "$n" in ''|*[!0-9]*) echo '用法: bridge-watchdog set-grace 分钟'; exit 1 ;; esac
-            _set grace "$n"; echo "已设：开机宽限 $n 分钟（立即生效）"
-            ;;
-        set-peer)
-            v=${2:-}
-            if [ "$v" = auto ]; then
-                _set peer auto
-                load_cfg
-                echo "已设：自动发现对端 → ${PEER:-（当前未解析到，退回无线关联）}"
-            elif [ -z "$v" ]; then
-                _set peer ''; echo '已设：peer 留空，只查 5G WDS 无线关联'
-            else
-                _set peer "$v"; echo "已设：ping 对端 $v（★ 若这是本机地址会被自动忽略）"
-            fi
-            ;;
-        rebind)
-            load_cfg
-            echo "peer 配置 = $PEER_CFG"
-            echo "解析结果 = ${PEER:-（未解析到，退回无线关联判据）}"
-            echo "本机管理 IP = $(_local_ip_main 2>/dev/null || echo '-')"
-            ;;
+                             *) echo '用法: bridge-watchdog dryrun on|off'; exit 1 ;; esac ;;
         set-iface) _set iface "${2:-auto}"; echo "WDS 接口已设为 '${2:-auto}'" ;;
         *) usage ;;
     esac

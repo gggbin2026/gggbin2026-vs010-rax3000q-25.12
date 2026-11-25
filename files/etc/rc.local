@@ -97,7 +97,7 @@ EOF
     }
     # ② ★ 旧 overlay 残留的 `option Interface 'lan'` 是 SSH 连不上的真根因：
     #    21.02 dropbear.init 在 BOOT 阶段遇到 Interface 会直接 return 0（不建实例），
-    #    且主备把 .241 改 .242 后不会自动重绑。这里就地清掉，不依赖编译期文件是否被盖。
+    #    且主备把 172.10.10.241 改 172.10.10.242 后不会自动重绑。这里就地清掉，不依赖编译期文件是否被盖。
     if grep -qiE "^[[:space:]]*option[[:space:]]+Interface[[:space:]]" /etc/config/dropbear 2>/dev/null; then
         sed -i '/^[[:space:]]*option[[:space:]]*Interface[[:space:]]/d' /etc/config/dropbear 2>/dev/null
         log "已清除旧 overlay 的 dropbear Interface 绑定（改为监听 0.0.0.0:22）"
@@ -119,55 +119,37 @@ if [ -f /usr/sbin/wifi-heal ]; then
       sh /usr/sbin/dhcp-guard  >/dev/null 2>&1 ) &
 fi
 
+log "开机兜底完成：LuCI / uhttpd / SSH 已校验，无线自愈 + DHCP 防护已排入后台"
 
-# ⑥【第 51 次】每次开机兜底：删除 WAN/WAN6、关 firewall、NTP 客户端指向内网两台、确认 STP
-#   专治 sysupgrade 勾「保留配置」把旧 overlay 带回来（99-bridge-ready 首启跑一次就自删）。
-#   只改配置、不 restart network（会断 SSH）；编译期配置本来就对，这里只纠偏。
-if command -v uci >/dev/null 2>&1; then
-    NEED=0
-    # 用 show 判「段是否存在」，不依赖 uci get 的返回码（不同 UCI 版本对
-    # 空段/不存在段行为不一），也保证第二次开机不再写 flash。
-    for S in network.wan network.wan6 dhcp.wan dhcp.wan6; do
-        if [ -n "$(uci -q show "$S" 2>/dev/null)" ]; then
-            uci -q delete "$S" 2>/dev/null; NEED=1
-        fi
-    done
-    [ "$(uci -q get network.lan.stp 2>/dev/null)" = "1" ] || {
-        uci -q set network.lan.stp='1' 2>/dev/null; NEED=1; }
-    [ "$NEED" = 1 ] && {
-        uci -q commit network 2>/dev/null
-        log "已清除旧 overlay 的 wan/wan6 并确认 STP=1"
-    }
+# ── 第 47 次：干净系统 / 低资源占用 ───────────────────────────────
+# 全仓无任何 crontab / at 任务，以下 4 个常驻服务对「纯二层 AP / 网桥」无用：
+#   cron         —— 没有定时任务
+#   ucitrack     —— 老版 LuCI 配置联动；25.12 走 ubus/rpcd，且未编任何第三方 app
+#   led          —— 不点灯（DTS 里 LED 节点保留，不影响射频/网口）
+#   gpio_switch  —— 不处理按键（VS010 仅 WPS 键，哑 AP 用不到）
+# ★ 刻意保留：network / dropbear / ttyd / uhttpd / rpcd / dnsmasq / wpad /
+#   ntp-poller(NTP 周期校时) / urngd(SSH 熵) / sysfixtime / ubihealthd / log /
+#   system / qca-nss-drv / qca-nss-pbuf / skb_recycler + 本仓 5 个开机自检。
+# ★ packet_steering 不关：official-25.12.6 基线无 NSS，软转发仍需它做多核 RPS。
+# 想恢复任一服务：/etc/init.d/<名字> enable && /etc/init.d/<名字> start
+for s in cron ucitrack led gpio_switch; do
+    [ -x "/etc/init.d/$s" ] || continue
+    "/etc/init.d/$s" stop    2>/dev/null || true
+    "/etc/init.d/$s" disable 2>/dev/null || true
+done
 
-    # 防火墙：关服务、保留包（NSS/ECM 依赖 conntrack 模块，不是 firewall 服务）
-    if [ -x /etc/init.d/firewall ] && /etc/init.d/firewall enabled 2>/dev/null; then
-        /etc/init.d/firewall stop    >/dev/null 2>&1
-        /etc/init.d/firewall disable >/dev/null 2>&1
-        log "firewall 服务已停用（包保留，依赖自洽）"
-    fi
 
-    # NTP：只做客户端，两个内网服务器；配置已对就不写 flash
-    NTP_NOW=$(uci -q get system.ntp.server 2>/dev/null | tr '\n' ' ')
-    case "$NTP_NOW" in
-        *192.168.1.254*172.10.10.254*) : ;;
-        *)
-            uci -q set system.ntp.enabled='1'        2>/dev/null
-            uci -q set system.ntp.enable_server='0'  2>/dev/null
-            uci -q delete system.ntp.server          2>/dev/null
-            uci -q add_list system.ntp.server='192.168.1.254'  2>/dev/null
-            uci -q add_list system.ntp.server='172.10.10.254'  2>/dev/null
-            uci -q commit system                     2>/dev/null
-            [ -x /etc/init.d/sysntpd ] && /etc/init.d/sysntpd restart >/dev/null 2>&1
-            log "NTP 客户端已指向内网 192.168.1.254 / 172.10.10.254"
-            ;;
-    esac
-    [ -x /etc/init.d/sysntpd ] && /etc/init.d/sysntpd enable >/dev/null 2>&1
-    # 【第 53 次】NTP 定时同步（默认 5 分钟）每次开机兜底 enable，防「保留配置」丢失
-    [ -x /etc/init.d/ntp-sync ] && /etc/init.d/ntp-sync enable >/dev/null 2>&1
+# ── 第 51 次：NTP 每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）──
+# 开机每次都校验一遍，专治 sysupgrade「保留配置」把旧 rc.d 链接带回来。
+# 兜底：ntp-poller 没编进固件时不碰 sysntpd，避免彻底没有 NTP。
+if [ -f /etc/init.d/ntp-poller ]; then
+    chmod 755 /etc/init.d/ntp-poller /usr/sbin/ntp-poller 2>/dev/null || true
+    /etc/init.d/sysntpd stop     2>/dev/null || true
+    /etc/init.d/sysntpd disable  2>/dev/null || true
+    /etc/init.d/ntp-poller enable  2>/dev/null || true
+    /etc/init.d/ntp-poller restart 2>/dev/null || true
+else
+    [ -x /etc/init.d/sysntpd ] && { /etc/init.d/sysntpd enable 2>/dev/null || true; /etc/init.d/sysntpd restart 2>/dev/null || true; }
 fi
 
-log "开机兜底完成：LuCI / uhttpd / SSH / WAN / NTP / STP / firewall / 无线 / DHCP 防护 已校验"
-
-# 第 39 次：ART 实证偏移只读报告（绝不写校准文件；成功态 CAL version=0 本来就不切）
-[ -x /usr/sbin/wifi-art-cal ] && /usr/sbin/wifi-art-cal status >/dev/null 2>&1 || true
 exit 0

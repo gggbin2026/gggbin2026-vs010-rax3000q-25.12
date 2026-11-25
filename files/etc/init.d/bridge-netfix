@@ -14,7 +14,7 @@ STOP=10
 logfix() { logger -t bridge-netfix "$*" 2>/dev/null || true; }
 
 start() {
-    # 【第 19 次校准】管理地址从 UCI 读，WDS 版 = .241、AP 版 = .240，
+    # 【第 19 次校准】管理地址从 UCI 读，WDS 版 / AP 版统一 = 172.10.10.241，
     # 两种模式共用本文件，不再各写一份。读不到才回落 WDS 默认。
     IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
     [ -z "$IP" ] && IP=172.10.10.241
@@ -38,7 +38,7 @@ start() {
     done
     ip link set br-lan up 2>/dev/null || true
     ip addr show br-lan 2>/dev/null | grep -qF "$IP" \
-      || ip addr add "$IP/24" dev br-lan 2>/dev/null || true
+      || ip addr add "$IP/22" dev br-lan 2>/dev/null || true
     # 【第 21 次校准】AP 模式：本机 DHCP 关，上级网段可能不是 172.10.8.0/22。
     # 额外挂一个链路本地别名 169.254.240.1/16 —— PC 设 169.254.240.2/16
     # 就能直连管理页，任何上级网段都不会冲突，也不需要 DHCP。
@@ -47,6 +47,17 @@ start() {
         ip addr show br-lan 2>/dev/null | grep -q '169\.254\.240\.1' \
           || ip addr add 169.254.240.1/16 dev br-lan 2>/dev/null || true
         logfix "AP 调试别名 169.254.240.1/16 已挂载（无 DHCP 也能连）"
+    else
+        # 第 50 次：WDS 角色别名兜底。network restart 会清掉手工 ip addr，
+        # 这里每次开机按 /etc/bridge_role 补挂；role.sh 收敛后还会再挂一次。
+        _wd_role=$(cat /etc/bridge_role 2>/dev/null || echo '')
+        case "$_wd_role" in
+            sta) _wd_ll='169.254.241.2' ;;
+            *)   _wd_ll='169.254.241.1' ;;
+        esac
+        ip addr show br-lan 2>/dev/null | grep -qF "$_wd_ll/16" \
+          || ip addr add "$_wd_ll/16" dev br-lan 2>/dev/null || true
+        logfix "WDS 角色链路本地别名 $_wd_ll/16 已兜底（机器狗互 ping，改管理 IP 不受影响）"
     fi
     logfix "br-lan / eth0+eth1 / $IP 已兜底"
 

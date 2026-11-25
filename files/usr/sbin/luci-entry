@@ -1,17 +1,27 @@
 #!/bin/sh
-# luci-entry —— 把状态页入口加进 LuCI 的 ARGON 主题（第 24 次校准）
+# luci-entry —— 可选：把状态页入口加进 LuCI 主题页脚
 #
-# 由 bridge-netfix 每次开机调用；也可串口手动跑 /usr/sbin/luci-entry。
-# 设计取舍（很重要，别改成「新建 luci-app-* 包」）：
-#   · 前面十几轮编译失败全是被 Kconfig select / 依赖链掀翻的；
-#   · 不新增任何包、不改主题包源码、不碰 .config / slim / DTS；
-#   · 本脚本本身编译进 files/，开机时往已安装的 ARGON 模板注入一个
-#     带标记的纯 HTML 块（页脚入口），幂等、可重复、找不到模板就跳过。
-#   · 三个状态页的深色卡片 / 蓝色主色本来就对齐 ARGON 视觉，无需改 CSS 框架。
+# 【2026-11-24 改：默认不注入】老仓库「主题页面进不去」有一类根因就是开机
+# 脚本往 /usr/lib/lua/luci/view/themes/*/footer.htm 里塞 HTML：25.12 的 LuCI
+# 已转向 ucode 模板，路径、语法、只读 squashfs 任一不对就会把模板写坏，
+# 之后 /cgi-bin/luci 直接 500。状态页本来就是独立静态页（/bridge/、/ap/），
+# 不依赖 LuCI，少改一个文件就少一个报错点。
 #
-# 全程只读判断 + 只写主题模板一个文件；失败只记日志，绝不阻断开机。
+# 现在必须显式开启才会动模板：
+#   touch /etc/luci-entry-enable && /usr/sbin/luci-entry
+# 默认（无标记文件）只打一行日志后退出，绝不碰任何主题文件。
+# 三个状态页仍可直接访问，页面底部也有指向 /cgi-bin/luci 的按钮。
+#
+# 全程只读判断；失败只记日志，绝不阻断开机。
 
 LOG() { logger -t luci-entry "$*" 2>/dev/null || true; }
+
+# 显式开关：没有标记文件就完全不碰主题模板（这是「页面不报错」的关键）
+if [ ! -f /etc/luci-entry-enable ]; then
+    LOG "未开启（默认）：不修改任何主题模板；状态页仍可直接访问 /bridge/ /ap/"
+    echo "luci-entry: 默认不注入。要开启：touch /etc/luci-entry-enable && luci-entry"
+    exit 0
+fi
 
 # 按固件模式选入口（WDS 网桥版 / 普通 AP 版）
 if [ "$(cat /etc/firmware_mode 2>/dev/null)" = 'ap' ]; then

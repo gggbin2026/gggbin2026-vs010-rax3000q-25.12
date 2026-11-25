@@ -1,5 +1,5 @@
 # 【AP 模式】本机不做 DHCP 服务端：地址由上级路由统一分配，避免双 DHCP 抢地址。
-# 纯二层透传上级的 DHCP / DNS / 网关；br-lan 上只有管理地址 .240 是静态的。
+# 纯二层透传上级的 DHCP / DNS / 网关；br-lan 上只有管理地址 172.10.10.241 是静态的。
 
 config dnsmasq 'main'
 	option domainneeded '1'
@@ -22,9 +22,6 @@ config dnsmasq 'main'
 config dhcp 'lan'
 	option interface 'lan'
 	option ignore '1'
-
-config odhcpd 'odhcpd'
-	option maindhcp '0'
-	option leasefile '/tmp/hosts/odhcpd'
-	option leasetrigger '/usr/sbin/odhcpd-update'
-	option loglevel '4'
+	# 第 44 次：IPv6 已编译期关闭，odhcpd / DHCPv6 / RA 相关包都不编，
+	# 原 config odhcpd 'odhcpd' 段删除（包不存在时留着只会让 LuCI 多一个空菜单）。
+	# 运行期 99-no-ipv6 还会再兜一层 uci delete dhcp.lan.dhcpv6/ra/ndp。

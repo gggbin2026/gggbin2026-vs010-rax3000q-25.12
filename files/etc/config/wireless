@@ -1,5 +1,5 @@
 # QSDK 5.4 / OpenWrt 21.02 编译期无线配置（双仓通用）
-# ⚠ 21.02 用 option hwmode（11g/11a），不是 22.03+ 的 option band。
+# ⚠ OpenWrt 25.12 用 option band（2g/5g）；21.02 的 hwmode 已升级。
 # ⚠ 不写 option path，让 wifi 脚本按 phy0/phy1 顺序绑定。
 # 2.4G = 常驻调试 AP（不参与 WDS），无论被分成 ap 还是 sta 都能连上管理页；
 # 5G  = WDS 链路，开机由 bridge-role 自动收敛成「一主(ap) 一备(sta)」。
@@ -10,7 +10,7 @@
 
 config wifi-device 'radio0'
 	option type 'mac80211'
-	option hwmode '11g'
+	option band '2g'
 	option channel '1'
 	option htmode 'HE40'
 	option country 'CN'
@@ -27,7 +27,7 @@ config wifi-iface 'default_radio0'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
-	option hwmode '11a'
+	option band '5g'
 	option channel '36'
 	option htmode 'HE160'
 	option country 'CN'

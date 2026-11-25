@@ -18,7 +18,7 @@
 CGI=/www/cgi-bin/bridge
 CONF=/etc/bridge.conf
 PAGE=/www/bridge/index.html
-# 管理 IP 优先读编译期写死的 network.lan.ipaddr，回落 .241
+# 管理 IP 优先读编译期写死的 network.lan.ipaddr，回落 172.10.10.241
 UCI_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
 [ -z "$UCI_IP" ] && UCI_IP=172.10.10.241
 

@@ -1,6 +1,9 @@
 #!/bin/sh /etc/rc.common
 # WDS 无线看门狗（机器狗）· procd 服务
-# 由 99-bridge-ready 在首次开机 enable+start；也可用 bridge-watchdog on/off 控制。
+# 第 49 次：WDS 网桥默认启用（enabled=1），99-bridge-ready 里 enable+start。
+# AP 模式由 files.ap/etc/config/wdsdog 覆盖 enabled=0，
+# 且 AP 的 99-bridge-ready 显式 stop+disable，刷 AP 固件不会自动重启。
+# 判据 / 延时 / 重启上限全部在 /etc/config/wdsdog，UCI 改完 reload 即生效。
 USE_PROCD=1
 START=95
 STOP=10

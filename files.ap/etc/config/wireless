@@ -1,11 +1,11 @@
 # 【AP 模式】两个射频都是普通 AP，无 wds / 无 4addr / 无自动主备。
 # SSID 故意与 WDS 版（WDS_AP / BRIDGE-SETUP）不同，开机一眼能分清刷的是哪套。
-# 21.02 用 option hwmode（11g / 11a），不是 22.03+ 的 option band。
+# OpenWrt 25.12 用 option band（2g/5g）；21.02 的 hwmode 已升级。
 # 5G 仍 ch36 + HE160（36~64 共 160MHz 连续频谱）；驱动不支持自动回落 HE80。
 
 config wifi-device 'radio0'
 	option type 'mac80211'
-	option hwmode '11g'
+	option band '2g'
 	option channel '1'
 	option htmode 'HE40'
 	option country 'CN'
@@ -28,7 +28,7 @@ config wifi-iface 'default_radio0'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
-	option hwmode '11a'
+	option band '5g'
 	option channel '36'
 	option htmode 'HE160'
 	option country 'CN'
