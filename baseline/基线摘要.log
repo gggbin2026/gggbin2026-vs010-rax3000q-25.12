@@ -131,4 +131,25 @@
   [32m✅ 新增服务/工具                 [0m PASS，提示「基线外新增项（允许）」
 
 [31m[1m🔴 刷完第一件事：passwd 改掉 admin 弱密码[0m
+
+[33m【十三】第 54 次修正：编译失败复盘（2026-11-25）[0m
+[31m[1m  🔴 11-25 02:28 编译在 make 之前 exit 1：[0m
+[31m[1m     vs010    缺 luci-i18n-base-zh-cn nftables kmod-bridge[0m
+[31m[1m     rax3000q 再缺 ipq-wifi-cucc_vs010[0m
+  根因：第 52 次把「defconfig 后 .config 精确 =y」当成冻结判据，误伤 Kconfig 合法收敛。
+         25.12 内核 CONFIG_BRIDGE=y 内建、netsupport.mk 已无 KernelPackage/bridge；
+         上一轮同树同 seed 输出「760 个 =y 符号」并跑到 make 48 分钟可佐证。
+
+[31m[1m  🔴 A 层（硬阻断）：config/*.seed 里 29 项逐条查 =y —— 这才是「只增不减」的真保障[0m
+     B 层：核心锚点 5 项精确 =y 阻断；Kconfig 收敛只警告；符号+包源都无才真阻断
+     防篡改：FROZEN_MIN=82 + 锚点复核（不变）
+
+[31m[1m  🔴 顺带修掉：构建树排除 14 个包外野文件（仓库不动，KEEP_EXTRA_FILES=1 可逆）[0m
+[31m[1m  🔴 顺带修掉：nft 缺失不再静默空转（l2-guard 红字 + health-fix 明确报告）[0m
+
+[32m  ✅ 全部 =y → PASS(29/29)   ✅ 复现 4 项收敛 → PASS   ✅ rax3000q → PASS[0m
+[32m  ✅ 删 seed → A 层拦 exit 1 ✅ 核心锚点收敛 → B 层拦 exit 1 ✅ 新增 → PASS[0m
+
+[31m[1m  🔴 82 项冻结基线一个没动、一个没删；第 51/50/49 次全部原样保留[0m
+
 ==================================================================

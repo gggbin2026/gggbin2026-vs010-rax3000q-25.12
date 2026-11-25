@@ -180,5 +180,33 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#eef1f4;border
 <div class="row"><span class="k">从清单里删一行</span><span class="v">✅ 被拦 <code>FAIL</code>（81 &lt; 82 下限）</span></div>
 <div class="row"><span class="k">新增 init.d + sbin</span><span class="v">✅ <code>PASS</code>，提示「基线外新增项（允许）」</span></div>
 </div>
-<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
+<h2 class="red">🔴 十三、第 54 次修正：编译失败复盘（2026-11-25）</h2>
+<div class="redbox"><b>11-25 02:28 的编译在 make 之前 <code>exit 1</code></b>，两台同一处：<br>
+<code>🔴 冻结基线包缺失：luci-i18n-base-zh-cn nftables kmod-bridge（rax3000q 多 ipq-wifi-cucc_vs010）</code><br><br>
+<b>不是谁删了插件，是第 52 次判据写错了地方</b>：把「defconfig 之后 .config 里精确 =y」当成冻结判据。
+25.12 的 <code>target/linux/generic/config-6.12</code> 里 <code>CONFIG_BRIDGE=y</code>（内核内建），
+<code>netsupport.mk</code> 已无 <code>KernelPackage/bridge</code>；i18n / nftables 属符号合并；
+<code>ipq-wifi-cucc_vs010</code> 只在 vs010 生成本地包。上一轮同树同 seed 输出「✓ 760 个 =y 符号」
+并跑到 make 48 分钟 —— 这 4 个从来就不在 .config 里，是 Kconfig 行为，不是「减少插件」。</div>
+<div class="card">
+<div class="row"><span class="k red">🔴 A 层 seed 声明（硬阻断）</span><span class="v"><code>config/*.seed</code> 里 29 项逐条查 <code>=y</code>；删/改/注释 → <span class="bad">::error:: + exit 1</span>。<b>这才是「只增不减」的真保障</b></span></div>
+<div class="row"><span class="k">B 层 defconfig 分层诊断</span><span class="v">核心锚点 5 项必须精确 <code>=y</code>；其余 Kconfig 收敛只 <code>::warning::</code>；符号与包源都找不到才真阻断</span></div>
+<div class="row"><span class="k">防篡改（不变）</span><span class="v"><code>FROZEN_MIN=82</code> + 锚点复核，连清单一起删行也 FAIL</span></div>
+</div>
+<div class="redbox">🔴 <b>顺带修掉三件隐患</b><br>
+① <code>prepare.sh</code> 构建树排除 14 个包外野文件（仓库文件一个不删，<code>KEEP_EXTRA_FILES=1</code> 可逆）：
+另一套 <code>ntp-sync</code> 双 NTP 守护、<code>dhcp-guard</code> 重复开机自启、约 1.5 MB QSDK 5.4 闭源 WiFi 固件。<br>
+② <b>nft 缺失不再静默空转</b>：<code>l2-guard</code> 写 <code>/tmp/l2guard.reason</code> + 红字日志，
+<code>health-fix</code> 明确报告「无线 DHCP 防护【未生效】」；刷后 <code>apk list nftables*</code> 可复核。<br>
+③ 收敛清单写进 <code>build.env</code> → 设备端 <code>/etc/build-info</code> 可追溯。</div>
+<div class="card">
+<div class="row"><span class="k">全部 29 项精确 =y</span><span class="v ok">✅ PASS（29/29）</span></div>
+<div class="row"><span class="k">复现 02:28：4 项收敛</span><span class="v ok">✅ PASS（25 精确 =y / 4 收敛只警告 / 0 真缺）</span></div>
+<div class="row"><span class="k">rax3000q 本地包不生成</span><span class="v ok">✅ PASS（机型条件项跳过）</span></div>
+<div class="row"><span class="k">删 seed 里 luci-app-ttyd</span><span class="v bad">✅ 被 A 层拦 exit 1</span></div>
+<div class="row"><span class="k">核心锚点被收敛</span><span class="v bad">✅ 被 B 层拦 exit 1</span></div>
+<div class="row"><span class="k">新增插件 / 服务</span><span class="v ok">✅ PASS，提示「允许」</span></div>
+</div>
+<div class="redbox">🔴 <b>82 项冻结基线一个没动、一个没删</b>；第 51 次 NTP 5 分钟循环、第 50 次改 IP 防护、第 49 次机器狗、管理网段、SSH/TTYD、防火墙/IPv6 关、WAN+LAN 同桥、STP、简洁日志全部原样保留。</div>
+<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据修正于第 54 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
 </div></body></html>
