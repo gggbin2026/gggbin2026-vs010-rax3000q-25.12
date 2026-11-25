@@ -22,6 +22,9 @@ config dnsmasq 'main'
 config dhcp 'lan'
 	option interface 'lan'
 	option ignore '1'
-	# 第 44 次：IPv6 已编译期关闭，odhcpd / DHCPv6 / RA 相关包都不编，
-	# 原 config odhcpd 'odhcpd' 段删除（包不存在时留着只会让 LuCI 多一个空菜单）。
-	# 运行期 99-no-ipv6 还会再兜一层 uci delete dhcp.lan.dhcpv6/ra/ndp。
+
+config odhcpd 'odhcpd'
+	option maindhcp '0'
+	option leasefile '/tmp/hosts/odhcpd'
+	option leasetrigger '/usr/sbin/odhcpd-update'
+	option loglevel '4'

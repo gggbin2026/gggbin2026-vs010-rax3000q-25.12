@@ -1,6 +1,5 @@
 #!/bin/sh /etc/rc.common
-# LuCI /etc/config/luci 早期自修（START=18，早于 uhttpd 的 50）
-# 同时由 /usr/sbin/luci-fix 按实际目录重写主题下拉，杜绝「选到不存在的主题 → 500」
+# 【第 30 次】LuCI /etc/config/luci 早期自修（START=18，早于 uhttpd 的 50）
 #
 # 为什么需要它：dispatcher.lua:427 "unable to find section 'main'" 只在
 # /etc/config/luci 缺【named section core 'main'】时报。编译期 files/etc/config/luci
@@ -24,13 +23,6 @@ config core 'main'
 	option lang 'zh_cn'
 	option mediaurlbase '/luci-static/bootstrap'
 	option resourcebase '/luci-static/resources'
-
-config internal 'sauth'
-	option sessionpath '/var/run/luci'
-	option sessiontime '3600'
-
-config internal 'themes'
-	option Bootstrap '/luci-static/bootstrap'
 EOF
             chmod 644 /etc/config/luci 2>/dev/null || true
         }

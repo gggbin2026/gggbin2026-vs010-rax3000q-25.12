@@ -119,5 +119,55 @@ if [ -f /usr/sbin/wifi-heal ]; then
       sh /usr/sbin/dhcp-guard  >/dev/null 2>&1 ) &
 fi
 
-log "开机兜底完成：LuCI / uhttpd / SSH 已校验，无线自愈 + DHCP 防护已排入后台"
+
+# ⑥【第 51 次】每次开机兜底：删除 WAN/WAN6、关 firewall、NTP 客户端指向内网两台、确认 STP
+#   专治 sysupgrade 勾「保留配置」把旧 overlay 带回来（99-bridge-ready 首启跑一次就自删）。
+#   只改配置、不 restart network（会断 SSH）；编译期配置本来就对，这里只纠偏。
+if command -v uci >/dev/null 2>&1; then
+    NEED=0
+    # 用 show 判「段是否存在」，不依赖 uci get 的返回码（不同 UCI 版本对
+    # 空段/不存在段行为不一），也保证第二次开机不再写 flash。
+    for S in network.wan network.wan6 dhcp.wan dhcp.wan6; do
+        if [ -n "$(uci -q show "$S" 2>/dev/null)" ]; then
+            uci -q delete "$S" 2>/dev/null; NEED=1
+        fi
+    done
+    [ "$(uci -q get network.lan.stp 2>/dev/null)" = "1" ] || {
+        uci -q set network.lan.stp='1' 2>/dev/null; NEED=1; }
+    [ "$NEED" = 1 ] && {
+        uci -q commit network 2>/dev/null
+        log "已清除旧 overlay 的 wan/wan6 并确认 STP=1"
+    }
+
+    # 防火墙：关服务、保留包（NSS/ECM 依赖 conntrack 模块，不是 firewall 服务）
+    if [ -x /etc/init.d/firewall ] && /etc/init.d/firewall enabled 2>/dev/null; then
+        /etc/init.d/firewall stop    >/dev/null 2>&1
+        /etc/init.d/firewall disable >/dev/null 2>&1
+        log "firewall 服务已停用（包保留，依赖自洽）"
+    fi
+
+    # NTP：只做客户端，两个内网服务器；配置已对就不写 flash
+    NTP_NOW=$(uci -q get system.ntp.server 2>/dev/null | tr '\n' ' ')
+    case "$NTP_NOW" in
+        *192.168.1.254*172.10.10.254*) : ;;
+        *)
+            uci -q set system.ntp.enabled='1'        2>/dev/null
+            uci -q set system.ntp.enable_server='0'  2>/dev/null
+            uci -q delete system.ntp.server          2>/dev/null
+            uci -q add_list system.ntp.server='192.168.1.254'  2>/dev/null
+            uci -q add_list system.ntp.server='172.10.10.254'  2>/dev/null
+            uci -q commit system                     2>/dev/null
+            [ -x /etc/init.d/sysntpd ] && /etc/init.d/sysntpd restart >/dev/null 2>&1
+            log "NTP 客户端已指向内网 192.168.1.254 / 172.10.10.254"
+            ;;
+    esac
+    [ -x /etc/init.d/sysntpd ] && /etc/init.d/sysntpd enable >/dev/null 2>&1
+    # 【第 53 次】NTP 定时同步（默认 5 分钟）每次开机兜底 enable，防「保留配置」丢失
+    [ -x /etc/init.d/ntp-sync ] && /etc/init.d/ntp-sync enable >/dev/null 2>&1
+fi
+
+log "开机兜底完成：LuCI / uhttpd / SSH / WAN / NTP / STP / firewall / 无线 / DHCP 防护 已校验"
+
+# 第 39 次：ART 实证偏移只读报告（绝不写校准文件；成功态 CAL version=0 本来就不切）
+[ -x /usr/sbin/wifi-art-cal ] && /usr/sbin/wifi-art-cal status >/dev/null 2>&1 || true
 exit 0

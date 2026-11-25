@@ -1,21 +1,33 @@
-# WDS 无线看门狗（机器狗）默认配置 —— 第 45 次：默认停用
-# ★ 用户实测：机器狗会导致刷机后自动重启。
-#   旧默认 enabled=1 / delay=5 / grace=6 → 单机、无对端、或只当有线网桥时，
-#   开机约 6+5=11 分钟后就 reboot -f，之后每个周期再来一次（脚本注释原话：
-#   「一直不通会 grace+delay 一个周期反复重启，这是看门狗的设计」）。
-#   刷完连 SSH 排障的窗口都没了，和「最稳、最少系统问题」直接冲突。
-# 因此：默认 enabled='0' + dryrun='1' 双保险；init.d 在 enabled!=1 时直接 return，
-#   首启脚本 99-bridge-ready 也改成 stop+disable（不再 enable+start）。
-# ★ 脚本 /usr/sbin/bridge-watchdog 与 init.d 仍完整保留，成对 WDS 部署时可手动开：
-#     bridge-watchdog on                 # 启用
-#     bridge-watchdog set-peer 192.168.1.242   # 强烈建议：ping 对端判通最准
-#     bridge-watchdog set-delay 10      # 或延长触发时间
-#   启前先 bridge-watchdog dryrun on 观察一两天，确认不会误重启再设回 0。
+# WDS 无线看门狗（机器狗）默认配置 · 第 53 次：按用户要求恢复启用
+#
+# ★ 机器狗从来没被删除：脚本、procd 服务、判据、防误重启保护一直都在。
+#   第 49 次只是把【出厂开关】关掉（enabled=0 / dryrun=1），因为当时 VS010
+#   单机刷完被判「链路断了」循环 reboot -f。第 53 次恢复启用，但保留那条
+#   关键保护：★「从未成功关联过」绝不重启 ★ —— 单机 / 未配对 / 无线没起来
+#   只记日志，不会重启。只有【配对成功后链路连续不通】才按 delay 重启。
+#
+#   enabled=1 / delay=5 / dryrun=0 → 连续不通 5 分钟自动重启（你要的默认值）
+#   ★ 自定义：bridge-watchdog set-delay N     （0~120 分钟，立即生效，不用重编）
+#              bridge-watchdog set-interval N  （检查间隔秒，默认 30）
+#              bridge-watchdog set-grace N     （开机宽限分钟，默认 6）
+#              bridge-watchdog set-peer IP     （手工指定对端管理 IP）
+#              bridge-watchdog set-peer auto   （自动发现，推荐）
+#              bridge-watchdog off             （刷机 / TTL 调试前先关）
+#              bridge-watchdog dryrun on       （只记日志不重启，观察一两天）
+#              bridge-watchdog status          （看当前延时 / 判据 / 还剩多久）
+#
+# ★ 判据：peer=auto 时从 5G WDS 链路对端的 MAC 反查邻居表拿真实 IP，
+#   自动排除本机地址（第 52 次所有设备统一 172.10.10.241，ping 自己会永远通）；
+#   解析不到就退回「无线关联」判据，绝不因为查不到对端就判成不通而重启。
+# ★ 改管理 IP 时：循环会检测到 IP 变化 → 重置连续计时 + 重新发现对端，
+#   不重启；改 IP 的工具也会提示同步 set-peer（见下载页红色说明）。
+#
+# 改完不用重编：uci commit wdsdog && /etc/init.d/bridge-watchdog restart
 config wdsdog 'main'
-	option enabled '0'       # 0=默认停用（不会自动重启）；1=成对 WDS 部署时手动开
-	option delay '5'         # 连续「无线不通」多少分钟才重启（0~120，启用后生效）
-	option grace '6'         # 开机宽限：等 ath11k 校准 + bridge-role 收敛
-	option interval '30'     # 每多少秒检查一次
+	option enabled '1'       # ★ 第 53 次恢复启用（第 49 次曾为 0）
+	option delay '5'         # ★ 连续不通 5 分钟重启；set-delay N 自定义 0~120
+	option grace '6'         # 开机宽限 6 分钟：等无线校准 + 角色收敛
+	option interval '30'     # 每 30 秒检查一次；set-interval N 自定义
 	option iface 'auto'      # 只盯 WDS 那个 5G 接口
-	option peer ''           # 成对部署建议填对端管理 IP，以 ping 为准
-	option dryrun '1'        # 双保险：即便被手动 on，也先只记日志不真重启
+	option peer 'auto'       # ★ 自动发现对端 IP；也可填具体 IP / 留空用无线关联
+	option dryrun '0'        # ★ 真重启（观察期可 dryrun on）

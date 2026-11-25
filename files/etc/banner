@@ -3,13 +3,16 @@
   ║   Nwrt WDS 网桥固件  (WDS 模式 · 不是普通 AP)                ║
   ╚══════════════════════════════════════════════════════════════╝
 
-  管理页 : http://192.168.1.241     LuCI: /cgi-bin/luci
+  管理页 : http://172.10.10.241     LuCI: /cgi-bin/luci
   账号   : root / admin
   5G WDS : WDS_AP / WDS123456   (ch36 · HE160 · 4addr)
   2.4G   : BRIDGE-SETUP / admin12345
-  状态页 : http://192.168.1.241/bridge/
+  状态页 : http://172.10.10.241/bridge/
   主/备  : 刷完自动一主一备（主 .241 / 备 .242，DHCP 主开备关）
-  机器狗 : 默认停用（不会自动重启）；成对 WDS 可 bridge-watchdog on
+  机器狗 : ★已启用★ 连续不通 5 分钟自动重启（第53次按需求恢复）
+           自定义: bridge-watchdog set-delay N（分钟，立即生效）
+           单机/未配对/改IP 不会误重启；改IP前先 off，改完 set-peer auto 再 on
+           观察: dryrun on ｜ 停用: off ｜ 状态: status
   无线自检: wifi-bdf-check（BDF / 校准 / 每信道功率 / 关联终端）
   VS010 : 已装配本机原厂 BDF（ipq-wifi-cucc_vs010），非 RAX3000Q 板级表
   ------------------------------------------------------------

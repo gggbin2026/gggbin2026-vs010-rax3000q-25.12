@@ -20,7 +20,7 @@ CONF=/etc/bridge.conf
 PAGE=/www/bridge/index.html
 # 管理 IP 优先读编译期写死的 network.lan.ipaddr，回落 .241
 UCI_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '')
-[ -z "$UCI_IP" ] && UCI_IP=192.168.1.241
+[ -z "$UCI_IP" ] && UCI_IP=172.10.10.241
 
 if [ ! -f "$CGI" ] || [ ! -f "$PAGE" ]; then
     logger -t bridge-status '网桥状态页文件缺失，跳过（检查 files/ 是否随镜像打包）' 2>/dev/null || true

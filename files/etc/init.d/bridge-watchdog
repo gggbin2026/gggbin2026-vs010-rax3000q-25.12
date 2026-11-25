@@ -1,8 +1,6 @@
 #!/bin/sh /etc/rc.common
 # WDS 无线看门狗（机器狗）· procd 服务
-# 第 45 次：默认停用。99-bridge-ready 现在是 stop+disable，不再 enable+start。
-# 只有用户在成对 WDS 部署时手动 `bridge-watchdog on` 才会启用；
-# 且 wdsdog 默认 dryrun=1，先只记日志不真重启。
+# 由 99-bridge-ready 在首次开机 enable+start；也可用 bridge-watchdog on/off 控制。
 USE_PROCD=1
 START=95
 STOP=10

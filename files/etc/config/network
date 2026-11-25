@@ -1,7 +1,7 @@
-# OpenWrt 25.12 DSA —— 编译期网络配置（双模式通用；port-overlay.sh 会重写为 config device）
+# QSDK 5.4 / OpenWrt 21.02 + swconfig —— 编译期网络配置（双仓通用）
 # 直接进 squashfs，不再依赖首启 board.d/02_network 生成。
-# ⚠ 源文件保留旧写法仅作历史参考，实际由 port-overlay.sh 升级；
-#   25.12 用 `config device 'br_lan'` + `list ports 'lan1 lan2 lan3 wan'`，WAN/LAN 同桥。
+# ⚠ 21.02 只认 option ifname / option type='bridge'；
+#   22.03+ 的 `config device` + `list ports` netifd 完全不解析 → br-lan 建不出来。
 # 【有线修复】关 VLAN 当傻交换；eth0 + eth1 两个 GMAC 都进桥，
 #   不管 RAX3000Q / VS010 的 CPU 口映射正反，有线帧都到得了 br-lan。
 
@@ -23,8 +23,8 @@ config interface 'lan'
 	option type 'bridge'
 	option ifname 'eth0 eth1'
 	option proto 'static'
-	option ipaddr '192.168.1.241'
-	option netmask '255.255.255.0'
+	option ipaddr '172.10.10.241'
+	option netmask '255.255.252.0'
 	option stp '1'
 	option force_link '1'
 	option ipv6 '0'

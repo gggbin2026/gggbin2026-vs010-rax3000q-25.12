@@ -7,8 +7,8 @@ config system
 	option urandom_seed '0'
 
 config timeserver 'ntp'
-	option enabled '1'
-	option enable_server '0'
-	list server 'ntp.aliyun.com'
-	list server 'time1.cloud.tencent.com'
-	list server 'cn.pool.ntp.org'
+	option enabled '1'        # 客户端开
+	option enable_server '0'   # 服务端关（纯客户端）
+	# 【第 51 次】只做 NTP 客户端，同步内网两台时间服务器（不对外提供 NTP）
+	list server '192.168.1.254'
+	list server '172.10.10.254'

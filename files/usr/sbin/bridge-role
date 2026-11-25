@@ -90,9 +90,9 @@ apply_role() {
     bridge_apply_role "$role" || { log "应用角色 $role 失败"; return 1; }
     ( /sbin/wifi up 2>/dev/null || wifi up 2>/dev/null || true ) &
     if [ "$role" = ap ]; then
-        log "角色 -> ap（主：192.168.1.241 / DHCP 开 / 租期 1h）"
+        log "角色 -> ap（主：172.10.10.241 / DHCP 开 / 租期 1h）"
     else
-        log "角色 -> sta（备：192.168.1.242 / DHCP 关）"
+        log "角色 -> sta（备：管理 IP 统一 172.10.10.241 / DHCP 关）"
     fi
 }
 

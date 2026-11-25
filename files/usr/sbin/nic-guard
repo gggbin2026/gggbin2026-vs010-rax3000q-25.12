@@ -74,11 +74,11 @@ done
 echo "[nic-guard] 自愈: eth0/eth1 已拉起并并入 br-lan" > /dev/console
 
 # 桥没管理地址时补上（不写 uci，重启即失效；正常情况编译期配置已带 .241）
-if ! ip addr show br-lan 2>/dev/null | grep -q '192.168.1.241'; then
-  ip addr add 192.168.1.241/24 dev br-lan 2>/dev/null || true
-  echo "[nic-guard] 自愈: br-lan 补 192.168.1.241/24（临时）" > /dev/console
+if ! ip addr show br-lan 2>/dev/null | grep -q '172.10.10.241'; then
+  ip addr add 172.10.10.241/22 dev br-lan 2>/dev/null || true
+  echo "[nic-guard] 自愈: br-lan 补 172.10.10.241/22（临时）" > /dev/console
 fi
 
 # STP 收敛约 30 秒；纯二层桥不需要 WAN/LAN 隔离
-echo "[nic-guard] 完成：电脑设 192.168.1.10/24 或自动 DHCP，访问 192.168.1.241" > /dev/console
+echo "[nic-guard] 完成：电脑设 172.10.10.10/22 或自动 DHCP，访问 172.10.10.241" > /dev/console
 cat "$LOG"

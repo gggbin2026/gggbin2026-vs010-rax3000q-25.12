@@ -12,8 +12,34 @@ BRIDGE_CHAN='36'                     # ★ HE160 必须用 36~64 连续段；149
 BRIDGE_HTMODE='HE160'                # ★ 5G 160MHz（不支持时驱动回落 HE80）
 BRIDGE_DIST='550'                    # 500 m × 110%；按实际距离用 bridge-distance 改
 BRIDGE_TXPWR='20'                    # 原装天线保守值；改 14dBi 平板改 19
-BRIDGE_AP_IP='192.168.1.241'         # 主（ap）
-BRIDGE_STA_IP='192.168.1.242'        # 备（sta）—— 自动错开，不用刷完手改
+BRIDGE_AP_IP='172.10.10.241'         # 【第 52 次】所有设备统一地址
+BRIDGE_NETMASK='255.255.252.0'      # /22
+BRIDGE_STA_IP="$BRIDGE_AP_IP"        # 默认与主机相同（用户要求全统一）
+# 若两台 WDS 同时插同一交换机、需要错开：把 SPLIT_ROLE_IP=1 写进
+# /etc/bridge.conf，备端自动改用 BRIDGE_STA_SPLIT；只影响 IP，不影响配对。
+BRIDGE_STA_SPLIT='172.10.10.242'
+SPLIT_ROLE_IP=0
+
+# 【第 53 次】改管理 IP → 提示同步机器狗 peer，并自动把旧 peer 迁到 auto。
+# 不这么做的话：手工填的旧对端 IP 会 ping 不通 → 连续 5 分钟误判「链路断了」→ 重启。
+_wd_ip_changed(){
+    NEW=${1:-$(uci -q get network.lan.ipaddr 2>/dev/null)}
+    command -v uci >/dev/null 2>&1 || return 0
+    P=$(uci -q get wdsdog.main.peer 2>/dev/null)
+    echo "⚠ 管理 IP 已改为 $NEW。机器狗（连续不通 5 分钟重启）不会因此误重启：" >&2
+    echo "  · 循环会自动检测到 IP 变化 → 重置计时并重新发现对端；" >&2
+    echo "  · 若你设了对端 IP，请同步改：bridge-watchdog set-peer <对端新IP>" >&2
+    echo "  · 或直接用自动发现：bridge-watchdog set-peer auto（推荐）" >&2
+    echo "  · 改 IP 前建议先 bridge-watchdog off，改完再 on" >&2
+    if [ -n "$P" ] && [ "$P" != auto ]; then
+        uci -q set wdsdog.main.peer='auto' 2>/dev/null
+        uci -q commit wdsdog 2>/dev/null
+        echo "  ✓ 旧 peer '$P' 已自动改为 auto（自动重新发现对端）" >&2
+    fi
+    logger -t bridge-watchdog "管理 IP 改为 $NEW，peer 已检查/迁移，连续计时已重置" 2>/dev/null || true
+}
+[ -r /etc/bridge.conf ] && SPLIT_ROLE_IP=$(sed -n 's/^SPLIT_ROLE_IP=//p' /etc/bridge.conf 2>/dev/null | head -1)
+[ "$SPLIT_ROLE_IP" = 1 ] && BRIDGE_STA_IP="$BRIDGE_STA_SPLIT" || BRIDGE_STA_IP="$BRIDGE_AP_IP"
 BRIDGE_LEASE='1h'                    # ★ DHCP 租期 1 小时
 
 bridge_find_5g() {
@@ -101,13 +127,14 @@ bridge_apply_role() {
     uci set network.lan.stp='1'
     uci set network.lan.force_link='1'
     uci set network.lan.proto='static'
-    # ★ 主/备自动错开管理 IP，刷完不用再手动改，避免两台都 .241 的 ARP 冲突
+    # ★ 第 52 次：默认主备统一 .241（用户要求）；SPLIT_ROLE_IP=1 时才错开防 ARP 冲突
     if [ "$role" = 'sta' ]; then
         uci set network.lan.ipaddr="$BRIDGE_STA_IP"
     else
         uci set network.lan.ipaddr="$BRIDGE_AP_IP"
     fi
-    uci set network.lan.netmask='255.255.255.0'
+    uci set network.lan.netmask="$BRIDGE_NETMASK"
+    _wd_ip_changed "$(uci -q get network.lan.ipaddr 2>/dev/null)"
     uci -q delete network.lan.gateway
     uci -q delete network.lan.dns
 

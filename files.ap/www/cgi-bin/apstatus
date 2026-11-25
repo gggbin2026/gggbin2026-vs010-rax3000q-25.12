@@ -18,6 +18,36 @@ num()  { # 空输入必须返回 0，否则 JSON 会出现 "key": ,
 }
 md5of(){ [ -r "$1" ] && md5sum "$1" 2>/dev/null | awk '{print $1}' || echo '缺失'; }
 
+# ── 第 44 次：双栈无线关联读取（开源 ath11k / 官方闭源 qca-wifi 通用）──
+# 官方 5.4.213 无 /sys/class/ieee80211，VAP 常叫 ath0/ath1；
+# iw → iwinfo → wlanconfig 三级回退，统一成 iw station dump 格式。
+wsd_dump(){
+    _if=$1; _out=''
+    if command -v iw >/dev/null 2>&1 && [ -d "/sys/class/net/$_if" ]; then
+        _out=$(iw dev "$_if" station dump 2>/dev/null)
+    fi
+    if ! printf '%s\n' "$_out" | grep -q '^Station ' && command -v iwinfo >/dev/null 2>&1; then
+        _out=$(iwinfo "$_if" assoclist 2>/dev/null | awk '
+          /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{
+            print "Station " $1; s=$2; gsub(/[^0-9-]/,"",s)
+            print "\tsignal: " s; print "\ttx bitrate: - MBit/s"; print "\trx bitrate: - MBit/s"}')
+    fi
+    if ! printf '%s\n' "$_out" | grep -q '^Station ' && command -v wlanconfig >/dev/null 2>&1; then
+        _out=$(wlanconfig "$_if" list 2>/dev/null | awk '
+          /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{
+            mac=$1; sig=""; for(i=2;i<=NF;i++) if($i ~ /^-?[0-9]+$/){sig=$i;break}
+            print "Station " mac; print "\tsignal: " sig
+            print "\ttx bitrate: - MBit/s"; print "\trx bitrate: - MBit/s"}')
+    fi
+    printf '%s\n' "$_out"
+}
+wsd_ifaces(){
+    # 第 46 次实机：wifi0/wifi1 是 radio、soc0/1 是内部口，VAP 只认 ath*/wlan*
+    ls /sys/class/net 2>/dev/null | grep -E '^(ath|wlan)[0-9]' | sort -u
+    command -v iw >/dev/null 2>&1 && \
+      iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep -E '^(ath|wlan)[0-9]'
+}
+
 # ── 第 29 次校准：dBm → 百分比 + 四段配色（三页同一口径）──────────
 # 映射：pct = clamp(round(2*(rssi+100)), 0, 100)  —— -100dBm=0%、-50dBm=100%
 # 配色：80-100 绿 / 60-79 黄绿 / 50-59 黄 / 0-49 红
@@ -50,8 +80,8 @@ UP=$(num "$(awk '{print int($1)}' /proc/uptime 2>/dev/null)")
 UP_H=$(awk -v s="$UP" 'BEGIN{printf "%d天 %02d:%02d:%02d",s/86400,(s%86400)/3600,(s%3600)/60,s%60}')
 NOW=$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo '-')
 
-ADMIN_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '192.168.1.240')
-[ -z "$ADMIN_IP" ] && ADMIN_IP='192.168.1.240'
+ADMIN_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo '172.10.10.241')
+[ -z "$ADMIN_IP" ] && ADMIN_IP='172.10.10.241'
 PROTO=$(uci -q get network.lan.proto 2>/dev/null || echo 'static')
 IGNORE=$(uci -q get dhcp.lan.ignore 2>/dev/null || echo '1')
 [ "$IGNORE" = '1' ] && DHCP_SRV='off' || DHCP_SRV='on'
@@ -83,18 +113,16 @@ for radio in radio0 radio1; do
     chan=$(uci -q get "wireless.${dev}.channel" 2>/dev/null || echo '-')
     ht=$(uci -q get "wireless.${dev}.htmode" 2>/dev/null || echo '-')
     dis=$(uci -q get "wireless.${dev}.disabled" 2>/dev/null || echo '0')
-    # radio0 -> phy0-ap0, radio1 -> phy1-ap0（25.12 wifi-scripts 命名；旧 wlan* 由脚本兜底）
+    # 双栈接口名：开源栈 wlan0/wlan1，官方闭源栈 ath0/ath1/wifi0/wifi1
     case "$dev" in radio0|phy0) ifn='wlan0' ;; *) ifn='wlan1' ;; esac
-    [ -d "/sys/class/net/$ifn" ] || ifn=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}' | grep '^wlan' | tail -1)
+    [ -d "/sys/class/net/$ifn" ] || ifn=$(wsd_ifaces 2>/dev/null | head -n 1)
+    # 第二个 radio 取列表里与第一个不同的那一项
+    [ "$radio" = radio1 ] && { a=$(wsd_ifaces 2>/dev/null | tail -n 1); [ -n "$a" ] && [ "$a" != "$ifn" ] && ifn="$a"; }
     cnt=0
     clist=''
-    if [ -n "$ifn" ] && command -v iw >/dev/null 2>&1; then
-        dump=$(iw dev "$ifn" station dump 2>/dev/null)
-        # station dump 空（NSS offload / 闭源 qca-wifi 栈）时回退 iwinfo assoclist
-        if [ -z "$(printf '%s\n' "$dump" | grep '^Station ')" ] && command -v iwinfo >/dev/null 2>&1; then
-          dump=$(iwinfo "$ifn" assoclist 2>/dev/null | \
-                 awk '/^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]/{print "Station " $1; print "\tsignal: " $2}')
-        fi
+    if [ -n "$ifn" ] && [ -d "/sys/class/net/$ifn" ]; then
+        # 三级回退：iw station dump → iwinfo assoclist → wlanconfig list
+        dump=$(wsd_dump "$ifn" 2>/dev/null)
         pairs=$(printf '%s\n' "$dump" | awk '
           /^Station /{if(mac!="")printf "%s|%s|%s|%s\n",mac,sig,tx,rx; mac=$2; sig="-"; tx="-"; rx="-"; next}
           /signal:/{sig=$2}
@@ -217,131 +245,44 @@ set -- $MEM_LINE
 M_TOTAL=$1; M_AVAIL=$2; M_USED=$3; M_PCT=$4
 SW_TOTAL=$5; SW_USED=$6; M_TOTAL_H=$7; M_AVAIL_H=$8; M_USED_H=$9
 MEM_HAS=0; [ "$M_TOTAL" -gt 0 ] 2>/dev/null && MEM_HAS=1
-# ── 温度（PZ-L8 口径：CPU 取 thermal type 含 cpu；射频取 ath11k_hwmon）────
-# 参考 mufeng05/openwrt-cmcc-pz-l8-nss：CPU 温度读 /sys/class/thermal 里 type 含 cpu
-# 的热区；Wi-Fi 温度读 /sys/class/hwmon 里 name=ath11k_hwmon 的项（每个 radio 一个），
-# 按设备树节点（c000000.wifi / b00a040.wifi）标注，而不是 phy 编号——
-# 实测一次 wifi reload 就能让 2.4G 从 phy0 变成 phy1。
-TEMP_C=0; TEMP_HAS=0; TEMP_MAX_C=0
-TEMP_ZONES_JSON=''; TEMP_WIFI_JSON=''
-add_zone() {
-    nm="$1"; c="$2"; kind="$3"
-    [ -n "$TEMP_ZONES_JSON" ] && TEMP_ZONES_JSON="$TEMP_ZONES_JSON,"
-    TEMP_ZONES_JSON="$TEMP_ZONES_JSON{\"name\":\"$(jesc "$nm")\",\"c\":$c,\"kind\":\"$kind\"}"
-    [ "$c" -gt "$TEMP_MAX_C" ] && TEMP_MAX_C=$c
-    if [ "$kind" = 'wifi' ]; then
-        [ -n "$TEMP_WIFI_JSON" ] && TEMP_WIFI_JSON="$TEMP_WIFI_JSON,"
-        TEMP_WIFI_JSON="$TEMP_WIFI_JSON{\"name\":\"$(jesc "$nm")\",\"c\":$c}"
+# 温度（第 37 次增强）：遍历全部 thermal_zone 取有效读数中的最大值，
+# 再回退 hwmon；读不到就 has=0，页面显示「— / 无传感器」而不是编造数值。
+# 兼容毫摄氏度（QSDK tsens 常见）与少数直接报整数摄氏度的平台。
+TEMP_C=0; TEMP_HAS=0; TEMP_SRC=''; TEMP_ZONES=0
+for t in /sys/class/thermal/thermal_zone*/temp \
+         /sys/devices/virtual/thermal/thermal_zone*/temp; do
+    [ -r "$t" ] || continue
+    v=$(num "$(cat "$t" 2>/dev/null)")
+    [ "$v" -gt 0 ] 2>/dev/null || continue
+    if [ "$v" -gt 1000 ] 2>/dev/null; then c=$(( v / 1000 )); else c=$v; fi
+    if [ "$c" -gt 0 ] && [ "$c" -lt 150 ]; then
+        TEMP_ZONES=$(( TEMP_ZONES + 1 ))
+        if [ "$c" -gt "$TEMP_C" ]; then TEMP_C=$c; TEMP_SRC='thermal_zone'; fi
     fi
-}
-# 1) CPU 热区：只认 type 含 cpu
-for z in /sys/class/thermal/thermal_zone*; do
-    [ -r "$z/temp" ] || continue
-    nm=$(cat "$z/type" 2>/dev/null || basename "$z")
-    case "$nm" in *cpu*|*CPU*) ;; *) continue ;; esac
-    v=$(num "$(cat "$z/temp" 2>/dev/null)"); c=$(( v / 1000 ))
-    [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
-    add_zone "$nm" "$c" 'cpu'
-    [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
 done
-# 2) 射频：ath11k_hwmon，按设备树节点命名（不是 phy 编号）
-TEMP_RF_COUNT=0
-for h in /sys/class/hwmon/hwmon*; do
-    [ -r "$h/name" ] || continue
-    hn=$(cat "$h/name" 2>/dev/null)
-    case "$hn" in ath11k*) ;; *) continue ;; esac
-    dt=$(basename "$(readlink -f "$h/device" 2>/dev/null)" 2>/dev/null || echo '')
-    case "$dt" in *wifi*|*c000000*|*b00a040*) ;; *) dt="${hn}#$(basename "$h")" ;; esac
-    for t in "$h"/temp*_input; do
+if [ "$TEMP_C" -eq 0 ]; then
+    TEMP_ZONES=0
+    for t in /sys/class/hwmon/hwmon*/temp*_input \
+             /sys/class/hwmon/hwmon*/device/temp*_input; do
         [ -r "$t" ] || continue
-        v=$(num "$(cat "$t" 2>/dev/null)"); c=$(( v / 1000 ))
-        [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
-        add_zone "$dt" "$c" 'wifi'; TEMP_RF_COUNT=$(( TEMP_RF_COUNT + 1 ))
+        v=$(num "$(cat "$t" 2>/dev/null)")
+        [ "$v" -gt 1000 ] 2>/dev/null || continue
+        c=$(( v / 1000 ))
+        if [ "$c" -gt 0 ] && [ "$c" -lt 150 ]; then
+            TEMP_ZONES=$(( TEMP_ZONES + 1 ))
+            if [ "$c" -gt "$TEMP_C" ]; then TEMP_C=$c; TEMP_SRC='hwmon'; fi
+        fi
     done
-done
-# 3) 兜底：其它 hwmon temp*_input（归 cpu，只在完全没 CPU 热区时用）
-if [ "$TEMP_HAS" = '0' ]; then
-  for t in /sys/class/hwmon/hwmon*/temp*_input; do
-      [ -r "$t" ] || continue
-      v=$(num "$(cat "$t" 2>/dev/null)"); c=$(( v / 1000 ))
-      [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
-      nm=$(cat "$(dirname "$t")/name" 2>/dev/null || basename "$(dirname "$t")")
-      add_zone "$nm" "$c" 'cpu'; [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
-  done
 fi
-# 4) 兜底：thermal_zone 非 cpu 类型（tsens / SoC，如实列出来但不冒充 CPU）
-for z in /sys/class/thermal/thermal_zone*; do
-    [ -r "$z/temp" ] || continue
-    nm=$(cat "$z/type" 2>/dev/null || basename "$z")
-    case "$nm" in *cpu*|*CPU*) continue ;; esac
-    v=$(num "$(cat "$z/temp" 2>/dev/null)"); c=$(( v / 1000 ))
-    [ "$c" -gt 0 ] && [ "$c" -lt 150 ] || continue
-    add_zone "$nm" "$c" 'soc'
-    [ "$TEMP_HAS" = '0' ] && { TEMP_C=$c; TEMP_HAS=1; }
-done
-[ "$TEMP_HAS" = '0' ] && [ "$TEMP_MAX_C" -gt 0 ] && { TEMP_C=$TEMP_MAX_C; TEMP_HAS=1; }
+[ "$TEMP_C" -gt 0 ] && TEMP_HAS=1
+[ -z "$TEMP_SRC" ] && TEMP_SRC='无传感器'
 
-# ── NSS 硬件加速实况（ECM→NSS / 双射频 wifili）─────────────────────
-# 参考 PZ-L8：判速看 eth0/eth1 + debugfs，不看 br-lan——被卸载的流量
-# 根本不经过 Linux 网桥（实测 eth0/eth1 各 989 Mbps 时 br-lan 只有 52）。
-NSS_MODS=$(awk '{print $1}' /proc/modules 2>/dev/null | tr '\n' ' ')
-nss_mod(){ case " $NSS_MODS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-NSS_DRV=0; NSS_ECM=0; NSS_WIFILI=0; NSS_SFE=0
-nss_mod qca_nss_drv && NSS_DRV=1
-nss_mod qca_nss_ecm && NSS_ECM=1
-nss_mod wifili      && NSS_WIFILI=1
-nss_mod shortcut_fe && NSS_SFE=1
-[ -d /sys/kernel/debug/qca-nss-drv ] && NSS_DRV=1
-NSS_LOAD=$(grep -oE '[0-9]+' /sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi 2>/dev/null | head -1)
-NSS_CONN=$(grep -oE '[0-9]+' /sys/kernel/debug/ecm/ecm_db/connection_count 2>/dev/null | head -1)
-[ -z "$NSS_LOAD" ] && NSS_LOAD=-1
-[ -z "$NSS_CONN" ] && NSS_CONN=-1
-NSS_FW=$(dmesg 2>/dev/null | grep -oE 'NSS[._]FW[._]?[0-9]+\.[0-9]+(-[0-9]+)?' | tail -1)
-[ -z "$NSS_FW" ] && NSS_FW=$(ls /lib/firmware/ 2>/dev/null | grep -iE 'nss.*12\.5|12\.2' | head -1)
-[ -z "$NSS_FW" ] && NSS_FW='unknown'
-NSS_ACTIVE=0
-[ "$NSS_DRV" = '1' ] && [ "$NSS_ECM" = '1' ] && [ "$NSS_WIFILI" = '1' ] && NSS_ACTIVE=1
-# eth0/eth1 字节计数，前端两次采样算实时速率；br-lan 不参与
-NSS_ETH_JSON=''
-for e in eth0 eth1; do
-    d=/sys/class/net/$e; [ -d "$d" ] || continue
-    tx=$(num "$(cat "$d/statistics/tx_bytes" 2>/dev/null)")
-    rx=$(num "$(cat "$d/statistics/rx_bytes" 2>/dev/null)")
-    [ -n "$NSS_ETH_JSON" ] && NSS_ETH_JSON="$NSS_ETH_JSON,"
-    NSS_ETH_JSON="$NSS_ETH_JSON{\"name\":\"$e\",\"tx_bytes\":$tx,\"rx_bytes\":$rx}"
-done
-
-# ── 内核 / 基线 / 无线 / 防护状态（状态页用）────────────────────────
-KERNEL_VER=$(uname -r 2>/dev/null || echo unknown)
-FW_MODE=$(cat /etc/firmware_mode 2>/dev/null || echo unknown)
-BASELINE=$(sed -n 's/^BASELINE=//p' /etc/build-info 2>/dev/null | head -1)
-[ -z "$BASELINE" ] && BASELINE=$(sed -n 's/^BASELINE=//p' /etc/wifi-profile 2>/dev/null | head -1)
-[ -z "$BASELINE" ] && BASELINE='unknown'
-WIFI_OFFLOAD='n/a'
-if command -v uci >/dev/null 2>&1; then
-    cur=$(uci -q get nss.general.wifi_offload 2>/dev/null || echo '')
-    [ -n "$cur" ] && WIFI_OFFLOAD="$cur"
-fi
-ATH_NSS=$(cat /sys/module/ath11k/parameters/nss_offload 2>/dev/null || echo '')
-RF_CHAN=$(uci -q get wireless.radio1.channel 2>/dev/null || echo '')
-RF_HT=$(uci -q get wireless.radio1.htmode 2>/dev/null || echo '')
-RF_CC=$(uci -q get wireless.radio1.country 2>/dev/null || echo '')
-RF_NOSCAN=$(uci -q get wireless.radio0.noscan 2>/dev/null || echo '0')
-GUARD=$(head -1 /tmp/l2guard.state 2>/dev/null || echo unknown)
-FW_STATE='off'
-for s in firewall4 firewall; do
-    [ -x "/etc/init.d/$s" ] && "/etc/init.d/$s" enabled 2>/dev/null && FW_STATE='on'
-done
-TTYD_STATE='off'; [ -x /etc/init.d/ttyd ] && /etc/init.d/ttyd enabled 2>/dev/null && TTYD_STATE='on'
-SSH_STATE='off'; [ -x /etc/init.d/dropbear ] && /etc/init.d/dropbear enabled 2>/dev/null && SSH_STATE='on'
 # ── /系统资源 ────────────────────────────────────────────────────────
 
 
-# ── 无线/有线加速状态：只读，不启用、不改配置 ───────────────────────
-# 参考 mufeng05/openwrt-cmcc-pz-l8-nss：本平台真实加速路径是 ECM→NSS，
-# 双射频经 wifili 卸载；SFE/shortcut_fe 连接表为空属预期。
-# 被卸载的流量根本不经过 Linux 网桥，所以「br-lan 计数低」不等于「没加速」。
-# 判据看 nss.* 字段（cpu_load_ubi / connection_count / wifili）与 eth0/eth1。
+# ── 无线/有线加速状态（第 25 次校准）：只读，不启用、不改配置 ─────────
+# 纯二层桥不做三层转发，NSS/ECM/SFE 的 offload 规则用不上；这里只如实报告
+# 模块/规则有没有，绝不假装「加速已开」。完整说明见 /usr/sbin/accel-check。
 ACC_MODS_ALL=$(awk '{print $1}' /proc/modules 2>/dev/null | tr '\n' ' ')
 acc_has() { case " $ACC_MODS_ALL " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 ACC_NSS=0; ACC_ECM=0; ACC_SFE=0; ACC_DP=0; ACC_QWIFI=0; ACC_ATH=0; ACC_CNSS=0
@@ -359,27 +300,24 @@ ACC_DM=$(dmesg 2>/dev/null | grep -iE 'nss|ecm|sfe|shortcut|qca-nss' \
          | tail -n 3 | tr '\n' ' ' | cut -c1-240)
 [ -z "$ACC_DM" ] && ACC_DM='（无匹配日志）'
 ACC_RULE='（无）'
-for f in /sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi \
-         /sys/kernel/debug/qca-nss-drv/stats \
-         /sys/kernel/debug/ecm/ecm_db/connection_count \
-         /sys/kernel/debug/ecm/ecm_nss_ipv4 \
+for f in /sys/kernel/debug/qca-nss-drv/stats /sys/kernel/debug/ecm/ecm_nss_ipv4 \
          /sys/module/qca_nss_ecm/parameters/enable; do
     [ -e "$f" ] && { [ "$ACC_RULE" = '（无）' ] && ACC_RULE="$f" || ACC_RULE="$ACC_RULE $f"; }
 done
 if [ "$ACC_NSS" = '0' ] && [ "$ACC_ECM" = '0' ]; then
     ACC_STATE='未启用'
-    ACC_HINT='未检测到 NSS/ECM 模块：本基线无 NSS，射频走 host CPU（官方主线属预期）。无线不注册先查 DEVICE_PACKAGES 是否含 ath11k 固件 + board data。'
+    ACC_HINT='未检测到 NSS/ECM 模块。纯二层桥不走三层 offload，属预期；无线不注册请查 BDF/board_id，与加速无关。'
 elif [ "$ACC_ECM" = '1' ] && [ "$ACC_RULE" = '（无）' ]; then
     ACC_STATE='模块在但未注册规则'
-    ACC_HINT='qca-nss-ecm 已加载但无规则节点；纯二层桥不产生三层路由流，ECM 规则为空属预期。请看 NSS 占用 / 连接数与 eth0/eth1 计数，不要看 br-lan。'
+    ACC_HINT='qca-nss-ecm 已编入只为依赖自洽，无 ECM rule / debugfs 节点；纯二层桥不产生三层流，属预期。'
 else
     ACC_STATE='已加载'
-    ACC_HINT='检测到 NSS/ECM 模块。双射频是否真卸载看 wifili + cpu_load_ubi + connection_count；判速用 eth0/eth1，不要用 br-lan。'
+    ACC_HINT='检测到 NSS 模块与规则节点；只有路由/NAT 场景才可能生效，WDS/AP 桥仍按二层转发。'
 fi
 # ── /加速状态 ────────────────────────────────────────────────────────
 
 printf 'Content-Type: application/json; charset=utf-8\r\n'
 printf 'Cache-Control: no-store\r\n\r\n'
 cat <<JSON
-{"ok":1,"accel":{"state":"$(jesc "$ACC_STATE")","hint":"$(jesc "$ACC_HINT")","nss_drv":$ACC_NSS,"nss_ecm":$ACC_ECM,"nss_sfe":$ACC_SFE,"nss_dp":$ACC_DP,"qca_wifi":$ACC_QWIFI,"ath11k":$ACC_ATH,"cnss2":$ACC_CNSS,"modules":"$(jesc "$ACC_LIST")","rules":"$(jesc "$ACC_RULE")","dmesg":"$(jesc "$ACC_DM")"},"sys":{"cpu_cores":$CPU_CORES,"cpu_mhz":$CPU_MHZ,"cpu_mhz_max":$CPU_MHZ_MAX,"cpu_mhz_min":$CPU_MHZ_MIN,"cpu_has_freq":$CPU_HAS_FREQ,"cpu_usage_pct":$CPU_PCT,"load1":"$(jesc "$LD1")","load5":"$(jesc "$LD5")","load15":"$(jesc "$LD15")","mem_has":$MEM_HAS,"mem_total_kb":$M_TOTAL,"mem_avail_kb":$M_AVAIL,"mem_used_kb":$M_USED,"mem_used_pct":$M_PCT,"mem_total":"$(jesc "${M_TOTAL_H} MB")","mem_avail":"$(jesc "${M_AVAIL_H} MB")","mem_used":"$(jesc "${M_USED_H} MB")","swap_total_kb":$SW_TOTAL,"swap_used_kb":$SW_USED,"temp_c":$TEMP_C,"temp_has":$TEMP_HAS,"temp_max_c":$TEMP_MAX_C,"temp_zones":[$TEMP_ZONES_JSON],"temp_wifi":[$TEMP_WIFI_JSON],"temp_rf_count":$TEMP_RF_COUNT,"temp_source":"CPU: thermal type=cpu / 射频: ath11k_hwmon 按设备树节点"},"nss":{"active":$NSS_ACTIVE,"drv":$NSS_DRV,"ecm":$NSS_ECM,"wifili":$NSS_WIFILI,"sfe":$NSS_SFE,"cpu_load_ubi":$NSS_LOAD,"conn_count":$NSS_CONN,"fw":"$(jesc "$NSS_FW")","path":"ecm-nss","eth":[$NSS_ETH_JSON],"note":"被卸载流量不经过 Linux 网桥，判速看 eth0/eth1 + debugfs"},"kernel":"$(jesc "$KERNEL_VER")","baseline":"$(jesc "$BASELINE")","wifi":{"target":"fullspeed","offload":"$(jesc "$WIFI_OFFLOAD")","ath11k_nss":"$(jesc "$ATH_NSS")","channel":"$(jesc "$RF_CHAN")","htmode":"$(jesc "$RF_HT")","country":"$(jesc "$RF_CC")","noscan":"$(jesc "$RF_NOSCAN")","dfs_cac":"CN+HE160 覆盖 DFS，开机 5G 约 60s CAC 不可见","nss_fw":"12.5 优先 / 12.2 回退"},"protect":{"dhcp_guard":"$(jesc "$GUARD")","firewall":"$(jesc "$FW_STATE")","ssh":"$(jesc "$SSH_STATE")","ttyd":"$(jesc "$TTYD_STATE")"},"mode":"$(jesc "$MODE")","model":"$(jesc "$MODEL")","host":"$(jesc "$HOST")","board":"$(jesc "$BOARD")","uptime":"$(jesc "$UP_H")","time":"$(jesc "$NOW")","admin_ip":"$(jesc "$ADMIN_IP")","link_local":"$(jesc "$LL")","proto":"$(jesc "$PROTO")","dhcp_server":"$(jesc "$DHCP_SRV")","gateway":"$(jesc "$GW")","dns":"$(jesc "$DNS")","bridge":{"name":"br-lan","members":"$(jesc "$BR_MEM")","stp":"$(jesc "$BR_STP")"},"radios":[$RADIOS],"bdf":{"b2g":"$(jesc "$B2G")","b5g":"$(jesc "$B5G")","vs010_ok":"$BDF_OK","cal_invalid":"$(num "$CAL_BAD")","dmesg":"$(jesc "$BDF_LINE")"},"stations":[$STATIONS],"guard":{"enabled":"$(jesc "$G_ENABLED")","reject_dbm":"$(jesc "$G_REJECT")","kick_dbm":"$(jesc "$G_KICK")","interval":"$(jesc "$G_INTERVAL")","consecutive":"$(jesc "$G_CONSEC")","dryrun":"$(jesc "$G_DRY")","last_scan":"$(jesc "$G_STATE")","scanned":"$(num "$G_SCANNED")","rejected":"$(num "$G_REJ")","kicked":"$(num "$G_KICKED")","log":"$(jesc "$G_LOG")","note":"$(jesc "$G_NOTE")"},"pct_note":"$(jesc "$PCT_NOTE")"}
+{"ok":1,"build":"$(jesc "$(cat /etc/firmware_build 2>/dev/null || echo 'unknown')")","accel":{"state":"$(jesc "$ACC_STATE")","hint":"$(jesc "$ACC_HINT")","nss_drv":$ACC_NSS,"nss_ecm":$ACC_ECM,"nss_sfe":$ACC_SFE,"nss_dp":$ACC_DP,"qca_wifi":$ACC_QWIFI,"ath11k":$ACC_ATH,"cnss2":$ACC_CNSS,"modules":"$(jesc "$ACC_LIST")","rules":"$(jesc "$ACC_RULE")","dmesg":"$(jesc "$ACC_DM")"},"sys":{"cpu_cores":$CPU_CORES,"cpu_mhz":$CPU_MHZ,"cpu_mhz_max":$CPU_MHZ_MAX,"cpu_mhz_min":$CPU_MHZ_MIN,"cpu_has_freq":$CPU_HAS_FREQ,"cpu_usage_pct":$CPU_PCT,"load1":"$(jesc "$LD1")","load5":"$(jesc "$LD5")","load15":"$(jesc "$LD15")","mem_has":$MEM_HAS,"mem_total_kb":$M_TOTAL,"mem_avail_kb":$M_AVAIL,"mem_used_kb":$M_USED,"mem_used_pct":$M_PCT,"mem_total":"$(jesc "${M_TOTAL_H} MB")","mem_avail":"$(jesc "${M_AVAIL_H} MB")","mem_used":"$(jesc "${M_USED_H} MB")","swap_total_kb":$SW_TOTAL,"swap_used_kb":$SW_USED,"temp_c":$TEMP_C,"temp_has":$TEMP_HAS,"temp_src":"$(jesc "$TEMP_SRC")","temp_zones":$TEMP_ZONES},"mode":"$(jesc "$MODE")","model":"$(jesc "$MODEL")","host":"$(jesc "$HOST")","board":"$(jesc "$BOARD")","uptime":"$(jesc "$UP_H")","time":"$(jesc "$NOW")","admin_ip":"$(jesc "$ADMIN_IP")","link_local":"$(jesc "$LL")","proto":"$(jesc "$PROTO")","dhcp_server":"$(jesc "$DHCP_SRV")","gateway":"$(jesc "$GW")","dns":"$(jesc "$DNS")","bridge":{"name":"br-lan","members":"$(jesc "$BR_MEM")","stp":"$(jesc "$BR_STP")"},"radios":[$RADIOS],"bdf":{"b2g":"$(jesc "$B2G")","b5g":"$(jesc "$B5G")","vs010_ok":"$BDF_OK","cal_invalid":"$(num "$CAL_BAD")","dmesg":"$(jesc "$BDF_LINE")"},"stations":[$STATIONS],"guard":{"enabled":"$(jesc "$G_ENABLED")","reject_dbm":"$(jesc "$G_REJECT")","kick_dbm":"$(jesc "$G_KICK")","interval":"$(jesc "$G_INTERVAL")","consecutive":"$(jesc "$G_CONSEC")","dryrun":"$(jesc "$G_DRY")","last_scan":"$(jesc "$G_STATE")","scanned":"$(num "$G_SCANNED")","rejected":"$(num "$G_REJ")","kicked":"$(num "$G_KICKED")","log":"$(jesc "$G_LOG")","note":"$(jesc "$G_NOTE")"},"pct_note":"$(jesc "$PCT_NOTE")"}
 JSON

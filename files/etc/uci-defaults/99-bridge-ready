@@ -3,7 +3,7 @@
 # 首次开机执行一次：把机器收拾成「WDS 网桥就绪」状态（本版：纯 IPv4 傻交换桥）
 #   * 时区上海 + NTP 同步到当前时间；编译时刻写入 /etc/compile_time
 #   * 全射频 CN / ARGON 主题 / root 密码 admin
-#   * 固定管理 IP 192.168.1.241 / 开 STP / DHCP 默认开
+#   * 固定管理 IP 172.10.10.241 / 开 STP / DHCP 默认开
 #   * 【有线修复】关 VLAN、删 WAN/WAN6、eth0+eth1 一并进 br-lan
 #   * IPv6 编译期关闭；关闭发送/接受 ICMP 重定向
 # uci-defaults 只在首次开机（overlay 无配置）跑；执行完删自己。
@@ -21,12 +21,16 @@ if uci -q get system.@system[0] >/dev/null; then
     uci -q set system.@system[0].zonename='Asia/Shanghai'
     uci -q set system.ntp.enabled='1'
     uci -q delete system.ntp.server
-    for s in ntp.aliyun.com time1.cloud.tencent.com cn.pool.ntp.org; do
+    # 【第 51 次】只同步内网两台时间服务器；不再写公网域名
+    uci -q set system.ntp.enable_server='0'
+    for s in 192.168.1.254 172.10.10.254; do
         uci -q add_list system.ntp.server="$s"
     done
     uci commit system
     [ -x /etc/init.d/sysntpd ] && { /etc/init.d/sysntpd enable 2>/dev/null || true; /etc/init.d/sysntpd restart 2>/dev/null || true; }
     [ -x /etc/init.d/system ] && /etc/init.d/system reload 2>/dev/null || true
+    [ -x /etc/init.d/ntp-sync ] && { /etc/init.d/ntp-sync enable 2>/dev/null || true; /etc/init.d/ntp-sync start 2>/dev/null || true; }
+    # 【第 53 次】NTP 每 300 秒强制同步一次；sysntpd 常驻保留做平滑校时
 fi
 # 编译时刻（workflow 在编译时动态写入），追加到登录 banner
 if [ -s /etc/compile_time ]; then
@@ -48,13 +52,37 @@ fi
 if [ -x /usr/sbin/luci-fix ]; then
     /usr/sbin/luci-fix >/dev/null 2>&1 || true
 else
-    if ! uci -q get luci.main >/dev/null 2>&1; then
+    # ★ 第 38 次：旧 else 分支用 `uci -q set luci.main='core'` 重建，
+    #   那是 UCI extended lookup 造【匿名 config main】的元凶 —— 一旦
+    #   /usr/sbin/luci-fix 缺失（旧固件 / 手工删文件），427 会当场复现。
+    #   改成与 luci-fix 完全一致的 heredoc 直写，绝不用 uci set 建段。
+    if ! grep -qE "^[[:space:]]*config[[:space:]]+core[[:space:]]+'main'" /etc/config/luci 2>/dev/null; then
         rm -f /etc/config/luci /etc/config/luci.opkg 2>/dev/null || true
-        uci -q set luci.main='core'
+        THEME=/luci-static/argon
+        [ -d "/www$THEME" ] || THEME=/luci-static/bootstrap
+        cat > /etc/config/luci <<EOF
+# rebuilt by 99-bridge-ready fallback —— 必须保留 named section core 'main'
+config core 'main'
+	option lang 'zh_cn'
+	option mediaurlbase '$THEME'
+	option resourcebase '/luci-static/resources'
+
+config internal 'sauth'
+	option sessionpath '/var/run/luci'
+	option sessiontime '3600'
+
+config internal 'themes'
+	option Argon '/luci-static/argon'
+	option Bootstrap '/luci-static/bootstrap'
+EOF
+        chmod 644 /etc/config/luci 2>/dev/null || true
     fi
 fi
-# named section 此刻一定存在，下面三句只改值，不会触发 extended lookup
-uci -q set luci.main.mediaurlbase='/luci-static/argon'
+# named section 此刻一定存在，下面三句只改值，不会触发 extended lookup。
+# ★ 第 38 次：主题目录探测后再写，避免 argon 缺失时把 luci-fix 的回落覆盖回 argon 造成白屏。
+THEME=/luci-static/argon
+[ -d "/www$THEME" ] || THEME=/luci-static/bootstrap
+uci -q set luci.main.mediaurlbase="$THEME"
 uci -q set luci.main.lang='zh_cn'
 uci -q set luci.main.resourcebase='/luci-static/resources'
 uci commit luci
@@ -136,8 +164,8 @@ uci -q get network.lan >/dev/null 2>&1 || uci -q set network.lan='interface'
 uci set network.lan.type='bridge'
 uci set network.lan.ifname='eth0 eth1'
 uci set network.lan.proto='static'
-uci set network.lan.ipaddr='192.168.1.241'
-uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.ipaddr='172.10.10.241'
+uci set network.lan.netmask='255.255.252.0'
 uci -q delete network.lan.gateway
 uci -q delete network.lan.dns
 uci set network.lan.stp='1'
@@ -196,8 +224,8 @@ for e in eth0 eth1; do
       || brctl addif br-lan "$e" 2>/dev/null || true
 done
 ip link set br-lan up 2>/dev/null || true
-ip addr show br-lan 2>/dev/null | grep -q '192.168.1.241' \
-  || ip addr add 192.168.1.241/24 dev br-lan 2>/dev/null || true
+ip addr show br-lan 2>/dev/null | grep -q '172.10.10.241' \
+  || ip addr add 172.10.10.241/22 dev br-lan 2>/dev/null || true
 
 # 【第 18 次校准】兜底服务改为【编译期文件】files/etc/init.d/bridge-netfix，
 # 不再用 heredoc 现场生成（A 段能硬校验内容/语法，也不会因定界符出错）。
@@ -241,21 +269,22 @@ if command -v stty >/dev/null 2>&1 && [ -e "/dev/$TTY" ]; then
     stty -F "/dev/$TTY" 115200 sane echo -crtscts 2>/dev/null || true
 fi
 
-# ── 7c.【第 45 次】机器狗默认停用，绝不自动重启 ──────────────────
-# 旧版在这里 enable+start：单机 / 无对端 WDS / 只当有线桥时，开机约 11 分钟
-# 就会 reboot -f，然后每周期反复重启（用户实测「刷机后自动重启」）。
-# 现在与 AP 版口径一致：显式 stop + disable，并且强制把 enabled 写成 0，
-# 专治 sysupgrade 勾了「保留配置」把旧 enabled=1 或旧 rc.d 链接带回来的情况。
-if [ -x /etc/init.d/bridge-watchdog ]; then
-    /etc/init.d/bridge-watchdog stop    2>/dev/null || true
-    /etc/init.d/bridge-watchdog disable 2>/dev/null || true
+# ── 7b2. 无线 DHCP Snooping 开机自启（第 50 次，WDS/AP 都要）──
+# oneshot 下 ebtables 规则，不是常驻进程；缺了它 AP 版刷完防护是关的。
+if [ -x /etc/init.d/dhcp-guard ]; then
+    /etc/init.d/dhcp-guard enable 2>/dev/null || true
+    /etc/init.d/dhcp-guard start  2>/dev/null || true
 fi
-if command -v uci >/dev/null 2>&1; then
-    uci -q set wdsdog.main.enabled='0' 2>/dev/null || true
-    uci -q set wdsdog.main.dryrun='1'  2>/dev/null || true
-    uci commit wdsdog 2>/dev/null || true
+
+# ── 7c. 机器狗开机自启（2026-11-22 第 5 次更新）────────────────
+# uci-defaults 在 rcS 期间跑，START=95 的服务可能还没轮到，
+# 所以 enable（建 rc.d 链接）+ start（本次立即起）双保险。
+# enabled=0 时 init.d 的 start_service 会直接 return，off 是彻底停用。
+if [ -x /etc/init.d/bridge-watchdog ] && [ "$(uci -q get wdsdog.main.enabled 2>/dev/null)" = "1" ]; then
+    /etc/init.d/bridge-watchdog enable 2>/dev/null || true
+    /etc/init.d/bridge-watchdog start  2>/dev/null || true
+    logger -t bridge-watchdog "首次开机已启用（默认连续不通 5 分钟重启，可 set-delay 自定义）" 2>/dev/null || true
 fi
-logger -t bridge-watchdog "第45次：默认停用，刷机后不会自动重启（成对 WDS 可手动 on）" 2>/dev/null || true
 
 # ── 7d. 自动一主一备（第 8 次校准）─────────────────────────────
 # enable 建 rc.d 链接（以后每次开机都重判一次）+ start 本次立即后台跑。

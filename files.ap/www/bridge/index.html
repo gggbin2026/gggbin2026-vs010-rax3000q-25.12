@@ -90,29 +90,6 @@ code{background:#1b2a3f;padding:1px 5px;border-radius:4px;color:#cfe0f5}
   background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 .gaNote b{color:var(--txt);font-weight:600}
 .gaSub{font-size:12px;color:var(--dim);margin:14px 0 8px;letter-spacing:.4px;font-weight:600}
-
-/* ===== 2026-11-24：CPU/射频温度 + 版本/防护状态扩展 ===== */
-.nwrt-ext{margin:14px 0;padding:14px 16px;border-radius:12px;background:#162333;border:1px solid #2b3d55}
-.extHead{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:650;margin-bottom:10px}
-.extHead .pillx{font-size:11px;font-weight:600;border:1px solid #2b3d55;border-radius:999px;padding:2px 9px;color:#8ea3bd}
-.extTempRow{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
-.extBig{font-size:38px;font-weight:700;line-height:1.1;min-width:120px;letter-spacing:-1px}
-.extTempMeta{flex:1;min-width:240px;font-size:12.5px;color:#8ea3bd}
-.extTempMeta b{color:#e8eef7}
-.tmeter{height:7px;background:#233349;border-radius:99px;overflow:hidden;margin:7px 0}
-.tmeter i{display:block;height:100%;width:0;background:#38d39f;border-radius:99px;transition:width .6s}
-.extZones{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.tz{font-size:11px;background:#1d2b3e;border:1px solid #2b3d55;border-radius:7px;padding:2px 8px;color:#8ea3bd}
-.tz.wifi{border-color:#3d6b8a;color:#bfe0ff}
-.tz b{font-weight:700}
-.tbadge{font-size:13px;font-weight:700;margin-left:6px}
-.extGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:12px}
-.extItem{background:#1d2b3e;border:1px solid #2b3d55;border-radius:9px;padding:8px 10px;font-size:12px}
-.extItem i{display:block;color:#8ea3bd;font-style:normal;font-size:11px;margin-bottom:2px}
-.extItem b{font-weight:650;color:#e8eef7}
-.extFoot{margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.extFoot .btn{background:#1c2c44;color:#e8eef7;border:1px solid #2b3d55;border-radius:8px;padding:6px 12px;text-decoration:none;font-size:13px}
-.extFoot .note{font-size:11px;color:#8ea3bd}
 </style>
 </head>
 <body>
@@ -121,7 +98,7 @@ code{background:#1b2a3f;padding:1px 5px;border-radius:4px;color:#cfe0f5}
 <header>
   <h1>AP 状态</h1>
   <span class="tag">普通 AP 模式 · 不是 WDS 网桥</span>
-  <div class="meta">型号 <b id="model">—</b>　管理 IP <b id="ip">192.168.1.240</b>　运行 <b id="up">—</b>　<span id="clock">—</span></div>
+  <div class="meta">型号 <b id="model">—</b>　管理 IP <b id="ip">172.10.10.241</b>　运行 <b id="up">—</b>　<span id="clock">—</span></div>
   <div class="spacer"></div>
   <a class="btn" id="refresh">立即刷新</a>
   <a class="btn" id="luci" href="../cgi-bin/luci">LuCI</a>
@@ -133,7 +110,7 @@ code{background:#1b2a3f;padding:1px 5px;border-radius:4px;color:#cfe0f5}
   SSID 是 <code>NwrtAP-2G</code> / <code>NwrtAP-5G</code>（WDS 版是 <code>WDS_AP</code> / <code>BRIDGE-SETUP</code>）。
   <div style="margin-top:7px;padding-top:7px;border-top:1px solid #2f6b45">
     ★ 本页是简版。<b>AP 专用控制台</b>（关联终端 / 无 DHCP 连接指引 / BDF 自检 / 调试命令）→
-    <a href="../ap/" style="color:#e6fff0;text-decoration:underline">http://192.168.1.240/ap/</a>
+    <a href="../ap/" style="color:#e6fff0;text-decoration:underline">http://172.10.10.241/ap/</a>
   </div>
 </div>
 
@@ -183,33 +160,44 @@ code{background:#1b2a3f;padding:1px 5px;border-radius:4px;color:#cfe0f5}
           <div class="gaCenter"><b id="gaMemNum">—</b><i>内存使用率</i><span id="gaMemState">读取中</span></div>
         </div>
       </div>
+      <div class="gaItem">
+        <div class="gaRing">
+          <svg viewBox="0 0 120 120" aria-label="CPU 温度">
+            <circle class="gaTrack" cx="60" cy="60" r="52"></circle>
+            <circle class="gaArc" id="gaTArc" cx="60" cy="60" r="52" transform="rotate(-90 60 60)"></circle>
+          </svg>
+          <div class="gaCenter"><b id="gaTNum">—</b><i>CPU 温度</i><span id="gaTState">读取中</span></div>
+        </div>
+      </div>
     </div>
     <div class="gaChips">
       <div><i>CPU 当前频率</i><b id="gaFreq">—</b><small id="gaRange">—</small></div>
       <div><i>核心数</i><b id="gaCores">—</b></div>
       <div><i>负载 1 / 5 / 15</i><b id="gaLoad">—</b></div>
-      <div><i>CPU 温度</i><b id="gaTemp">—</b></div>
+      <div><i>CPU 温度</i><b id="gaTemp">—</b><small id="gaTempSrc">0–100 °C 量程</small></div>
       <div><i>内存剩余</i><b id="gaMemFree">—</b><small id="gaMemFreeKb">—</small></div>
       <div><i>总量 / 已用</i><b id="gaMemTotal">—</b><small id="gaMemUsed">—</small></div>
       <div><i>Swap 已用 / 总量</i><b id="gaSwap">—</b></div>
     </div>
     <div class="gaNote" id="gaNote">
-      ⚠ 仪表盘按「<b>占用率</b>」配色：<b>0–49% 绿（空闲）· 50–69% 黄绿（适中）· 70–84% 黄（偏高）· 85–100% 红（吃紧）</b>；
-      与页面里「对端信号强度」进度条语义<b>相反</b> —— 信号越高越好，占用率越低越好。频率 / 温度传感器缺失时如实显示「不可用 / 无传感器」，不用 0 冒充。
+      ⚠ <b>CPU / 内存使用率</b>按占用率配色：<b>0–49% 绿（空闲）· 50–69% 黄绿（适中）· 70–84% 黄（偏高）· 85–100% 红（吃紧）</b>；
+      <b>CPU 温度</b>独立色阶（0–100 °C 量程）：<b>&lt;50°C 绿（常温）· 50–64 黄绿（温热）· 65–74 黄（偏高）· ≥75 红（过热）</b>。
+      三者都是<b>越低越好</b>，与「对端信号强度」进度条（越高越好）语义相反。
+      频率 / 温度传感器缺失时如实显示「不可用 / 无传感器」，不用 0 冒充。
     </div>
   </div>
   <div class="gaSub">详细数值 · DETAIL（原有文字卡片整块保留，便于核对精确 kB 与状态徽章）</div>
 <div class="grid">
   <div class="card"><div class="ct"><span class="cn">网络</span><span class="dot up">纯二层</span></div>
-    <div class="kv"><span>管理地址</span><span id="s_ip">192.168.1.240/24</span><span>网桥</span><span id="s_br">br-lan</span><span>成员</span><span id="s_mem">eth0 eth1</span><span>STP</span><span id="s_stp">开</span><span>DHCP</span><span>本机已关（上级分配）</span><span>WAN</span><span>无（不要插 WAN 口）</span></div></div>
+    <div class="kv"><span>管理地址</span><span id="s_ip">172.10.10.241/22</span><span>网桥</span><span id="s_br">br-lan</span><span>成员</span><span id="s_mem">eth0 eth1</span><span>STP</span><span id="s_stp">开</span><span>DHCP</span><span>本机已关（上级分配）</span><span>WAN</span><span>无（不要插 WAN 口）</span></div></div>
   <div class="card"><div class="ct"><span class="cn">固件</span><span class="dot up">AP 模式</span></div>
-    <div class="kv"><span>内核</span><span id="s_kernel">读取中</span><span>基线</span><span id="s_baseline">读取中</span><span>主机名</span><span id="s_host">—</span><span>板级</span><span id="s_board">—</span><span>账号</span><span>root / admin</span><span>IPv6</span><span id="s_ipv6">6.12 正常</span><span>防火墙</span><span id="s_fw">编译期关闭</span></div></div>
+    <div class="kv"><span>基线</span><span>Linux 5.4 / QSDK NHSS.11.5.0.5</span><span>主机名</span><span id="s_host">—</span><span>板级</span><span id="s_board">—</span><span>账号</span><span>root / admin</span><span>IPv6</span><span>编译期关闭</span><span>防火墙</span><span>运行期不生效（无规则）</span></div></div>
   <div class="card"><div class="ct"><span class="cn">CPU / 内存</span><span class="dot" id="sysdot">读取中</span></div>
     <div class="bigrow"><span class="big" id="sysCpuMhz">—</span><span class="bigsub" id="sysCpuUnit">MHz</span></div>
     <div class="meter"><i id="cpuFill"></i></div>
     <div class="kv"><span>CPU 频率</span><span id="sysFreq">—</span><span>CPU 使用率</span><span id="sysCpuPct">—</span>
       <span>内存剩余</span><span id="sysMemAvail">—</span><span>内存总量</span><span id="sysMemTotal">—</span>
-      <span>内存使用率</span><span id="sysMemPct">—</span><span>负载 1/5/15</span><span id="sysLoad">—</span><span>CPU 温度</span><span><span id="sysTemp">—</span> <span class="tbadge" id="sysTempBig">—</span></span></div></div>
+      <span>内存使用率</span><span id="sysMemPct">—</span><span>负载 1/5/15</span><span id="sysLoad">—</span></div></div>
 </div>
 
 <h2>无线 / 有线加速 · ACCEL</h2>
@@ -221,8 +209,8 @@ code{background:#1b2a3f;padding:1px 5px;border-radius:4px;color:#cfe0f5}
 
 <div class="foot">
   <div>页面 10 秒自动刷新；CGI <code>/cgi-bin/bridge</code> 只读、不修改任何配置。LuCI 在 <code>/cgi-bin/luci</code>，互不影响。</div>
-  <div>逐端口 TX/RX 读的是 CPU 侧 netdev 统计，25.12 DSA 下交换芯片逐端口计数不可得；TIME 停在 1970 属预期（板子无 RTC + AP 不供时）。</div>
-  <div>与 WDS 网桥版的区别、两机型差异、刷机与排障 → 仓库唯一文档 <code>FIRMWARE.md</code> 第二十六节。</div>
+  <div>逐端口 TX/RX 读的是 CPU 侧 netdev 统计，交换芯片逐端口计数在 swconfig 机型不可得；TIME 停在 1970 属预期（板子无 RTC + AP 不供时）。</div>
+  <div>与 WDS 网桥版的区别、两机型差异、刷机与排障 → 仓库唯一文档 <code>FIRMWARE.md</code> 第二十六节。固件构建 <b id="fwBuild">—</b>。</div>
 </div>
 
 </div>
@@ -249,8 +237,10 @@ function drawPorts(ps){
     var kind=p.name&&p.name.indexOf('wlan')===0?'WiFi':(p.name&&p.name.indexOf('br-')===0?'BRIDGE':'ETH');
     d.innerHTML='<div class="ct"><span class="cn">'+esc(p.name)+' '+kind+'</span><span class="dot '+cls+'">'+st+'</span></div>'+
       '<div class="kv"><span>链路</span><span>'+(present?(up?'已连接':'未连接'):'接口未注册')+'</span>'+
-      '<span>速率</span><span>'+esc(p.speed||'未知')+(p.speed&&p.speed!=='-'&&p.speed!=='未知'?' Mbps':'')+'</span>'+
-      '<span>双工</span><span>'+esc(p.duplex||'-')+'</span><span>MAC</span><span>'+esc(p.mac||'—')+'</span>'+
+      '<span>速率</span><span>'+(p.speed&&p.speed!=='-'?esc(p.speed)+' Mbps':esc(p.speed_note||'未上报'))+'</span>'+
+      '<span>速率来源</span><span>'+(p.speed_src==='phy'?esc(p.speed_note||'交换芯片 PHY 实测'):(p.speed&&p.speed!=='-'?'netdev / ethtool 上报':'未上报'))+'</span>'+
+      '<span>实测吞吐</span><span>'+(p.rate_mbps&&p.rate_mbps!=='-'?esc(p.rate_mbps)+' Mbps':'—')+'</span>'+
+      '<span>双工</span><span>'+(p.speed_src==='phy'?(p.duplex==='full'?'全双工':esc(p.duplex||'-')):esc(p.duplex||'-'))+'</span><span>MAC</span><span>'+esc(p.mac||'—')+'</span>'+
       '<span>TX</span><span>'+esc(p.tx||'-')+' ('+human(p.tx_bytes)+')</span>'+
       '<span>RX</span><span>'+esc(p.rx||'-')+' ('+human(p.rx_bytes)+')</span></div>';
     $('ports').appendChild(d);
@@ -283,10 +273,13 @@ function drawAccel(ac){
 }
 
 
-/* ── 第 32 次：系统资源仪表盘（零依赖；使用率配色独立于信号强度配色）── */
+/* ── 第 37 次：CPU 使用率 / 内存使用率 / CPU 温度 三仪表（零依赖）── */
 var GA_C = 2*Math.PI*52;  /* 326.7256… 圆环周长 */
 function gaColor(p){p=Number(p)||0; return p>=85?'#ef4444':p>=70?'#eab308':p>=50?'#a3e635':'#22c55e';}
 function gaWord(p){p=Number(p)||0; return p>=85?'吃紧':p>=70?'偏高':p>=50?'适中':'空闲';}
+/* 温度色阶独立：同样越低越好，但阈值按 °C，不复用占用率百分比阈值 */
+function tempColor(t){t=Number(t)||0; return t>=75?'#ef4444':t>=65?'#eab308':t>=50?'#a3e635':'#22c55e';}
+function tempWord(t){t=Number(t)||0; return t>=75?'过热':t>=65?'偏高':t>=50?'温热':'常温';}
 function gaSet(id,pct){
   var arc=$(id+'Arc'), num=$(id+'Num'), st=$(id+'State');
   if(!arc||!num||!st) return;
@@ -303,7 +296,7 @@ function drawGauge(y){
   function v(i,x){var e=$(i); if(e) e.textContent=(x===undefined||x===null||x==='')?'—':x;}
   /* CGI 没给 sys（旧固件 / 解析异常）时如实显示无数据，不拿 0% 冒充 */
   if(y.cpu_usage_pct===undefined && y.mem_used_pct===undefined){
-    var ids=['gaCpu','gaMem'];
+    var ids=['gaCpu','gaMem','gaT'];
     for(var k=0;k<ids.length;k++){
       var a=$(ids[k]+'Arc'), n=$(ids[k]+'Num'), t=$(ids[k]+'State');
       if(a){a.style.stroke='#65758c';a.style.strokeDasharray='0 '+GA_C.toFixed(2);a.style.filter='none';}
@@ -312,21 +305,46 @@ function drawGauge(y){
     }
     var nb=$('gaBadge');
     if(nb){nb.textContent='无数据';nb.style.color='#65758c';nb.style.borderColor='';}
-    var chips=['gaFreq','gaRange','gaCores','gaLoad','gaTemp','gaMemFree','gaMemFreeKb','gaMemTotal','gaMemUsed','gaSwap'];
+    var chips=['gaFreq','gaRange','gaCores','gaLoad','gaTemp','gaTempSrc','gaMemFree','gaMemFreeKb','gaMemTotal','gaMemUsed','gaSwap'];
     for(var m=0;m<chips.length;m++) v(chips[m],'—');
     return;
   }
   var cpct=Math.round(Number(y.cpu_usage_pct)||0), mpct=Math.round(Number(y.mem_used_pct)||0);
+  var thas=!!(y.temp_has && Number(y.temp_c)>0), tc=Number(y.temp_c)||0;
   gaSet('gaCpu',cpct); gaSet('gaMem',mpct);
+  /* 第三个环形仪表：CPU 温度（0–100 °C 量程；无传感器显示灰色「—」） */
+  (function(){
+    var arc=$('gaTArc'),num=$('gaTNum'),st=$('gaTState');
+    if(!arc||!num||!st) return;
+    if(!thas){
+      arc.style.stroke='#65758c'; arc.style.strokeDasharray='0 '+GA_C.toFixed(2); arc.style.filter='none';
+      num.textContent='—'; num.style.color='#65758c';
+      st.textContent='无传感器'; st.style.color='#65758c'; return;
+    }
+    var t=Math.max(0,Math.min(100,tc)), c=tempColor(t);
+    arc.style.stroke=c; arc.style.strokeDasharray=(GA_C*t/100).toFixed(2)+' '+GA_C.toFixed(2);
+    arc.style.filter='drop-shadow(0 0 5px '+c+'99)';
+    num.textContent=Math.round(t)+'°C'; num.style.color=c;
+    st.textContent=tempWord(t); st.style.color=c;
+  })();
+  /* 顶部总览徽章：CPU / 内存 / 温度三者取最坏，温度过高会盖过负载描述 */
   var bad=$('gaBadge');
-  if(bad){var w=Math.max(cpct,mpct), c=gaColor(w);
-    bad.textContent=(w>=85?'系统吃紧':w>=70?'负载偏高':'运行正常');
-    bad.style.color=c; bad.style.borderColor=c;}
+  if(bad){
+    var lv=(cpct>=85||mpct>=85)?3:(cpct>=70||mpct>=70)?2:(cpct>=50||mpct>=50)?1:0;
+    var cols=['#22c55e','#a3e635','#eab308','#ef4444'];
+    var words=['运行正常','负载适中','负载偏高','系统吃紧'];
+    if(thas){
+      var tl=tc>=75?3:tc>=65?2:tc>=50?1:0;
+      if(tl>lv && tl>=2){ lv=tl; words=['运行正常','负载适中','温度偏高','温度过高']; }
+    }
+    bad.textContent=words[lv]; bad.style.color=cols[lv]; bad.style.borderColor=cols[lv];
+  }
   v('gaFreq', y.cpu_has_freq ? (y.cpu_mhz+' MHz') : '无 cpufreq 节点');
   v('gaRange', y.cpu_has_freq ? (y.cpu_mhz_min+' – '+y.cpu_mhz_max+' MHz') : '不可用');
   v('gaCores',(y.cpu_cores||0)+' 核');
   v('gaLoad',(y.load1||'-')+' / '+(y.load5||'-')+' / '+(y.load15||'-'));
-  v('gaTemp', y.temp_has ? (y.temp_c+' °C') : '—（无传感器）');
+  v('gaTemp', thas ? (y.temp_c+' °C') : '—（无传感器）');
+  v('gaTempSrc', thas ? ((y.temp_src||'传感器')+(Number(y.temp_zones)>1?' · '+y.temp_zones+' 个':'')+' · 0–100 °C 量程') : '0–100 °C 量程 · 无传感器');
   v('gaMemFree', y.mem_has ? y.mem_avail : '—');
   v('gaMemFreeKb', y.mem_has ? ((y.mem_avail_kb||0)+' kB') : '—');
   v('gaMemTotal', y.mem_has ? y.mem_total : '—');
@@ -335,10 +353,11 @@ function drawGauge(y){
 }
 
 function apply(j){
-  $('model').textContent=esc(j.model||'IPQ50xx');$('ip').textContent=esc(j.admin_ip||'192.168.1.240');
+  $('model').textContent=esc(j.model||'IPQ50xx');$('ip').textContent=esc(j.admin_ip||'172.10.10.241');
   $('up').textContent=esc(j.uptime||'-');$('clock').textContent=esc(j.time||'')+(j.time_synced?'':'（未校时）');
-  $('s_ip').textContent=esc(j.admin_ip||'192.168.1.240')+'/24';
+  $('s_ip').textContent=esc(j.admin_ip||'172.10.10.241')+'/22';
   $('s_host').textContent=esc(j.host||'-');$('s_board').textContent=esc(j.board||'-');
+  var fb=document.getElementById('fwBuild'); if(fb) fb.textContent=esc(j.build||'unknown');
   if(j.bridge){$('s_br').textContent=esc(j.bridge.name);$('s_mem').textContent=esc(j.bridge.members);$('s_stp').textContent=String(j.bridge.stp)==='1'?'开':'关'}
   drawPorts(j.ports);
   var st=j.stations||[];
@@ -364,125 +383,6 @@ function load(){
 $('luci').href='../cgi-bin/luci';
 $('refresh').onclick=function(e){e.preventDefault();load()};
 load();setInterval(load,10000);
-</script>
-
-<!-- 2026-11-24 扩展：CPU/射频温度 + 内核/基线/无线满速/防护状态（独立渲染，不改动原有 JS） -->
-<div class="nwrt-ext" id="nwrtExt">
-  <div class="extHead"><b>CPU / 射频温度</b><span class="pillx" id="extTempPill">读取中</span>
-    <span class="pillx">数据源 /sys/class/thermal · 只读</span></div>
-  <div class="extTempRow">
-    <div class="extBig" id="extTempBig">—</div>
-    <div class="extTempMeta">
-      <div>CPU <b id="extTempCpu">—</b>　最高传感器 <b id="extTempMax">—</b>　射频 <b id="extTempWifi">—</b></div>
-      <div class="tmeter"><i id="extTempFill"></i></div>
-      <div class="extZones" id="extZones">读取中…</div>
-    </div>
-  </div>
-  <div class="extGrid" id="extStatus">
-    <div class="extItem"><i>内核 / 基线</i><b id="extKernel">—</b></div>
-    <div class="extItem"><i>固件模式</i><b id="extMode">—</b></div>
-    <div class="extItem"><i>NSS 数据面 (ECM→NSS)</i><b id="extOffload">—</b></div>
-    <div class="extItem"><i>NSS 占用 / 加速连接数</i><b>—</b></div>
-    <div class="extItem"><i>NSS 固件 / SFE</i><b>—</b></div>
-    <div class="extItem"><i>eth0/eth1 实时速率</i><b>—</b></div>
-    <div class="extItem"><i>5G 满速配置</i><b id="extRf">—</b></div>
-    <div class="extItem"><i>2.4G / 共存</i><b>—</b></div>
-    <div class="extItem"><i>无线端 DHCP 防护</i><b id="extGuard">—</b></div>
-    <div class="extItem"><i>防火墙 / SSH / TTYD</i><b id="extSec">—</b></div>
-  </div>
-  <div class="extFoot">
-    <a class="btn" id="extTtyd" href="#" target="_blank" rel="noopener">TTYD 网页终端 :7681</a>
-    <a class="btn" href="../cgi-bin/luci">LuCI</a>
-    <span class="note">CPU 温度取 thermal type 含 cpu；射频取 ath11k_hwmon，按设备树节点标注（不按 phy 编号）。阈值：&lt;50 绿 · 50–69 黄绿 · 70–84 黄 · ≥85 红；读不到显示「—」。</span>
-  </div>
-</div>
-
-<script>
-/* 2026-11-24 独立扩展脚本：只 fetch 同一个只读 CGI，不改原有页面的任何变量 */
-(function(){
-  var CGI='../cgi-bin/bridge';
-  function $(id){return document.getElementById(id);}
-  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-  function tcol(c){return c<50?'#38d39f':(c<70?'#a3e635':(c<85?'#f0b34a':'#ff7b7b'));}
-  function put(id,txt,color){var e=$(id);if(!e)return;e.textContent=txt;if(color)e.style.color=color;}
-  function item(label,val,color){
-    return '<div class="extItem"><i>'+esc(label)+'</i><b '+(color?'style="color:'+color+'"':'')+'>'+esc(val)+'</b></div>';
-  }
-  var prevEth=null, prevT=0;
-  /* 参考 PZ-L8：时间间隔用 Date.now() 实测，不假设轮询间隔；负增量显示未知 */
-  function ethRate(j){
-    var now=Date.now(), dt=prevT? (now-prevT)/1000 : 0, out=[];
-    var cur=(j.nss&&j.nss.eth)||[];
-    cur.forEach(function(e){
-      var txt='—', old=null;
-      if(prevEth)prevEth.forEach(function(x){if(x.name===e.name)old=x;});
-      if(old && dt>0.2 && dt<60){
-        var dtx=Number(e.tx_bytes)-Number(old.tx_bytes);
-        var drx=Number(e.rx_bytes)-Number(old.rx_bytes);
-        if(dtx>=0 && drx>=0)
-          txt=(dtx*8/1e6/dt).toFixed(1)+' ↑ / '+(drx*8/1e6/dt).toFixed(1)+' ↓ Mbps';
-        else txt='未知（接口曾 down）';
-      }
-      out.push(e.name+' '+txt);
-    });
-    prevEth=cur.map(function(e){return {name:e.name,tx_bytes:e.tx_bytes,rx_bytes:e.rx_bytes};});
-    prevT=now;
-    return out.length?out.join(' · '):'无 eth0/eth1 节点（判速请用串口 wifi-fullspeed）';
-  }
-  function render(j){
-    var y=j.sys||{}, zones=y.temp_zones||[], wf=y.temp_wifi||[];
-    var has=!!y.temp_has, c=Number(y.temp_c)||0, mx=Number(y.temp_max_c)||c;
-    var col=has?tcol(c):'#65758c';
-    put('extTempBig', has?(c+' °C'):'—', col);
-    put('extTempPill', has?(c>=85?'温度偏高':(c>=70?'偏热':'正常')):'无传感器', col);
-    put('extTempCpu', has?(c+' °C'):'—'); put('extTempMax', has?(mx+' °C'):'—');
-    put('extTempWifi', wf.length? (wf.length+' 路射频 / '+Math.max.apply(null,wf.map(function(z){return z.c;}))+' °C（ath11k_hwmon）') : '未提供 ath11k_hwmon 独立节点');
-    var f=$('extTempFill'); if(f){f.style.width=Math.min(100,has?c:0)+'%';f.style.background=col;}
-    var zs=zones.map(function(z){
-      var tag=z.kind==='wifi'?'wifi':(z.kind==='soc'?'soc':'');
-      return '<span class="tz '+tag+'">'+esc(z.name)+' <b style="color:'+tcol(z.c)+'">'+z.c+'°C</b></span>';
-    }).join('');
-    if(!zs)zs='<span class="tz">未检测到温度传感器（如实显示，不编造数值）</span>';
-    var ze=$('extZones'); if(ze)ze.innerHTML=zs;
-    /* 回填到原有 CPU 状态卡 / 仪表盘，让「CPU 状态那」也直接显示温度 */
-    put('sysTemp', has?(c+' °C'):'—（无传感器）');
-    put('sysTempBig', has?(c+' °C'):'—', col);
-    put('gaTemp', has?(c+' °C'):'—（无传感器）');
-    var w=j.wifi||{}, p=j.protect||{}, n=j.nss||{};
-    var nactive=!!n.active, erate=ethRate(j);
-    var g=$('extStatus');
-    if(g)g.innerHTML=
-      item('内核 / 基线', (j.kernel||'?')+' · '+(j.baseline||'?'))+
-      item('固件模式', (j.fw_mode||j.mode||'?')+' · WAN/LAN 同在 br-lan')+
-      item('NSS 数据面 (ECM→NSS)', nactive?'已接管双射频（wifili 在）':(n.drv?'NSS 驱动在，wifili 未加载':'本基线无 NSS，射频走 host CPU'), nactive?'#38d39f':'#f0b34a')+
-      item('NSS 占用 / 加速连接数', (Number(n.cpu_load_ubi)>=0?n.cpu_load_ubi+' %':'不可用')+' / '+(Number(n.conn_count)>=0?n.conn_count:'不可用'))+
-      item('NSS 固件 / SFE', (n.fw||'?')+' · SFE '+(n.sfe?'已加载，连接表空属预期':'未加载'))+
-      item('eth0/eth1 实时速率', erate)+
-      item('5G 满速配置', 'CN / ch'+(w.channel||'?')+' / '+(w.htmode||'?')+' / 本机 BDF；HE160 开机约 60s DFS-CAC，期间 5G 不可见', '#f0b34a')+
-      item('2.4G / 共存', 'HE40 · noscan='+(w.noscan||'0')+'（默认退 20MHz 属预期；强开会无视邻区）')+
-      item('wifi_offload (c3po 专用)', w.offload==='n/a'?'本基线无此 UCI 项，走 ECM→NSS 自动卸载':(w.offload==='1'?'=1（已拉回）':'='+(w.offload||'?')+'（需拉回 1）'), w.offload==='1'?'#38d39f':'#8ea3bd')+
-      item('无线端 DHCP 防护', (p.dhcp_guard||'?')==='applied'?'已启用（拦 67→68 / 547→546）':(p.dhcp_guard||'?'), (p.dhcp_guard||'').indexOf('applied')===0?'#38d39f':'#f0b34a')+
-      item('防火墙 / SSH / TTYD', 'fw='+(p.firewall||'?')+' · ssh='+(p.ssh||'?')+' · ttyd='+(p.ttyd||'?'))+
-      item('判速口径', '被卸载流量不经过 Linux 网桥：看 eth0/eth1 + NSS debugfs，br-lan 计数低不代表没加速');
-    var t=$('extTtyd'); if(t)t.href=location.protocol+'//'+location.hostname+':7681/';
-    put('s_kernel', j.kernel||'—'); put('s_baseline', j.baseline||'—');
-    put('s_fw', '编译期关闭（firewall4=n）');
-    put('s_ipv6', '6.12 正常（不再编译期关闭）');
-  }
-  /* CGI 失败时给出可见原因，绝不静默留一片「—」让人以为页面进不去 */
-  function load(){
-    fetch(CGI+'?_='+Date.now(),{cache:'no-store'})
-      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
-      .then(function(j){if(!j||!j.ok)throw new Error('JSON 结构异常');render(j);})
-      .catch(function(e){
-        var g=$('extStatus');
-        if(g)g.innerHTML=item('扩展数据未返回',
-          (e&&e.message?e.message:'网络/CGI 错误')+' · 主页面仍可用，串口跑 health-fix 排查');
-        put('extTempBig','—'); put('extTempPill','数据未返回','#f0b34a');
-      });
-  }
-  load();setInterval(load,10000);
-})();
 </script>
 </body>
 </html>

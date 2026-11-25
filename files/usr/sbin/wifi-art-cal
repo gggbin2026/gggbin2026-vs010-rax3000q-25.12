@@ -1,0 +1,73 @@
+#!/bin/sh
+# wifi-art-cal —— 第 39 次：本机 ART 实证偏移【只读】核对（老仓库 5.4 QSDK 版）
+#   纯 busybox ash，只读 /dev/mtd*，不联网、不改分区、绝不写 /lib/firmware。
+#   为什么没有 on：好固件成功态日志 Caldata not present + CAL version: 0 时
+#   无线有线都正常；往 5.4 QSDK ath11k 塞 cal-*.bin 反而可能 calibration
+#   invalid 拒 probe。本工具只做验收与离线分析，不参与编译期切片。
+#   用法： wifi-art-cal            (= status)
+#          wifi-art-cal status
+#          wifi-art-cal export     (两个切片导出到 /tmp 供离线分析，不改固件)
+#          wifi-art-cal --json
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+CFG=/etc/config/art-truth.conf
+[ -r "$CFG" ] || CFG=/rom/etc/config/art-truth.conf
+OFF2=0x1000; OFF5=0x26800; LEN2=0x16000; LEN5=0x15800
+MAGIC='01 00 04 04 00 00 00 00 00 80'
+FW=/lib/firmware/ath11k/IPQ5018/hw1.0
+FW5=/lib/firmware/ath11k/QCN6122/hw1.0
+say(){ echo "[art-cal] $*"; logger -t art-cal "$*" 2>/dev/null || true; }
+
+find_art(){
+  if [ -r /proc/mtd ]; then
+    n=$(awk -F'"' '/"0:ART"|"0:art"|"ART"|"smem_0"/{gsub(/[^0-9]/,"",$1); print $1; exit}' /proc/mtd 2>/dev/null)
+    [ -n "$n" ] && [ -r "/dev/mtd$n" ] && {
+      ART="/dev/mtd$n"
+      ART_LABEL=$(grep "mtd$n:" /proc/mtd 2>/dev/null | sed -n 's/.*"\(.*\)"/\1/p')
+      return 0; }
+  fi
+  for d in /dev/mtd13 /dev/mtdblock13; do
+    [ -r "$d" ] && { ART="$d"; ART_LABEL="$d"; return 0; }
+  done
+  return 1
+}
+magic_at(){
+  dd if="$ART" bs=1 skip=$(( $1 )) count=10 2>/dev/null | od -An -tx1 | tr -s ' ' | sed 's/^ //;s/ $//'
+}
+report(){
+  find_art || { say "ERROR：找不到 0:ART 分区（/proc/mtd 与 /dev/mtd13 都没有）"; return 1; }
+  say "ART 设备 : $ART  ($ART_LABEL)"
+  sz=$(dd if="$ART" bs=1024 count=1024 2>/dev/null | wc -c)
+  say "ART 可读 : $sz 字节（实证样本 1048576）"
+  m2=$(magic_at "$OFF2"); m5=$(magic_at "$OFF5")
+  say "2.4G @ $OFF2 : $m2"
+  say "5G   @ $OFF5 : $m5"
+  if [ "$m2" = "$MAGIC" ] && [ "$m5" = "$MAGIC" ]; then
+    say "✓ 两个校准块头与本机 ART 实证样本一致（$MAGIC）"
+  else
+    say "⚠ 校准块头与实证样本不同 —— 可能是另一台机器的 ART，拒绝导出"
+  fi
+  for p in "$FW/board-2.bin" "$FW5/board-2.bin" \
+           /lib/firmware/ath11k/qcn6122/hw1.0/board-2.bin \
+           /lib/firmware/IPQ5018/bdwlan.b10 \
+           /lib/firmware/IPQ5018/qcn6122/bdwlan.b60; do
+    [ -e "$p" ] && say "BDF: $p  $(wc -c < "$p") bytes  $(md5sum "$p" 2>/dev/null | awk '{print $1}')"
+  done
+  say "校准状态: 未启用（默认，与好固件 CAL version=0 的成功态一致）"
+  say "结论: ART 只影响功率/信号强弱；能不能 probe 取决于 BDF 与驱动栈，不是校准。"
+  return 0
+}
+do_export(){
+  find_art || { say "ERROR：找不到 ART，拒绝导出"; exit 1; }
+  [ "$(magic_at "$OFF2")" = "$MAGIC" ] || { say "ERROR：2.4G 校准头不符，拒绝跨机导出"; exit 1; }
+  [ "$(magic_at "$OFF5")" = "$MAGIC" ] || { say "ERROR：5G 校准头不符，拒绝跨机导出"; exit 1; }
+  dd if="$ART" of=/tmp/art-cal-2g.bin bs=1 skip=$(( $OFF2 )) count=$(( $LEN2 )) 2>/dev/null
+  dd if="$ART" of=/tmp/art-cal-5g.bin bs=1 skip=$(( $OFF5 )) count=$(( $LEN5 )) 2>/dev/null
+  say "已导出到 /tmp/art-cal-2g.bin（$LEN2）与 /tmp/art-cal-5g.bin（$LEN5）"
+  say "⚠ 仅用于离线分析；【不要】拷进 /lib/firmware，本仓默认不启用校准切片"
+}
+case "${1:-status}" in
+  status|--json) report ;;
+  export) do_export ;;
+  *) echo "用法: wifi-art-cal [status|export]"; exit 1 ;;
+esac
