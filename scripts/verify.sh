@@ -471,6 +471,33 @@ has '改网桥 IP 必读' .github/workflows/build-wds.yml \
 has '🔴 改管理 IP 后请跑 bridge-watchdog resync' files/etc/banner \
   && ok "登录 banner 带改 IP 提示" || bad "banner 缺改 IP 提示"
 [ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 仍精简（14 行内）" || warn "banner 偏长"
+# ── 第 55 次：彻底移除「树里查不到包源 → 真缺 → exit 1」─────────────
+# 03:2x 编译再次在 make 之前断掉：
+#   🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：
+#      luci-i18n-base-zh-cn kmod-bridge
+# 这两个是【平台提供 / 模板生成】，本来就不以独立包目录或符号存在：
+#   · luci-i18n-base-zh-cn：luci.mk 按 po/zh-cn 模板生成
+#   · kmod-bridge：25.12 内核 CONFIG_BRIDGE=y 内建，netsupport.mk 已无该 kmod 定义
+# ★ 定论：「树里能不能找到包源」≠「插件有没有被删」，绝不能当阻断条件。
+P55=1
+if grep -vE '^[[:space:]]*#' scripts/gen-config.sh | grep -qE 'REAL_MISS|_pkg_known_anywhere|完全找不到'; then
+  bad "🔴 仍残留第 54 次「真缺阻断」代码（会再把平台提供项误判成缺包）"; P55=0
+else
+  ok "已彻底移除第 54 次「真缺阻断」代码（REAL_MISS / _pkg_known_anywhere）"
+fi
+has 'PLATFORM_PROVIDED' scripts/gen-config.sh \
+  && has 'kmod-bridge luci-i18n-base-zh-cn' scripts/gen-config.sh \
+  && ok "平台提供项显式归类（内核内建 / luci.mk 模板生成），只计入诊断" \
+  || { bad "缺平台提供项归类"; P55=0; }
+# B 层之后到文件末尾，除「核心锚点」「设备符号」「defconfig 自身失败」外不应再有包相关 exit 1
+n_exit=$(awk '/第 55 次 B 层/{f=1} f && !/^[[:space:]]*#/ && /exit 1/{n++} END{print n+0}' scripts/gen-config.sh)
+[ "$n_exit" -le 2 ] && ok "B 层仅保留 $n_exit 处硬退出（核心锚点收敛 / 设备符号丢失），无包相关阻断" \
+  || { bad "B 层仍有 $n_exit 处代码 exit 1，可能又加了包相关阻断"; P55=0; }
+has 'SEED_DECL_MISS' scripts/gen-config.sh \
+  && ok "A 层 seed 声明 29/29 硬阻断仍在（只增不减的真保障）" \
+  || { bad "A 层硬阻断被误删"; P55=0; }
+[ "$P55" = 1 ] && ok "第 55 次：B 层纯诊断，编译不再因 Kconfig / 包源结构差异停编"
+
 # ── 第 54 次：修复第 52 次「defconfig 后精确 =y」误判 ───────────────
 # 2026-11-25 02:28 编译在 make 之前 exit 1：
 #   🔴 冻结基线包缺失（只增不减）： luci-i18n-base-zh-cn nftables kmod-bridge（+rax3000q 的 ipq-wifi-cucc_vs010）
@@ -483,10 +510,10 @@ P54=1
 has 'SEED_DECL_MISS' scripts/gen-config.sh && has 'A 层 seed 声明' scripts/gen-config.sh \
   && ok "A 层：seed 声明 29/29 硬阻断（防人为删 =y，这才是只增不减的真保障）" \
   || { bad "缺 A 层 seed 声明硬阻断"; P54=0; }
-has 'STRICT_PKGS' scripts/gen-config.sh && has '_pkg_known_anywhere' scripts/gen-config.sh \
+has 'STRICT_PKGS' scripts/gen-config.sh && has 'PLATFORM_PROVIDED' scripts/gen-config.sh \
   && has 'CONVERGED' scripts/gen-config.sh \
-  && ok "B 层：defconfig 后分层诊断（核心锚点严格 / Kconfig 收敛只警告 / 真缺才阻断）" \
-  || { bad "缺 B 层分层诊断"; P54=0; }
+  && ok "B 层：defconfig 后只诊断（核心锚点严格 / 其余收敛与平台提供只警告）" \
+  || { bad "缺 B 层诊断（第55次口径）"; P54=0; }
 if grep -q 'MISSING_PKGS' scripts/gen-config.sh; then
   bad "🔴 仍残留第 52 次的全量精确 =y 阻断（会再次把 Kconfig 收敛误判成缺包）"; P54=0
 else

@@ -208,5 +208,34 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;background:#eef1f4;border
 <div class="row"><span class="k">新增插件 / 服务</span><span class="v ok">✅ PASS，提示「允许」</span></div>
 </div>
 <div class="redbox">🔴 <b>82 项冻结基线一个没动、一个没删</b>；第 51 次 NTP 5 分钟循环、第 50 次改 IP 防护、第 49 次机器狗、管理网段、SSH/TTYD、防火墙/IPv6 关、WAN+LAN 同桥、STP、简洁日志全部原样保留。</div>
-<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据修正于第 54 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
+<h2 class="red">🔴 十四、第 55 次：彻底移除「真缺阻断」（2026-11-25）</h2>
+<div class="redbox"><b>第 54 次包上传后，编译再次在 make 之前断掉：</b><br>
+<code>🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：luci-i18n-base-zh-cn kmod-bridge</code><br><br>
+<b>又是判据写错了层，不是源码、不是 feeds、不是你传错了。</b>
+第 54 次仍留了一句「符号 + 包源都找不到 → 真缺 → exit 1」，而这两项恰恰是
+<b>平台提供 / 模板生成</b>，本来就不以独立包目录或符号存在。</div>
+<div class="card">
+<div class="row"><span class="k red">🔴 kmod-bridge</span><span class="v">25.12 内核 <code>CONFIG_BRIDGE=y</code> 内建，<code>netsupport.mk</code> 已无 <code>KernelPackage/bridge</code> → 没有包符号也没有包源，<b>功能由内核提供，反而更省资源</b></span></div>
+<div class="row"><span class="k red">🔴 luci-i18n-base-zh-cn</span><span class="v">由 <code>luci.mk</code> 按 <code>po/zh-cn</code> 模板生成，源码树里没有同名包目录 → 构建系统生成，不是缺包</span></div>
+<div class="row"><span class="k red">🔴 定论</span><span class="v"><b>「树里能不能找到包源/符号」与「插件有没有被删」没有关系</b>，绝不能当阻断条件。第 52 次用「精确 =y」、第 54 次用「包源存在性」，是同一个错的两种写法</span></div>
+</div>
+<h3>最终口径（以后任何版本都不再误停编）</h3>
+<div class="card">
+<div class="row"><span class="k red">🔴 A 层 seed 声明</span><span class="v">29 项逐条查 <code>=y</code>；删/改/注释 → <span class="bad">exit 1</span>。<b>这才是「只增不减」的真保障</b></span></div>
+<div class="row"><span class="k red">🔴 核心锚点 5 项</span><span class="v"><code>dropbear / ttyd / luci-app-ttyd / ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb</code> 必须精确 <code>=y</code> → 真丢功能才拦</span></div>
+<div class="row"><span class="k">⚪ 其余一切</span><span class="v">Kconfig 收敛 / 符号合并 / 平台提供 / 模板生成 / 机型条件项 → <b>不阻断</b>，统一 <code>::warning::</code> + 写 <code>build.env</code></span></div>
+</div>
+<div class="redbox"><code>REAL_MISS</code> / <code>_pkg_known_anywhere()</code> <b>整段删除</b>；新增
+<code>PLATFORM_PROVIDED="kmod-bridge luci-i18n-base-zh-cn"</code> 只计入诊断。
+B 层之后只剩 <b>2 处代码 exit 1</b>（核心锚点收敛 / 设备符号丢失），没有任何包相关阻断。</div>
+<div class="card">
+<div class="row"><span class="k">复现本次报错（2 项树里查不到）</span><span class="v ok">✅ PASS（26 精确 =y / 2 平台提供 / 0 阻断）</span></div>
+<div class="row"><span class="k">全部 29 项精确 =y</span><span class="v ok">✅ PASS（29/29）</span></div>
+<div class="row"><span class="k">rax3000q + 4 项收敛</span><span class="v ok">✅ PASS（机型条件项跳过）</span></div>
+<div class="row"><span class="k">删 seed 里 luci-app-ttyd</span><span class="v bad">✅ A 层精确拦 exit 1</span></div>
+<div class="row"><span class="k">核心锚点被收敛</span><span class="v bad">✅ B 层拦 exit 1</span></div>
+<div class="row"><span class="k">新增插件 / 服务</span><span class="v ok">✅ PASS，提示「允许」</span></div>
+</div>
+<div class="redbox">🔴 <b>82 项冻结基线一个没动、一个没删</b>；<code>config/*.seed</code> 29 个 <code>=y</code> 一字未改。第 54 次野文件排除 / nft 报红、第 51 次 NTP、第 50 次改 IP、第 49 次机器狗、管理网段 / SSH / TTYD / 防火墙 / IPv6 / 同桥 / STP / 简洁日志全部原样保留。</div>
+<div class="foot">基准 = 第 51 次 · 冻结于第 52 次 · 判据最终修正于第 55 次 · 详细日志 / 单数据源：<code>baseline/frozen-baseline.conf</code> · 三重校验：<code>verify.sh</code> + <code>gen-config.sh</code> + 锚点下限</div>
 </div></body></html>

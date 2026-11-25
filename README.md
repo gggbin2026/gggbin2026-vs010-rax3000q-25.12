@@ -871,3 +871,34 @@ WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪 —— �
 管理网段 `172.10.10.241/22`、SSH/TTYD、无线 DHCP 防护、防火墙/IPv6 关、删 wan/wan6、
 WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪 —— 全部原样保留。
 本轮**没有删任何插件，也没有加任何插件**。
+
+## 第 55 次：彻底移除「真缺阻断」，B 层改为纯诊断（2026-11-25）
+
+> 第 54 次包上传后，编译**再次在 make 之前**断掉：
+> `🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：luci-i18n-base-zh-cn kmod-bridge`
+>
+> 又是判据写错了层，不是源码 / feeds / 上传问题。第 54 次仍留了
+> 「符号 + 包源都找不到 → 真缺 → `exit 1`」，而这两项是**平台提供 / 模板生成**：
+> `kmod-bridge` 由 25.12 内核 `CONFIG_BRIDGE=y` 内建（`netsupport.mk` 已无该 kmod 定义）；
+> `luci-i18n-base-zh-cn` 由 `luci.mk` 按 `po/zh-cn` 模板生成，树里没有同名包目录。
+> 🔴 **定论：「树里能不能找到包源/符号」与「插件有没有被删」没有关系**，绝不能当阻断条件。
+
+### 最终口径
+
+| 层 | 规则 | 停编？ |
+|---|---|---|
+| 🔴 A 层 seed 声明 | `config/*.seed` 里 29 项逐条 `=y` | **会** —— 这才是「只增不减」 |
+| 🔴 核心锚点 5 项 | `dropbear / ttyd / luci-app-ttyd / ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb` defconfig 后精确 `=y` | **会** —— 真丢功能才拦 |
+| ⚪ 其余一切 | Kconfig 收敛 / 符号合并 / 平台提供 / 模板生成 / 机型条件项 | **不会** —— 只 `::warning::` + 写 `build.env` |
+
+`REAL_MISS` / `_pkg_known_anywhere()` 整段删除；新增
+`PLATFORM_PROVIDED="kmod-bridge luci-i18n-base-zh-cn"` 只计入诊断。
+B 层之后仅剩 2 处代码 `exit 1`（核心锚点收敛 / 设备符号丢失），**无任何包相关阻断**。
+`verify.sh` 加第 55 次判据，防止以后再把包源存在性当阻断条件加回来。
+
+六种场景实测：复现本次报错 → PASS；全部 =y → PASS(29/29)；rax3000q → PASS；
+删 seed 里 `luci-app-ttyd` → A 层精确拦（只报 1 项）；核心锚点收敛 → B 层拦；新增 → PASS。
+
+🔴 **82 项冻结基线一个没动、一个没删**；`config/*.seed` 29 个 `=y` 一字未改。
+第 54 次构建树野文件排除 / nft 报红、第 51 次 NTP 5 分钟循环、第 50 次改 IP 防护、
+第 49 次机器狗、管理网段、SSH/TTYD、防火墙/IPv6 关、WAN+LAN 同桥、STP、简洁日志全部原样保留。

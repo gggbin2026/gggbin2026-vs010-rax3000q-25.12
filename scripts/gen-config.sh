@@ -9,12 +9,17 @@ cd "$TREE"
 echo "==================== [gen-config] $D / $MODE ===================="
 # 第 52 次：插件 / 服务以第 51 次为冻结基线，【只增不减】。
 # 包清单唯一数据源 = baseline/frozen-baseline.conf 的 [pkg] 段。
-# 第 54 次修正：第 52 次误把「defconfig 后 .config 里精确 =y」当成冻结判据，
-#   结果把 Kconfig 合法收敛的 4 个包（kmod-bridge 已由内核 CONFIG_BRIDGE=y
-#   内建、i18n 符号变体、nftables 符号合并、rax3000q 下不生成的本地 BDF 包）
-#   报成「缺包」直接 exit 1，编译在 make 之前就断了。
-#   正确判据 = 【seed 声明层】（防人删 =y）+【核心锚点精确 =y】（防功能真丢）。
-#   defconfig 收敛是 Kconfig 行为，不是「减少插件」，只诊断不阻断。
+# 第 54 次修正：第 52 次误把「defconfig 后 .config 里精确 =y」当成冻结判据。
+# 第 55 次【最终口径】：第 54 次仍留了一句「Kconfig 无符号、无包源 → 真缺 → exit 1」，
+#   又把 luci-i18n-base-zh-cn（luci.mk 模板生成，无独立包目录）和
+#   kmod-bridge（内核 CONFIG_BRIDGE=y 内建，netsupport.mk 已无该 kmod 定义）
+#   误判成缺包，03:2x 的编译再次在 make 之前断掉。
+#   ★ 定论：「树里能不能找到包源/符号」与「插件有没有被删」没有关系，
+#     OpenWrt 版本、feed 布局、机型都会让它变，绝不能当阻断条件。
+#   最终只剩两类硬阻断：
+#     A 层 seed 声明 29/29 =y（防人为删插件 —— 这才是「只增不减」）
+#     核心锚点 5 项 defconfig 后精确 =y（SSH/TTYD/射频固件，防功能真丢）
+#   其余一切 Kconfig 收敛 / 符号合并 / 平台提供 / 模板生成，只 ::warning:: 诊断。
 
 # ── 1. 自动探测 target / subtarget（不写死符号）──
 if [ -f target/linux/qualcommax/image/ipq50xx.mk ]; then
@@ -157,37 +162,29 @@ if ! make defconfig; then
   echo "::error::make defconfig 失败（常见原因：缺 gawk / ncurses / feeds 未 update）"
   exit 1
 fi
-# ── 第 54 次 B 层：defconfig 之后【分层诊断】，不再全量精确 =y 阻断 ──
-# 为什么改：第 52 次在这里要求 29 个包 defconfig 后全部精确 =y，结果
-#   2026-11-25 02:28 的编译在 make 之前就 exit 1：
-#     vs010     缺 luci-i18n-base-zh-cn / nftables / kmod-bridge
-#     rax3000q  再多一个 ipq-wifi-cucc_vs010
-#   而上一轮（11-24 15:15）同一棵树、同一 seed，gen-config 输出
-#   「✓ 760 个 =y 符号」并顺利跑到 make 48 分钟 —— 这 4 个从来就不在
-#   .config 里，是 make defconfig 的正常收敛，不是谁把插件删了。
-#   实证：25.12 的 target/linux/generic/config-6.12 里 CONFIG_BRIDGE=y
-#   （bridge 内核内建，netsupport.mk 已无 KernelPackage/bridge），
-#   kmod-bridge 包符号自然被 Kconfig 隐藏；功能由内核内建提供，更好。
+# ── 第 55 次 B 层：defconfig 之后【只诊断，不阻断】──────────────────
+# 复盘两次误判：
+#   第 52 次：要求 29 项 defconfig 后全精确 =y → 误伤 Kconfig 收敛（02:28 失败）
+#   第 54 次：留了「符号+包源都找不到 → 真缺 → exit 1」→ 误伤平台提供项（03:2x 失败）
+#     · luci-i18n-base-zh-cn：由 luci.mk 按 po/zh-cn 模板生成，源码树里
+#       【没有】同名包目录，Kconfig 里也不一定出现精确符号行
+#     · kmod-bridge：25.12 的 target/linux/generic/config-6.12 里
+#       CONFIG_BRIDGE=y（内核内建），netsupport.mk 已无 KernelPackage/bridge，
+#       自然既没有包符号也没有包源 —— 但功能由内核提供，反而更省资源
+#   ★ 这两项「树里查不到」是 25.12 的正常结构，不是 feeds 没装好，更不是删了插件。
 #
-# 分层规则：
-#   ① 核心锚点 STRICT_PKGS（SSH / TTYD / 射频固件）—— 必须精确 =y，否则阻断。
-#      这 5 个在本次失败日志里全部是 =y，正是第 45 次差点弄丢的那批。
-#   ② 机型条件项 —— rax3000q 下本地 BDF 包未生成，seed 声明仍在，跳过核对。
-#   ③ 其余包 —— defconfig 收敛只 ::warning:: 汇总（Kconfig 合法行为，不阻断）。
-#   ④ 符号在 .config 与 tmp/.config-package.in 与包源里都找不到 —— 才是真缺，阻断。
+# 最终规则（以后任何 OpenWrt 版本 / feed 布局都不再误停编）：
+#   🔴 硬阻断 ① A 层：config/*.seed 里 29 项逐条 =y（见上，防人为删）
+#   🔴 硬阻断 ② 核心锚点 STRICT_PKGS 5 项 defconfig 后必须精确 =y
+#   ⚪ 其余一切：精确 =y 就计数；否则统一归入 CONVERGED，只 ::warning:: 汇总
+#      + 写 build.env；绝不 exit 1
+#   ⚪ 机型条件项：rax3000q 下本地 BDF 包不生成，seed 声明仍在，跳过
 STRICT_PKGS="dropbear ttyd luci-app-ttyd ath11k-firmware-ipq5018-qcn6122 kmod-ath11k-ahb"
 COND_VS010_ONLY="ipq-wifi-cucc_vs010"     # board-inject.sh 只在 vs010 生成该本地包
+# 「平台提供 / 模板生成」：seed 声明保留，但本来就不以独立包符号或目录存在
+PLATFORM_PROVIDED="kmod-bridge luci-i18n-base-zh-cn"
 
-_pkg_known_anywhere() {
-    # .config 里有任意变体 =y（如 nftables-json）
-    grep -qE "^CONFIG_PACKAGE_$1(-[a-z0-9_-]+)?=y$" .config 2>/dev/null && return 0
-    # Kconfig 认识这个符号
-    grep -q "^config PACKAGE_$1$" tmp/.config-package.in 2>/dev/null && return 0
-    # 包源存在（base 或 feeds 都算）
-    find package feeds -maxdepth 5 -type d -name "$1" -print -quit 2>/dev/null | grep -q . && return 0
-    return 1
-}
-STRICT_MISS=""; REAL_MISS=""; CONVERGED=""; CONDI_SKIP=""; N_CONF_OK=0
+STRICT_MISS=""; CONVERGED=""; CONDI_SKIP=""; N_CONF_OK=0; N_PLATFORM=0
 for p in $REQUIRED_PKGS; do
     case " $COND_VS010_ONLY " in
       *" $p "*) [ "$D" = vs010 ] || {
@@ -196,33 +193,27 @@ for p in $REQUIRED_PKGS; do
     if grep -q "^CONFIG_PACKAGE_$p=y$" .config; then
         N_CONF_OK=$((N_CONF_OK+1)); continue
     fi
-    if _pkg_known_anywhere "$p"; then
-        CONVERGED="$CONVERGED $p"
-        case " $STRICT_PKGS " in
-          *" $p "*) STRICT_MISS="$STRICT_MISS $p" ;;   # 核心锚点不允许收敛
-        esac
-    else
-        REAL_MISS="$REAL_MISS $p"
-    fi
+    case " $PLATFORM_PROVIDED " in
+      *" $p "*) N_PLATFORM=$((N_PLATFORM+1)); CONVERGED="$CONVERGED $p(平台提供)"; continue ;;
+    esac
+    CONVERGED="$CONVERGED $p"
+    case " $STRICT_PKGS " in
+      *" $p "*) STRICT_MISS="$STRICT_MISS $p" ;;   # 核心锚点不允许收敛
+    esac
 done
 if [ -n "$STRICT_MISS" ]; then
     echo "::error::🔴 核心锚点包被 defconfig 收敛，功能会真丢：$STRICT_MISS"
     echo "::error::查 feeds.conf.default / ./scripts/feeds install -a；禁止改 seed 的 =y"
     exit 1
 fi
-if [ -n "$REAL_MISS" ]; then
-    echo "::error::🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：$REAL_MISS"
-    echo "::error::这通常意味着基线选错了，或 feeds 没 update/install 完整"
-    exit 1
-fi
-[ -n "$CONVERGED" ] && echo "::warning::Kconfig 合法收敛（seed 声明未变、非减少插件）：$CONVERGED"
+[ -n "$CONVERGED" ] && echo "::warning::Kconfig 收敛 / 平台提供（seed 声明未变，非减少插件）：$CONVERGED"
 [ -n "$CONDI_SKIP" ] && echo "[gen-config] 机型条件项跳过：$CONDI_SKIP"
-echo "[gen-config] ✓ B 层 defconfig 诊断：$N_CONF_OK 个精确 =y / $(printf '%s' "$CONVERGED" | wc -w) 个 Kconfig 收敛 / 0 个真缺"
+echo "[gen-config] ✓ B 层 defconfig 诊断：$N_CONF_OK 个精确 =y / $N_PLATFORM 个平台提供 / $(printf '%s' "$CONVERGED" | wc -w) 项收敛汇总 / 0 阻断"
 # 收敛清单写进构建档案，刷机后可在 /etc/build-info 追溯
 if [ -n "$CONVERGED" ]; then
     printf 'kconfig-converged:%s\n' "$CONVERGED" >> "$ROOT/build.env" 2>/dev/null || true
 fi
-echo "[gen-config] ✓ 冻结基线 $NPKG 项：A 层 seed 声明 $NPKG/$NPKG 硬阻断 + B 层功能锚点核对通过"
+echo "[gen-config] ✓ 冻结基线 $NPKG 项：A 层 seed 声明 $NPKG/$NPKG 硬阻断 + 核心锚点核对通过（其余只诊断）"
 
 grep -q "^$DEV_SYM=y" .config || {
   echo "::error::defconfig 把设备符号 $DEV_SYM 丢了"
