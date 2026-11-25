@@ -29,14 +29,14 @@ on:
         default: 'false'
         type: boolean
       wds_delay:
-        description: '机器狗：连续网络不通多少分钟自动重启（1~120，默认 5；刷后也能 set-delay 改）'
+        description: '【第58次：留空=不注入】机器狗已改成插件，配置请刷后自己写 /etc/wdsdog.conf 或 uci set。这里填了值才在编译期写入出厂 UCI'
         required: false
-        default: '5'
+        default: ''
         type: string
       wds_peer:
-        description: '机器狗 ping 对端：auto=按主备自动推导 .241↔.242，或填具体 IP，off=只查无线关联'
+        description: '【第58次：留空=不注入】ping 对端：auto / 具体 IP / off。留空则由用户自配'
         required: false
-        default: 'auto'
+        default: ''
         type: string
       ntp_poll_minutes:
         description: 'NTP 循环校时间隔（分钟，1~1440，默认 5；刷后也能 ntp-poller set-minutes 改）'
