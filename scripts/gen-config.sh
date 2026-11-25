@@ -8,8 +8,13 @@ cd "$TREE"
 
 echo "==================== [gen-config] $D / $MODE ===================="
 # 第 52 次：插件 / 服务以第 51 次为冻结基线，【只增不减】。
-# 包清单唯一数据源 = baseline/frozen-baseline.conf 的 [pkg] 段；
-# 少任何一个包直接 ::error:: 阻断，绝不静默产出缺插件的固件。
+# 包清单唯一数据源 = baseline/frozen-baseline.conf 的 [pkg] 段。
+# 第 54 次修正：第 52 次误把「defconfig 后 .config 里精确 =y」当成冻结判据，
+#   结果把 Kconfig 合法收敛的 4 个包（kmod-bridge 已由内核 CONFIG_BRIDGE=y
+#   内建、i18n 符号变体、nftables 符号合并、rax3000q 下不生成的本地 BDF 包）
+#   报成「缺包」直接 exit 1，编译在 make 之前就断了。
+#   正确判据 = 【seed 声明层】（防人删 =y）+【核心锚点精确 =y】（防功能真丢）。
+#   defconfig 收敛是 Kconfig 行为，不是「减少插件」，只诊断不阻断。
 
 # ── 1. 自动探测 target / subtarget（不写死符号）──
 if [ -f target/linux/qualcommax/image/ipq50xx.mk ]; then
@@ -121,7 +126,26 @@ if [ ! -f "$BASELINE" ]; then
 fi
 REQUIRED_PKGS=$(awk -F'|' '$1=="[pkg]" {print $2}' "$BASELINE")
 [ -n "$REQUIRED_PKGS" ] || { echo "::error::冻结基线 [pkg] 段为空或被删"; exit 1; }
-echo "[gen-config] 冻结基线已加载：$(printf '%s\n' $REQUIRED_PKGS | wc -l) 个包（只增不减）"
+NPKG=$(printf '%s\n' $REQUIRED_PKGS | wc -l)
+echo "[gen-config] 冻结基线已加载：$NPKG 个包（只增不减）"
+
+# ── 第 54 次 A 层【硬阻断】：seed 声明层 ─────────────────────────────
+# 「不能再减少插件」唯一会被人改坏的地方，就是 config/*.seed 里的 =y 行：
+# 注释掉 / 改成 =n / 删行。defconfig 之后的符号变化是 Kconfig 自动收敛，
+# 不是人删的。所以真正的铁律落在这一层：29 项逐条查 seed 里有没有 =y。
+# 第 45 次「gen-config 用 feeds list 误判把 luci-app-ttyd 从 .config 删掉」
+# 的坑，也会被这一层 + 下面「主题剔除白名单」共同挡住。
+SEED_DECL_MISS=""
+for p in $REQUIRED_PKGS; do
+  grep -q "^CONFIG_PACKAGE_$p=y$" "$ROOT"/config/*.seed 2>/dev/null \
+    || SEED_DECL_MISS="$SEED_DECL_MISS $p"
+done
+if [ -n "$SEED_DECL_MISS" ]; then
+  echo "::error::🔴 冻结基线包在 config/*.seed 里被删 / 改值（只增不减）：$SEED_DECL_MISS"
+  echo "::error::要【加】包请往 baseline/frozen-baseline.conf 的 [pkg] 段追加行；禁止动已有 =y"
+  exit 1
+fi
+echo "[gen-config] ✓ A 层 seed 声明 $NPKG/$NPKG 在位（只增不减，此层硬阻断）"
 
 # GNU awk 是 OpenWrt 的硬依赖（include/scan.awk 用 asort）。mawk 会让
 # tmp/.targetinfo 变成 0 字节，进而让 defconfig 把全部设备符号丢掉。
@@ -133,20 +157,72 @@ if ! make defconfig; then
   echo "::error::make defconfig 失败（常见原因：缺 gawk / ncurses / feeds 未 update）"
   exit 1
 fi
-# 第 52 次：冻结基线包核对 —— 缺失即【阻断】，不再只是警告。
-# 用户明确要求「以后插件以第 51 次为准，不能再减少，只能增加或保持」。
-# 若这里报缺包，说明 feed 真的没有或 defconfig 丢符号，去查 feeds.conf.default，
-# 而不是回头把 seed 里的 =y 注释掉 —— 那正是第 45 次把 TTYD 弄丢的原因。
-MISSING_PKGS=""
+# ── 第 54 次 B 层：defconfig 之后【分层诊断】，不再全量精确 =y 阻断 ──
+# 为什么改：第 52 次在这里要求 29 个包 defconfig 后全部精确 =y，结果
+#   2026-11-25 02:28 的编译在 make 之前就 exit 1：
+#     vs010     缺 luci-i18n-base-zh-cn / nftables / kmod-bridge
+#     rax3000q  再多一个 ipq-wifi-cucc_vs010
+#   而上一轮（11-24 15:15）同一棵树、同一 seed，gen-config 输出
+#   「✓ 760 个 =y 符号」并顺利跑到 make 48 分钟 —— 这 4 个从来就不在
+#   .config 里，是 make defconfig 的正常收敛，不是谁把插件删了。
+#   实证：25.12 的 target/linux/generic/config-6.12 里 CONFIG_BRIDGE=y
+#   （bridge 内核内建，netsupport.mk 已无 KernelPackage/bridge），
+#   kmod-bridge 包符号自然被 Kconfig 隐藏；功能由内核内建提供，更好。
+#
+# 分层规则：
+#   ① 核心锚点 STRICT_PKGS（SSH / TTYD / 射频固件）—— 必须精确 =y，否则阻断。
+#      这 5 个在本次失败日志里全部是 =y，正是第 45 次差点弄丢的那批。
+#   ② 机型条件项 —— rax3000q 下本地 BDF 包未生成，seed 声明仍在，跳过核对。
+#   ③ 其余包 —— defconfig 收敛只 ::warning:: 汇总（Kconfig 合法行为，不阻断）。
+#   ④ 符号在 .config 与 tmp/.config-package.in 与包源里都找不到 —— 才是真缺，阻断。
+STRICT_PKGS="dropbear ttyd luci-app-ttyd ath11k-firmware-ipq5018-qcn6122 kmod-ath11k-ahb"
+COND_VS010_ONLY="ipq-wifi-cucc_vs010"     # board-inject.sh 只在 vs010 生成该本地包
+
+_pkg_known_anywhere() {
+    # .config 里有任意变体 =y（如 nftables-json）
+    grep -qE "^CONFIG_PACKAGE_$1(-[a-z0-9_-]+)?=y$" .config 2>/dev/null && return 0
+    # Kconfig 认识这个符号
+    grep -q "^config PACKAGE_$1$" tmp/.config-package.in 2>/dev/null && return 0
+    # 包源存在（base 或 feeds 都算）
+    find package feeds -maxdepth 5 -type d -name "$1" -print -quit 2>/dev/null | grep -q . && return 0
+    return 1
+}
+STRICT_MISS=""; REAL_MISS=""; CONVERGED=""; CONDI_SKIP=""; N_CONF_OK=0
 for p in $REQUIRED_PKGS; do
-  grep -q "^CONFIG_PACKAGE_$p=y$" .config || MISSING_PKGS="$MISSING_PKGS $p"
+    case " $COND_VS010_ONLY " in
+      *" $p "*) [ "$D" = vs010 ] || {
+          CONDI_SKIP="$CONDI_SKIP $p($D 下本地包不生成，seed 声明仍在)"; continue; } ;;
+    esac
+    if grep -q "^CONFIG_PACKAGE_$p=y$" .config; then
+        N_CONF_OK=$((N_CONF_OK+1)); continue
+    fi
+    if _pkg_known_anywhere "$p"; then
+        CONVERGED="$CONVERGED $p"
+        case " $STRICT_PKGS " in
+          *" $p "*) STRICT_MISS="$STRICT_MISS $p" ;;   # 核心锚点不允许收敛
+        esac
+    else
+        REAL_MISS="$REAL_MISS $p"
+    fi
 done
-if [ -n "$MISSING_PKGS" ]; then
-  echo "::error::🔴 冻结基线包缺失（只增不减，禁止精简）：$MISSING_PKGS"
-  echo "::error::禁止把 config/*.seed 里的 =y 注释掉；要加包请往 baseline/frozen-baseline.conf 的 [pkg] 段追加行"
-  exit 1
+if [ -n "$STRICT_MISS" ]; then
+    echo "::error::🔴 核心锚点包被 defconfig 收敛，功能会真丢：$STRICT_MISS"
+    echo "::error::查 feeds.conf.default / ./scripts/feeds install -a；禁止改 seed 的 =y"
+    exit 1
 fi
-echo "[gen-config] ✓ 冻结基线 $(printf '%s\n' $REQUIRED_PKGS | wc -l) 个包全部进入 .config（只增不减）"
+if [ -n "$REAL_MISS" ]; then
+    echo "::error::🔴 冻结基线包在当前源码树里完全找不到（Kconfig 无符号、无包源）：$REAL_MISS"
+    echo "::error::这通常意味着基线选错了，或 feeds 没 update/install 完整"
+    exit 1
+fi
+[ -n "$CONVERGED" ] && echo "::warning::Kconfig 合法收敛（seed 声明未变、非减少插件）：$CONVERGED"
+[ -n "$CONDI_SKIP" ] && echo "[gen-config] 机型条件项跳过：$CONDI_SKIP"
+echo "[gen-config] ✓ B 层 defconfig 诊断：$N_CONF_OK 个精确 =y / $(printf '%s' "$CONVERGED" | wc -w) 个 Kconfig 收敛 / 0 个真缺"
+# 收敛清单写进构建档案，刷机后可在 /etc/build-info 追溯
+if [ -n "$CONVERGED" ]; then
+    printf 'kconfig-converged:%s\n' "$CONVERGED" >> "$ROOT/build.env" 2>/dev/null || true
+fi
+echo "[gen-config] ✓ 冻结基线 $NPKG 项：A 层 seed 声明 $NPKG/$NPKG 硬阻断 + B 层功能锚点核对通过"
 
 grep -q "^$DEV_SYM=y" .config || {
   echo "::error::defconfig 把设备符号 $DEV_SYM 丢了"

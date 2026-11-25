@@ -61,6 +61,43 @@ if [ "$MODE" = ap ]; then
 else
   sed -i "s/option hostname '\([^']*\)'/option hostname '\1-WDS'/" "$TREE/files/etc/config/system" 2>/dev/null || true
 fi
+# ── 第 54 次：构建树排除「包外野文件」（仓库文件原地保留，一个不删）──
+# 网页上传是覆盖式，不会删多余文件。仓库里比冻结基线多出的 files/ 文件会被
+# 上面的 cp -r 整目录带进固件：另一个自称「第 53 次」的 ntp-sync 三件套
+# （又一个 5 分钟 NTP 守护，会和 ntp-poller 同时改系统时间）、
+# dhcp-guard init.d（与 l2-guard 重复开机自启）、约 1.5MB QSDK 5.4 闭源
+# WiFi 固件（Data.msc / regdb.bin，第 41 次已论证禁止进 6.12 主线 ath11k 镜像）。
+# 这里只在【构建树】里剔除，不动仓库；KEEP_EXTRA_FILES=1 可原样保留。
+if [ "${KEEP_EXTRA_FILES:-0}" != '1' ]; then
+  EXTRA54=''
+  for x in \
+    etc/config/art-truth.conf \
+    etc/config/ntp-sync \
+    etc/config/oem-stack-truth.conf \
+    etc/init.d/dhcp-guard \
+    etc/init.d/ntp-sync \
+    lib/firmware/IPQ5018/Data.msc \
+    lib/firmware/IPQ5018/fw_ini_cfg.bin \
+    lib/firmware/IPQ5018/qcn6122/Data.msc \
+    lib/firmware/IPQ5018/qcn6122/fw_ini_cfg.bin \
+    lib/firmware/IPQ5018/qcn6122/regdb.bin \
+    lib/firmware/IPQ5018/regdb.bin \
+    usr/sbin/ntp-sync \
+    usr/sbin/wifi-art-cal \
+    usr/sbin/wifi-stack-check; do
+      if [ -e "$TREE/files/$x" ]; then
+        rm -f "$TREE/files/$x"
+        EXTRA54="$EXTRA54 $x"
+      fi
+  done
+  # 清掉可能留下的空目录（只清 IPQ5018 这条，不碰其它 firmware 路径）
+  rmdir "$TREE/files/lib/firmware/IPQ5018/qcn6122" "$TREE/files/lib/firmware/IPQ5018" 2>/dev/null || true
+  [ -n "$EXTRA54" ] && echo "  ✓ 构建树已排除包外野文件（仓库不动）：$(echo "$EXTRA54" | wc -w) 个" \
+    || echo "  · 构建树无包外野文件（干净）"
+else
+  echo "  ⚠ KEEP_EXTRA_FILES=1：包外 files/ 文件将原样进固件"
+fi
+
 printf '%s\n' "$MODE" > "$TREE/files/etc/firmware_mode"
 
 # ── 第 49 次：编译期自定义机器狗（仅 WDS）──────────────────────────

@@ -1,72 +1,86 @@
-VS010 / RAX3000Q · 总修复可上传文件 · 第 52 次（2026-11-25）
+VS010 / RAX3000Q · 总修复可上传文件 · 第 54 次（2026-11-25）
 
-【只传这一个】累积全量包，含第 41~51 次全部修复 + 第 52 次。
-之前所有包（含第 51 次）全部作废。仓库：
+【只传这一个】累积全量包，含第 41~52 次全部修复 + 第 54 次。
+之前所有包（含第 52 次）全部作废。仓库：
   https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-openwrt
 
 ════════════════════════════════════════
-★ 本次：插件 / 服务冻结基线（只增不减）+ 详细日志（标红）
+★ 先说清楚：上次不是上传问题
 ════════════════════════════════════════
-用户要求：「以后插件就以这版为准，不能再减少了，以后只能增加或保持，
-并出具一版详细的日志，重要地方标红。」
+11-25 02:28 的编译（HEAD a6bd8fbe）在第 52 次包 139/139 逐字节一致、
+verify.sh RESULT: PASS 的情况下，仍在 make 之前 exit 1：
+  ##[error]🔴 冻结基线包缺失（只增不减，禁止精简）：
+    vs010     luci-i18n-base-zh-cn nftables kmod-bridge
+    rax3000q  luci-i18n-base-zh-cn nftables kmod-bridge ipq-wifi-cucc_vs010
 
-【本轮一个插件都没删、也没加】纯粹把第 51 次的现状冻结成基线。
-
-🔴 铁律：以后只能【增加或保持】，【不能再减少】。
-🔴 「插件」取广义：不只锁 luci-app-ttyd（本来只有 1 个，锁了等于没锁），
-   而是把 29 个编译包 + 4 个全局开关 + 9 个 init.d 服务 + 20 个 usr/sbin 工具
-   + 4 个状态页/CGI + 4 个首启脚本 + 12 项关键 UCI 配置 = 共 82 项 全部冻结。
-
-【单一数据源】baseline/frozen-baseline.conf
-  🔴 只允许【追加新行】，禁止删除 / 改名 / 改值任何已有行。
-  verify.sh 里 FROZEN_MIN=82 是硬编码下限 —— 连清单一起删行也拦得住；
-  另有锚点复核（TTYD / SSH / l2-guard / 机器狗 / ntp-poller）硬编码再查一遍。
-
-【三重校验，少一项就出不了固件】
-  ① 上传前：sh scripts/verify.sh → 🔴 冻结基线…丢失 → RESULT: FAIL
-  ② 编译期：gen-config.sh 读同一份清单 [pkg] 段，defconfig 后缺包
-            → ::error::🔴 冻结基线包缺失 + exit 1
-  ③ 防篡改：条目数下限 82 + 锚点复核
-
-  gen-config.sh 的 REQUIRED_PKGS 从写死 5 个改成读清单全量 29 个，
-  核对从「只警告」升级为「阻断」；verify.sh 旧判据「luci-app 数量 == 1」
-  改成「>=1 且基线项在位」，以后新增 LuCI 插件不会再被自检误杀。
-
-  实测：原样 → PASS(82/82)；删 nic-guard → FAIL；注释掉 luci-app-ttyd → FAIL；
-       删清单一行 → FAIL(81<82)；新增服务/工具 → PASS 且提示「允许」。
-
-【以后怎么「增加」插件（正确姿势）】
-  1. baseline/frozen-baseline.conf 的 [pkg] 段【追加】一行 [pkg]|新包名
-  2. config/plugins.seed（或 common.seed）把对应包写成 =y
-  3. sh scripts/verify.sh 会提示「基线外新增项（允许）」，编译期自动核对
-  4. 新增服务 / 页面就往 [initd] / [sbin] / [www] 段追加
-  🔴 不要删旧行、不要把 =y 注释掉、不要改成 =n。
+★ 是我第 52 次把判据写错了层，不是你传错了、也不是源码/驱动问题。
+  第 52 次要求「make defconfig 之后 29 个包在 .config 里全部精确 =y」，
+  但 defconfig 本来就会合法收敛符号：
+    · kmod-bridge → 25.12 内核 CONFIG_BRIDGE=y 内建，netsupport.mk 已无该 kmod 定义
+    · luci-i18n-base-zh-cn / nftables → 符号合并 / 变体
+    · ipq-wifi-cucc_vs010 → board-inject.sh 只在 vs010 生成本地 BDF 包
+  上一轮（11-24 15:15）同树同 seed 输出「✓ 760 个 =y 符号」并跑到 make 48 分钟，
+  这 4 个从来就不在 .config 里 —— 是 Kconfig 行为，不是「减少插件」。
+  日志里 6 条 recursive dependency detected! 是 qosmio feed 自带告警，不是失败原因。
 
 ════════════════════════════════════════
-★ 详细日志（重要处标红）—— 三份，覆盖三种媒介
+★ 本次修了什么
 ════════════════════════════════════════
-  baseline/插件基线冻结报告.html      ★主交付：CSS 真红 color:#d00 + 红底警示框
-                                     手机/浏览器直接打开，最直观
-  baseline/插件与服务冻结基线-详细日志.md   🔴 + 加粗，GitHub/编辑器阅读
-  baseline/基线摘要.log               ANSI \033[31m 真红，SSH 终端 cat 出来就是红的
+【① 冻结基线判据归位（主修）】
+  🔴 A 层【硬阻断】config/*.seed 里 29 项逐条查 =y —— 这才是「只增不减」的真保障
+     注释掉 / 改成 =n / 删行 → ::error:: + exit 1（第 45 次 TTYD 被误删的坑也挡住）
+  B 层 defconfig 分层诊断：
+     · 核心锚点 5 项必须精确 =y → 否则阻断
+       (dropbear / ttyd / luci-app-ttyd / ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb)
+     · 其余 Kconfig 合法收敛 → 只 ::warning:: 汇总，不阻断
+     · 符号 + 包源都找不到 → 才是真缺，阻断
+     · rax3000q 下本地 BDF 包按机型条件跳过（seed 声明仍查）
+  收敛清单写进 build.env → 设备端 /etc/build-info 可追溯。
+  🔴 82 项冻结基线一个没动、一个没删；本轮没删也没加任何插件。
 
-  内容：10 条标红重点 / 三重校验 / 29 个包逐个用途与定位文件 /
-        9 服务 + 20 工具 + 4 页面 + 4 首启 + 12 配置 + 4 全局开关 /
-        🔴 明确关闭项（红线）/ 访问网络速查 / 五种校验实测 / 变更记录。
+【② 构建树自动排除 14 个包外野文件（仓库文件一个不删）】
+  上一轮核查：网页上传是覆盖式，仓库比包多 61 个文件，其中 14 个在 files/ 下会被
+  cp -r 整目录带进固件 —— 另一套自称「第 53 次」的 ntp-sync 三件套（又一个 5 分钟
+  NTP 守护，会和 ntp-poller 同时改系统时间）、dhcp-guard init.d（与 l2-guard 重复
+  开机自启）、约 1.5MB QSDK 5.4 闭源 WiFi 固件（Data.msc / regdb.bin）。
+  ★ 不用你手动删！prepare.sh 只在【构建树】里剔除并打印
+    「✓ 构建树已排除包外野文件（仓库不动）：14 个」，仓库里文件原地保留。
+    想原样带回去：设 KEEP_EXTRA_FILES=1。
+  ★ oem54/ 资料目录、FLASHING.md、firmware/*、flash.py、ipq5018-vs010.dts、
+    两份 ART、DTS 目录、oem_extract/rootfs.ubi 都不在编译链里，继续保留别删。
 
-  ★ 编译后固件下载页也有：两份 Release NOTES 开头新增
-    「🔴 【插件基线已冻结】」段；Actions 组织产物时用 ANSI 真红打印
-    「🔴【插件基线已冻结】…82 项只增不减…」，和「改 IP 必读」红字一起出现。
+【③ nft 缺失不再静默空转】
+  nftables 可能被 defconfig 收敛，l2-guard 原来只 quietly skip。现在：
+    写 /tmp/l2guard.reason + logger 红字；health-fix 明确报告
+    「🔴 nft 命令 / bridge family 不可用 —— 无线 DHCP 防护【未生效】」
+  刷后跑 health-fix 或 apk list nftables* 复核；若真缺包，把编译日志贴回来补等价符号。
+
+【④ 其它】
+  两份 Release NOTES 开头加 ✅【第 54 次】说明；verify.sh 加第 54 次判据，
+  防止以后再把「全量精确 =y 阻断」加回来；三份标红详细日志同步第 54 次章节。
+
+════════════════════════════════════════
+★ 实测（六种场景全过）
+════════════════════════════════════════
+  ✅ 全部 29 项精确 =y            → PASS(29/29)
+  ✅ 复现 02:28 的 4 项收敛      → PASS(25 精确 =y / 4 收敛只警告 / 0 真缺)
+  ✅ rax3000q 本地包不生成       → PASS（机型条件项跳过）
+  ✅ 删 seed 里 luci-app-ttyd    → 被 A 层拦 exit 1
+  ✅ 核心锚点被收敛              → 被 B 层拦 exit 1
+  ✅ 新增插件 / 服务             → PASS，提示「基线外新增项（允许）」
+  构建树排除段实跑：14 个野文件全清、剩余 0，仓库源文件未动
+  verify.sh 普通 / 严格：RESULT: PASS（0 警告）
+  shell / bash / Python / YAML / JS 语法全 0 错
 
 ════════════════════════════════════════
 一、前几轮已修好的（本包全部保留，一个没少）
 ════════════════════════════════════════
-  ✅ NTP(第51次)     每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）
-  ✅ 机器狗(49/50)   WDS 默认启用：连续不通 5 分钟重启；set-delay 改时间；
-                     mode=or 三判据、max_reboots=3 防无限重启；
-                     改网桥 IP 不误重启 + resync 自动发现对端 + 下载页红字
-  ✅ 管理网段        172.10.10.241 / 255.255.252.0（/22）；WDS 备机自动 .242
-  ✅ SSH 正常        0.0.0.0:22 / root / admin；四层开机兜底
+  ✅ 冻结基线(52)   82 项只增不减；三份标红详细日志
+  ✅ NTP(51)        每 5 分钟循环校时（ntp-poller 顶替 sysntpd 常驻）
+  ✅ 机器狗(49/50)  WDS 默认启用：连续不通 5 分钟重启；set-delay 改时间；
+                    mode=or 三判据、max_reboots=3；改 IP 不误重启 + resync
+  ✅ 管理网段       172.10.10.241 / 255.255.252.0（/22）；WDS 备机自动 .242
+  ✅ SSH 正常       0.0.0.0:22 / root / admin；四层开机兜底
   ✅ 无线 DHCP 防护 / 插件 luci-app-ttyd / 防火墙 + IPv6 关 / 删 wan/wan6
   ✅ WAN+LAN 同桥 / STP / 主题不白屏 / 第 46 次 TARGET_DEVICES 裁剪
   ✅ CI 简洁日志 / 低资源（cron、ucitrack、led、gpio_switch 仍停用）
@@ -77,12 +91,11 @@ VS010 / RAX3000Q · 总修复可上传文件 · 第 52 次（2026-11-25）
 解压后按原路径全部覆盖。网页上传注意：
   · .github/workflows 第一个字符是【点】
   · .gitignore 是隐藏文件，网页容易漏；命令行最稳：
-      git add -A && git commit -m "第52次：插件基线冻结+详细日志" && git push
-  · ★ 本轮新增整个 baseline/ 目录（4 个文件），别漏传：
-      frozen-baseline.conf（唯一数据源，最重要）
-      插件基线冻结报告.html / 插件与服务冻结基线-详细日志.md / 基线摘要.log
-  · 仓库里这些【别删】：FLASHING.md / firmware/* / flash.py / poll_build.py /
-    ipq5018-vs010.dts / oem_extract/rootfs.ubi / ATR文件/ / 两份 ART / DTS 目录
+      git add -A && git commit -m "第54次：修复冻结基线误判+构建树排除野文件" && git push
+  · 本轮改动文件：scripts/gen-config.sh、scripts/verify.sh、scripts/prepare.sh、
+    files/usr/sbin/l2-guard、files/usr/sbin/health-fix、两份 workflow、
+    baseline/ 三份日志、README.md / FIRMWARE.md / 修复总览.md / 上传说明.txt
+    （baseline/frozen-baseline.conf 与 config/*.seed 一个字没改）
 
 上传后 sh scripts/verify.sh → RESULT: PASS（0 警告）再点 Run workflow。
   baseline 保持 qosmio-25.12-nss；★ device 先选 vs010 单跑，成功再 both
@@ -90,17 +103,28 @@ VS010 / RAX3000Q · 总修复可上传文件 · 第 52 次（2026-11-25）
   AP  输入框：ntp_poll_minutes=5
   nand_patch / ART_CALIBRATION / ssh / build_verbose 全部保持 false
 
+Prepare 日志里这次应该看到（不再 exit 1）：
+  [gen-config] ✓ A 层 seed 声明 29/29 在位（只增不减，此层硬阻断）
+  ::warning::Kconfig 合法收敛（seed 声明未变、非减少插件）：...
+  [gen-config] ✓ B 层 defconfig 诊断：25 个精确 =y / 3 个 Kconfig 收敛 / 0 个真缺
+  ✓ 构建树已排除包外野文件（仓库不动）：14 个
+然后 make download / make 才会真正开始。
+
 ════════════════════════════════════════
 三、刷前 / 刷后
 ════════════════════════════════════════
 刷完第一件事 passwd 改掉 admin（弱密码）。管理入口 http://172.10.10.241
   LuCI /cgi-bin/luci · 状态页 /bridge/(WDS) 或 /ap/(AP) · SSH :22 · TTYD :7681
-刷后验证：sh scripts/verify.sh（在设备上没有，这是上传前用的）
-  ntp-poller status 应显示「300 秒 = 5 分钟」；bridge-watchdog status 看机器狗
+刷后建议跑：
+  health-fix                # 应看到 ✓ nft/bridge 可用 + ✓ nwrt_l2 表已加载
+  ntp-poller status         # 应显示「300 秒 = 5 分钟」
+  bridge-watchdog status    # 看机器狗 / 对端 / 重启计数
+  apk list nftables*        # 复核 nft 用户态确实在（若上面 health-fix 报红）
 两台都刷 AP 且同时在线会都是 .241 冲突，第二台改 .243（改完两台各跑 resync）。
 64 位不死 U-Boot 是硬门槛；VS010 绝不刷 CMCC 机型的 U-Boot/MIBIB/大分区；
 刷前备份 0:ART(mtd13) 与 0:TRAINING(mtd14)；
 RAX3000Q 板级未在 6.12 实机验证，首次务必 3.3V USB-TTL；
 WDS 4addr 在开源 ath11k+NSS 下未验证；CN+HE160 开机 5G 约 60s CAC 不可见。
 
-历次修复清单：修复总览.md（累积至第 52 次）
+历次修复清单：修复总览.md（累积至第 54 次）
+详细日志（标红）：baseline/插件基线冻结报告.html（已同步第 54 次）

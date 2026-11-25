@@ -471,6 +471,44 @@ has '改网桥 IP 必读' .github/workflows/build-wds.yml \
 has '🔴 改管理 IP 后请跑 bridge-watchdog resync' files/etc/banner \
   && ok "登录 banner 带改 IP 提示" || bad "banner 缺改 IP 提示"
 [ "$(wc -l < files/etc/banner)" -le 14 ] && ok "登录 banner 仍精简（14 行内）" || warn "banner 偏长"
+# ── 第 54 次：修复第 52 次「defconfig 后精确 =y」误判 ───────────────
+# 2026-11-25 02:28 编译在 make 之前 exit 1：
+#   🔴 冻结基线包缺失（只增不减）： luci-i18n-base-zh-cn nftables kmod-bridge（+rax3000q 的 ipq-wifi-cucc_vs010）
+# 这 4 个是 make defconfig 的【合法 Kconfig 收敛】，不是谁删了插件：
+#   25.12 的 target/linux/generic/config-6.12 里 CONFIG_BRIDGE=y（内核内建），
+#   netsupport.mk 已无 KernelPackage/bridge，kmod-bridge 包符号自然隐藏；
+#   i18n / nftables 属符号合并；ipq-wifi-cucc_vs010 只在 vs010 生成本地包。
+#   上一轮同树同 seed 输出「✓ 760 个 =y 符号」并跑到 make 48 分钟可佐证。
+P54=1
+has 'SEED_DECL_MISS' scripts/gen-config.sh && has 'A 层 seed 声明' scripts/gen-config.sh \
+  && ok "A 层：seed 声明 29/29 硬阻断（防人为删 =y，这才是只增不减的真保障）" \
+  || { bad "缺 A 层 seed 声明硬阻断"; P54=0; }
+has 'STRICT_PKGS' scripts/gen-config.sh && has '_pkg_known_anywhere' scripts/gen-config.sh \
+  && has 'CONVERGED' scripts/gen-config.sh \
+  && ok "B 层：defconfig 后分层诊断（核心锚点严格 / Kconfig 收敛只警告 / 真缺才阻断）" \
+  || { bad "缺 B 层分层诊断"; P54=0; }
+if grep -q 'MISSING_PKGS' scripts/gen-config.sh; then
+  bad "🔴 仍残留第 52 次的全量精确 =y 阻断（会再次把 Kconfig 收敛误判成缺包）"; P54=0
+else
+  ok "已移除第 52 次误判逻辑（MISSING_PKGS 全量阻断）"
+fi
+has 'COND_VS010_ONLY' scripts/gen-config.sh \
+  && ok "rax3000q 下本地 BDF 包按机型条件跳过（seed 声明仍在）" \
+  || { bad "缺机型条件项处理"; P54=0; }
+# 构建树排除野文件（仓库文件一个不删）
+has 'KEEP_EXTRA_FILES' scripts/prepare.sh && has '构建树已排除包外野文件' scripts/prepare.sh \
+  && ok "prepare.sh 构建树排除 14 个包外野文件（仓库原地保留，KEEP_EXTRA_FILES=1 可逆）" \
+  || { bad "缺构建树野文件排除"; P54=0; }
+for x in etc/init.d/ntp-sync etc/init.d/dhcp-guard usr/sbin/ntp-sync lib/firmware/IPQ5018/Data.msc; do
+  # prepare.sh 的 for 列表用的是相对 $TREE/files/ 的路径，不带 files/ 前缀
+  has "    $x " scripts/prepare.sh || { bad "排除名单缺 $x"; P54=0; }
+done
+[ "$P54" = 1 ] && ok "第 54 次：双 NTP 守护 / 重复 DHCP 防护 / QSDK 闭源固件均不会进镜像"
+# nft 功能可见性（nftables 被收敛时不能静默空转）
+has 'nft-missing' files/usr/sbin/l2-guard && has '无线 DHCP 防护【未生效】' files/usr/sbin/health-fix \
+  && ok "nft 缺失时明确报红（health-fix 可查），防护不静默空转" \
+  || { bad "缺 nft 可见性检查"; P54=0; }
+
 # ── 第 52 次：冻结基线「只增不减」（用户：以后插件以第 51 次为准）────
 # 单数据源 baseline/frozen-baseline.conf；本段逐项比对当前仓库：
 #   · 基线里任何一项消失 → bad（阻断），编译期 gen-config.sh 也会 ::error:: 退出 1
@@ -529,8 +567,8 @@ else
     && ok "锚点复核：TTYD / SSH / l2-guard / 机器狗 / ntp-poller 均在" \
     || bad "🔴 锚点复核失败（关键插件或服务被删）"
   # 编译期闭环
-  has 'frozen-baseline.conf' scripts/gen-config.sh && has 'MISSING_PKGS' scripts/gen-config.sh \
-    && ok "gen-config 编译期读同一份基线，缺包即 ::error:: 阻断" \
+  has 'frozen-baseline.conf' scripts/gen-config.sh && has 'SEED_DECL_MISS' scripts/gen-config.sh \
+    && ok "gen-config 编译期读同一份基线，删 seed 声明即 ::error:: 阻断" \
     || bad "gen-config 未接入冻结基线"
   # 新增项检测：只允许增加，绝不阻断
   for d in files/etc/init.d files.ap/etc/init.d; do

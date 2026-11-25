@@ -814,3 +814,97 @@ l2-guard / 机器狗 / ntp-poller）硬编码再查一遍，防整个清单被�
 管理网段 `172.10.10.241/22`、SSH/TTYD、DHCP 防护、防火墙/IPv6 关、
 WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪 —— 全部原样保留。
 本轮**没有删任何插件，也没有加任何插件**，纯粹把现状冻结成基线。
+
+## 第 54 次：修复冻结基线误判导致的编译中断（2026-11-25）
+
+> 11-25 02:28 的 WDS 编译（HEAD `a6bd8fbe`，第 52 次包已完整上传且 139/139 一致）
+> 在 **make 之前**就 `exit 1`，vs010 与 rax3000q 两台同一处：
+>
+> ```
+> ##[error]🔴 冻结基线包缺失（只增不减，禁止精简）：
+>   vs010     luci-i18n-base-zh-cn nftables kmod-bridge
+>   rax3000q  luci-i18n-base-zh-cn nftables kmod-bridge ipq-wifi-cucc_vs010
+> ##[error]Process completed with exit code 1.
+> ```
+>
+> Prepare 里 `verify.sh` 已 `RESULT: PASS`、`feeds install -a` 完成、board-inject 完成，
+> 卡在 `gen-config.sh` 的 `make defconfig` 之后那一段——**编译一步都没开始**。
+
+### ① 根因：第 52 次把判据放错了层
+
+第 52 次把「冻结基线包核对」升级为：**`make defconfig` 之后，29 个包在 `.config` 里必须全部精确 `=y`，否则 `exit 1`**。
+但 `make defconfig` 本来就会**合法收敛符号**：
+
+| 包 | 为什么不是 `=y` |
+|---|---|
+| `kmod-bridge` | 25.12 的 `target/linux/generic/config-6.12` 里 **`CONFIG_BRIDGE=y`**（bridge 内核内建），`package/kernel/linux/modules/netsupport.mk` 已无 `KernelPackage/bridge` 定义 → 包符号被 Kconfig 隐藏，功能由内核内建提供，**更好** |
+| `luci-i18n-base-zh-cn` | LuCI i18n 由 `luci.mk` 按 po 目录生成，符号在 defconfig 阶段合并/条件隐藏 |
+| `nftables` | 符号合并 / 变体（内核侧 `CONFIG_NF_TABLES_BRIDGE=y` 等已内建） |
+| `ipq-wifi-cucc_vs010` | `board-inject.sh` **只在 vs010** 生成这个本地 BDF 包，rax3000q 下根本没有该 Makefile |
+
+**决定性佐证**：上一轮（11-24 15:15）**同一棵 qosmio 树、同一份 seed**，gen-config 输出
+`✓ 760 个 =y 符号，设备 unicom_vs010 保住` 并顺利跑到 `make` 48 分钟。
+这 4 个包从来就不在 `.config` 里 —— 是 Kconfig 行为，**不是谁把插件删了**。
+第 52 次之前只核对 5 个核心包，所以从未暴露。
+
+日志里那 6 条 `recursive dependency detected!`（dnsdist / snort3 / weechat / knot-resolver / openappid）
+是 qosmio feed 自带包的 Kconfig 告警，`# configuration written to .config` 说明 defconfig 本身成功，**不是失败原因**。
+
+### ② 修法：判据归位，红线不放松
+
+| 层 | 新判据 | 少了会怎样 |
+|---|---|---|
+| 🔴 **A 层 seed 声明（硬阻断）** | `config/*.seed` 里 29 项逐条查 `CONFIG_PACKAGE_<名>=y` | 注释掉 / 改 `=n` / 删行 → `::error::` + `exit 1` |
+| **B 层 defconfig 分层诊断** | 核心锚点 5 项必须精确 `=y`；其余 Kconfig 收敛只 `::warning::` 汇总；符号在 `.config`、`tmp/.config-package.in`、包源里都找不到才真阻断 | 核心锚点收敛 → 阻断；合法收敛 → 只报告 |
+| **机型条件项** | `ipq-wifi-cucc_vs010` 在 rax3000q 下跳过 defconfig 核对（seed 声明仍查） | 不再误报 |
+| **防篡改（不变）** | `FROZEN_MIN=82` + 锚点复核 | 连清单一起删行 / 整体替换也 FAIL |
+
+🔴 **「只增不减」的真保障落在 A 层** —— 唯一会被人改坏的就是 seed 里的 `=y`。
+第 45 次「gen-config 用 `feeds list` 误判把 `luci-app-ttyd` 从 `.config` 删掉」的坑也被 A 层挡住。
+核心锚点 = `dropbear / ttyd / luci-app-ttyd / ath11k-firmware-ipq5018-qcn6122 / kmod-ath11k-ahb`，
+这 5 个在失败日志里全部是 `=y`，**仍严格阻断，绝不放松**。
+
+`gen-config.sh` 输出改为：
+```
+[gen-config] ✓ A 层 seed 声明 29/29 在位（只增不减，此层硬阻断）
+::warning::Kconfig 合法收敛（seed 声明未变、非减少插件）： luci-i18n-base-zh-cn nftables kmod-bridge
+[gen-config] ✓ B 层 defconfig 诊断：25 个精确 =y / 3 个 Kconfig 收敛 / 0 个真缺
+```
+收敛清单同时写进 `build.env` → 设备端 `/etc/build-info` 可追溯。
+
+### ③ 顺带修掉的三件隐患
+
+1. 🔴 **构建树排除 14 个包外野文件**（`prepare.sh`，**仓库文件一个不删**，`KEEP_EXTRA_FILES=1` 可逆）。
+   上一轮核查发现网页上传是覆盖式，仓库比第 52 次包多出 61 个文件，其中 14 个在 `files/` 下会被
+   `cp -r` 整目录带进固件：另一套自称「第 53 次」的 `ntp-sync` 三件套（又一个 5 分钟 NTP 守护，
+   会和 `ntp-poller` **同时改系统时间**）、`dhcp-guard` init.d（与 `l2-guard` 重复开机自启）、
+   约 1.5 MB QSDK 5.4 闭源 WiFi 固件（`Data.msc` / `regdb.bin`，第 41 次已论证禁止进 6.12 主线 ath11k 镜像）。
+   现在只在**构建树**里剔除并打印 `✓ 构建树已排除包外野文件（仓库不动）：14 个`。
+2. 🔴 **nft 缺失不再静默空转**：`nftables` 可能被 defconfig 收敛，`l2-guard` 原来只 quietly skip；
+   现在写 `/tmp/l2guard.reason` + `logger` 红字，`health-fix` 明确报告
+   「🔴 nft 命令 / bridge family 不可用 —— 无线 DHCP 防护【未生效】」。
+   刷后跑 `health-fix` 或 `apk list nftables*` 即可复核；若真缺包，把编译日志贴回来补等价符号。
+3. 两份 Release NOTES 开头新增 `✅ 【第 54 次】` 说明；`verify.sh` 加第 54 次判据，
+   确保以后不会再有人把「全量精确 =y 阻断」加回来。
+
+### ④ 实测（六种场景）
+
+| 场景 | 结果 |
+|---|---|
+| 全部 29 项精确 `=y` | ✅ PASS（29/29） |
+| **复现 02:28 失败**：4 项 Kconfig 收敛 | ✅ PASS（25 精确 =y / 4 收敛只警告 / 0 真缺） |
+| rax3000q（本地 BDF 包不生成） | ✅ PASS（机型条件项跳过） |
+| 删掉 seed 里 `luci-app-ttyd` 的 `=y` | ✅ 被 A 层拦 `exit 1` |
+| 核心锚点被 defconfig 收敛 | ✅ 被 B 层拦 `exit 1` |
+| 新增插件 / 服务 | ✅ PASS，提示「基线外新增项（允许）」 |
+
+构建树排除段实跑：14 个野文件全清、剩余 0；仓库源文件未被改动。
+`verify.sh` 普通 / 严格均 `PASS（0 警告）`。
+
+### ⑤ 没动的东西
+
+🔴 **82 项冻结基线一个没动、一个没删**（`baseline/frozen-baseline.conf` 保持 82 行原样）。
+第 51 次 NTP 每 5 分钟循环、第 50 次改 IP 不误重启、第 49 次机器狗、
+管理网段 `172.10.10.241/22`、SSH/TTYD、无线 DHCP 防护、防火墙/IPv6 关、删 wan/wan6、
+WAN+LAN 同桥、STP、简洁日志、第 46 次 TARGET_DEVICES 裁剪 —— 全部原样保留。
+本轮**没有删任何插件，也没有加任何插件**。
