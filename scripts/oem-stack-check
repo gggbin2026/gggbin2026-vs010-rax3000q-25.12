@@ -1,0 +1,15 @@
+#!/bin/sh
+# 只读自检：确认本仓是主线 ath11k，不是闭源 QSDK 栈
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+echo "Content-Type: text/plain"; echo
+echo "[oem-stack-check] 只读，不改 flash"
+if lsmod 2>/dev/null | grep -qiE 'qca_ol|wifi_3_0|ipq_cnss2'; then
+  echo "  检测到闭源 QSDK 栈 —— 这不是本仓固件，请勿混用 .ko / BDF / DTS"
+else
+  echo "  OK 未检测到 qca_ol/umac/ipq_cnss2"
+fi
+lsmod 2>/dev/null | grep -qiE 'ath11k|mac80211' && echo "  OK 主线 ath11k / mac80211 在" || echo "  注意：未加载 ath11k，射频可能没 probe"
+echo "  kernel: $(uname -r 2>/dev/null)"
+echo "  baseline: $(cat /etc/nwrt/baseline 2>/dev/null || echo '?')"
+echo "  build: $(cat /etc/nwrt/build 2>/dev/null || echo '?')"
+echo "  mode: $(cat /etc/nwrt/mode 2>/dev/null || echo '?') / default $(cat /etc/nwrt/default_mode 2>/dev/null || echo '?')"

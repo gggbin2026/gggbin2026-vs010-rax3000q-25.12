@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# START=21：WAN+LAN+无线全在 br-lan；端口归属读 sysfs，不猜默认路由
+START=21
+start() {
+  [ -f /lib/functions.sh ] && . /lib/functions.sh
+  uci -q delete network.wan 2>/dev/null; uci -q delete network.wan6 2>/dev/null || true
+  uci set network.lan='interface'
+  uci set network.lan.device='br-lan'
+  uci set network.lan.proto='static'
+  # 第二台 WDS 客户端：echo 172.10.10.242 > /etc/nwrt/ipaddr，重启不丢
+  IP=$(cat /etc/nwrt/ipaddr 2>/dev/null || echo 172.10.10.241)
+  case "$IP" in *[!0-9.]*|'') IP=172.10.10.241 ;; esac
+  uci set network.lan.ipaddr="$IP"
+  uci set network.lan.netmask='255.255.252.0'
+  uci set network.lan.ipv6='0'
+  uci set network.lan.stp='1'
+  uci -q delete network.lan.ports 2>/dev/null || true
+  # 先取 br-lan 现有成员，再补 eth*/lan*/wan* 与无线口
+  for p in /sys/class/net/br-lan/brif/* /sys/class/net/eth* /sys/class/net/lan* \
+           /sys/class/net/wan* /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
+    [ -e "$p" ] || continue
+    n=$(basename "$p")
+    case "$n" in br-lan|lo) continue ;; esac
+    uci add_list network.lan.ports="$n"
+  done
+  uci commit network
+  /etc/init.d/network reload >/dev/null 2>&1 || true
+  logger -t bridge-netfix "OK br-lan 成员=$(uci -q get network.lan.ports)"
+}

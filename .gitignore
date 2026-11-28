@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+*.log
+openwrt/
+out/
+build.log
+__pycache__/
+*.pyc
+.work/
+# 总修复包里那 3 行（第 43 次被 verify 卡死的卫生项）已补齐

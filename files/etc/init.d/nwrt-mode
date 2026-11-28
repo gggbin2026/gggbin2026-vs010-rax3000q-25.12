@@ -1,0 +1,11 @@
+#!/bin/sh /etc/rc.common
+# START=24：开机按 /etc/nwrt/mode 重放一次模式配置（薄壳，核心在 nwrt-apply-mode）
+START=24
+USE_PROCD=0
+EXTRA_COMMANDS="switch"
+start() {
+  [ -x /usr/sbin/nwrt-apply-mode ] && /usr/sbin/nwrt-apply-mode boot
+}
+switch() {
+  [ -x /usr/sbin/nwrt-apply-mode ] && /usr/sbin/nwrt-apply-mode "$1"
+}

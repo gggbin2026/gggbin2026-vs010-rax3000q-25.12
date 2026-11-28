@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+# START=23：编译期已显式 n；运行期再兜底，清空配置、关软/硬 flow offload
+START=23
+start() {
+  for s in firewall firewall4; do
+    [ -x "/etc/init.d/$s" ] || continue
+    "/etc/init.d/$s" stop >/dev/null 2>&1 || true
+    "/etc/init.d/$s" disable >/dev/null 2>&1 || true
+  done
+  : > /etc/config/firewall
+  uci -q set firewall.@defaults[0].flow_offloading='0' 2>/dev/null || true
+  uci -q set firewall.@defaults[0].flow_offloading_hw='0' 2>/dev/null || true
+  uci commit firewall 2>/dev/null || true
+  sysctl -p /etc/sysctl.d/99-nwrt-no-ipv6.conf >/dev/null 2>&1 || true
+  logger -t no-firewall "OK firewall off / ipv6 off"
+}

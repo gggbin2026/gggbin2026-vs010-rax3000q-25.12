@@ -1,0 +1,4 @@
+config l2guard 'main'
+	option enabled '1'
+	# 只丢无线口进来的 DHCP Offer/ACK；有线侧上级 DHCP 照常透传
+	option scope 'wlan* phy*-ap*'

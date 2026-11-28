@@ -1,0 +1,85 @@
+#!/bin/sh
+# 只读状态 JSON。三个 UBNT 页面 + vs010-ubnt-skin.js 的 fetch hook 都读它。
+# 🔴 零写入：本 CGI 只读，不做任何配置写操作、不调用模式切换命令。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+echo 'Content-Type: application/json; charset=utf-8'; echo
+j(){ printf '"%s":"%s"' "$1" "$(printf '%s' "$2" | sed 's/\\/\\\\/g;s/"/\\"/g')"; }
+num(){ v=$(printf '%s' "$2" | tr -cd '0-9'); [ -n "$v" ] && printf '"%s":%s' "$1" "$v" || printf '"%s":null' "$1"; }
+MODE=$(cat /etc/nwrt/mode 2>/dev/null || echo wds)
+DEF=$(cat /etc/nwrt/default_mode 2>/dev/null || echo wds)
+KERNEL=$(uname -r 2>/dev/null || echo '?')
+HOST=$(uci -q get system.@system[0].hostname 2>/dev/null || echo NWRT)
+MODEL=$(cat /tmp/sysinfo/model 2>/dev/null || echo 'IPQ5018')
+BUILD=$(cat /etc/nwrt/build 2>/dev/null || echo '?')
+BASE=$(cat /etc/nwrt/baseline 2>/dev/null || echo '?')
+COMMIT=$(cat /etc/nwrt/source-commit 2>/dev/null || echo '')
+TIME=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '?')
+UP=$(cat /proc/uptime 2>/dev/null | cut -d' ' -f1); UP=${UP%%.*}; UP=${UP:-0}
+UPH=$((UP/3600)); UPM=$(((UP%3600)/60)); UPS=$((UP%60))
+UPTIME=$(printf '%d天 %02d:%02d:%02d' "$UPH" "$UPM" "$UPS" "$((UPS))" 2>/dev/null || echo '?')
+# CPU 温度：type 含 cpu 的热区
+CT=''
+for t in /sys/class/thermal/thermal_zone*/type; do
+  [ -r "$t" ] || continue
+  case "$(cat "$t" 2>/dev/null)" in *cpu*|*CPU*)
+    v=$(cat "${t%/*}/temp" 2>/dev/null); [ -n "$v" ] && CT="$((v/1000))°C"; break ;;
+  esac
+done
+# 射频温度：hwmon 里 ath11k_hwmon，按设备树节点标注而不是 phy 编号
+RT=''
+for h in /sys/class/hwmon/hwmon*/name; do
+  [ -r "$h" ] || continue
+  case "$(cat "$h" 2>/dev/null)" in *ath11k*)
+    v=$(cat "$(dirname "$h")"/temp1_input 2>/dev/null); [ -n "$v" ] && RT="${RT:+$RT / }$((v/1000))°C" ;;
+  esac
+done
+LOAD=$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1)
+CPU=$(printf '%s' "$LOAD" | awk '{printf "%d", $1*100}' 2>/dev/null || echo 0)
+MT=$(grep MemTotal /proc/meminfo 2>/dev/null | tr -cd '0-9'); MA=$(grep MemAvailable /proc/meminfo 2>/dev/null | tr -cd '0-9')
+MEM=0; [ -n "$MT" ] && [ -n "$MA" ] && [ "$MT" -gt 0 ] && MEM=$(((MT-MA)*100/MT))
+PORTS=''
+for p in /sys/class/net/*; do
+  [ -d "$p" ] || continue
+  n=$(basename "$p")
+  case "$n" in lo|sit0|gre0|gretap0|erspan0|ip6tnl0|teql0|bonding_masters) continue ;; esac
+  sp=$(cat "$p/speed" 2>/dev/null); case "$sp" in ''|-1) sp='—' ;; 1000) sp='1G' ;; 2500) sp='2.5G' ;; 100) sp='100M' ;; 10) sp='10M' ;; esac
+  ca=$(cat "$p/carrier" 2>/dev/null); [ "$ca" = 1 ] && ca=1 || ca=0
+  PORTS="${PORTS:+$PORTS,}{\"name\":\"$n\",\"speed\":\"$sp\",\"carrier\":$ca}"
+done
+RADIOS=''
+for s in $(uci show wireless 2>/dev/null | grep '=wifi-device' | cut -d. -f2 | cut -d= -f1); do
+  b=$(uci -q get "wireless.$s.band" 2>/dev/null); h=$(uci -q get "wireless.$s.hwmode" 2>/dev/null)
+  band='2.4G'; case "$b$h" in *5g*|*11a*|*11axa*) band='5G' ;; esac
+  ch=$(uci -q get "wireless.$s.channel" 2>/dev/null || echo '—')
+  ht=$(uci -q get "wireless.$s.htmode" 2>/dev/null || echo '—')
+  dis=$(uci -q get "wireless.$s.disabled" 2>/dev/null || echo 0)
+  st='已启用'; [ "$dis" = 1 ] && st='已关闭'
+  RADIOS="${RADIOS:+$RADIOS,}{\"band\":\"$band\",\"ssid\":\"\",\"channel\":\"$ch\",\"htmode\":\"$ht\",\"status\":\"$st\"}"
+done
+NSSP=0; NSF='—'; NSC='—'; NSL='—'
+lsmod 2>/dev/null | grep -qiE 'qca_nss|nss_drv|ecm' && NSSP=1
+for f in /sys/kernel/debug/qca-nss-drv/fw_version /sys/kernel/debug/ecm/ecm_nss_ipv4/connection_count; do
+  [ -r "$f" ] && { v=$(head -c 80 "$f" 2>/dev/null | tr -d '\n'); case "$f" in *fw_version) NSF="$v" ;; *) NSC="$v" ;; esac; }
+done
+# 巡检 / 机器狗（单常驻 nwrt-tick）
+TC=/etc/nwrt/tick.conf
+cget(){ x=$(grep -m1 "^$1=" "$TC" 2>/dev/null | cut -d= -f2); case "$x" in ''|*[!0-9]*) echo "$2" ;; *) echo "$x" ;; esac; }
+TEN=$(cget ENABLED 1); TDRY=$(cget DRYRUN 1)
+TLAST=$(head -1 /tmp/nwrt-tick.status 2>/dev/null || echo '—')
+GUARD=$(uci -q get l2guard.main.enabled 2>/dev/null); [ "$GUARD" = 1 ] && GUARD='开启（无线侧 DHCP 已拦）' || GUARD='关闭'
+TTYD='未装'; [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enabled 2>/dev/null && TTYD='已启用' || TTYD='已装未启用'; }
+printf '{"ok":1,'
+j product "$(cat /etc/nwrt/product 2>/dev/null || echo 'WDS/AP（仿UBNT）')"; printf ','
+j mode "$MODE"; printf ','; j default_mode "$DEF"; printf ','
+j host "$HOST"; printf ','; j model "$MODEL"; printf ','
+j kernel "$KERNEL"; printf ','; j baseline "$BASE"; printf ','; j source_commit "$COMMIT"; printf ','
+j build "$BUILD"; printf ','; j time "$TIME"; printf ','; j uptime "$UPTIME"; printf ','
+printf '"sys":{'; num cpu_usage_pct "$CPU"; printf ','; num mem_used_pct "$MEM"; printf ','
+j cpu_temp "$CT"; printf ','; j radio_temps "$RT"; printf '},'
+printf '"ports":[%s],' "$PORTS"
+printf '"radios":[%s],' "$RADIOS"
+printf '"nss":{'; num present "$NSSP"; printf ','; j fw "$NSF"; printf ','; j conn "$NSC"; printf ','; j load "$NSL"; printf '},'
+printf '"tick":{'; num enabled "$TEN"; printf ','; num dryrun "$TDRY"; printf ','; j last "$TLAST"; printf '},'
+j guard "$GUARD"; printf ','; j ttyd "$TTYD"; printf ','; j ssh 'dropbear · ttyMSM0 115200n8'; printf ','
+j ipv6 'off'; printf ','; j firewall 'off'
+printf '}\n'

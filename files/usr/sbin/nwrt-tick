@@ -1,0 +1,62 @@
+#!/bin/sh
+# WDS/AP（仿UBNT）· 唯一常驻巡检
+#   单个 shell 进程 + sleep，60s 一轮分频做：NTP 校时 / WDS 关联只读巡检 / 状态快照。
+#   🔴 不做射频下线、不重启机器、不循环 reload、不新增第二个常驻。
+#   DRYRUN=1（出厂默认）时只记日志与快照，绝不自动动作。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+C=/etc/nwrt/tick.conf
+cfg(){
+  v=$(grep -m1 "^$1=" "$C" 2>/dev/null | cut -d= -f2)
+  case "$v" in ''|*[!0-9]*) echo "$2" ;; *) echo "$v" ;; esac
+}
+[ "$(cfg ENABLED 1)" = 1 ] || { echo '[nwrt-tick] ENABLED!=1，不启动' > /tmp/nwrt-tick.status; exit 0; }
+SEC=$(cfg TICK_SEC 60); NTP_E=$(cfg NTP_EVERY 5); WDS_E=$(cfg WDS_EVERY 2)
+DRY=$(cfg DRYRUN 1); CD=$(cfg RELOAD_COOLDOWN 30)
+NTP=$(grep -m1 '^NTP_SERVER=' "$C" 2>/dev/null | cut -d= -f2); NTP=${NTP:-172.10.10.254}
+[ "$SEC" -gt 0 ] || SEC=60
+[ "$NTP_E" -gt 0 ] || NTP_E=5
+[ "$WDS_E" -gt 0 ] || WDS_E=2
+echo "[nwrt-tick] start sec=$SEC ntp_every=$NTP_E wds_every=$WDS_E dryrun=$DRY" > /tmp/nwrt-tick.status
+logger -t nwrt-tick "start sec=$SEC dryrun=$DRY（单常驻）"
+round=0; since_reload=$CD
+while :; do
+  round=$((round+1)); since_reload=$((since_reload+1))
+  MODE=$(cat /etc/nwrt/mode 2>/dev/null || echo wds)
+  case "$MODE" in wds|ap) ;; *) MODE=wds ;; esac
+
+  # ① NTP 校时（分频；服务器纯 IP，不依赖本机 DNS）
+  if [ $((round % NTP_E)) -eq 0 ]; then
+    if command -v ntpd >/dev/null 2>&1; then
+      if ntpd -n -q -p "$NTP" >/dev/null 2>&1; then
+        logger -t nwrt-tick "ntp ok $NTP"
+      else
+        logger -t nwrt-tick "ntp 跳过（$NTP 不可达或 busybox ntpd 未启用）"
+      fi
+    fi
+  fi
+
+  # ② WDS 关联巡检（纯只读；无工具/无接口如实留白，绝不伪造）
+  if [ "$MODE" = wds ] && [ $((round % WDS_E)) -eq 0 ]; then
+    IFACE=''
+    for i in /sys/class/net/*; do
+      [ -e "$i" ] || continue
+      n=$(basename "$i")
+      case "$n" in wlan*|phy*-ap*|ath*) IFACE="$n"; break ;; esac
+    done
+    if [ -n "$IFACE" ] && command -v iw >/dev/null 2>&1; then
+      STA=$(iw dev "$IFACE" station dump 2>/dev/null | grep -c '^Station' || true)
+      STA=${STA:-0}
+      echo "[nwrt-tick] round=$round mode=wds iface=$IFACE stations=$STA dryrun=$DRY" > /tmp/nwrt-tick.status
+      if [ "$STA" -eq 0 ] && [ "$DRY" = 0 ] && [ "$since_reload" -ge "$CD" ]; then
+        logger -t nwrt-tick "WDS 无关联 → 一次 wifi reload（冷却 ${CD} 轮）"
+        wifi reload >/dev/null 2>&1 || true
+        since_reload=0
+      fi
+    else
+      echo "[nwrt-tick] round=$round mode=wds 巡检跳过（无 iw / 无无线口，如实留白）" > /tmp/nwrt-tick.status
+    fi
+  else
+    echo "[nwrt-tick] round=$round mode=$MODE dryrun=$DRY" > /tmp/nwrt-tick.status
+  fi
+  sleep "$SEC"
+done

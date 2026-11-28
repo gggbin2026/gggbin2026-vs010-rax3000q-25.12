@@ -1,0 +1,20 @@
+# 单包双模式：WDS / AP 共用同一套纯二层桥框架
+# 模式差异由 nwrt-apply-mode 运行期只改 wireless，绝不重建 radio
+# 实际端口成员由 bridge-netfix 按 sysfs 动态补齐，这里只定框架
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config device 'br_lan'
+	option name 'br-lan'
+	option type 'bridge'
+	option stp '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '172.10.10.241'
+	option netmask '255.255.252.0'
+	option ipv6 '0'

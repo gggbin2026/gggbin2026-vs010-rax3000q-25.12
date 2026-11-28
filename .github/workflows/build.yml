@@ -1,0 +1,284 @@
+name: Build WDS/AP (新内核 · 单包双模式)
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: '源码/内核基线（见 baseline.env）'
+        required: true
+        default: 'official-25.12'
+        type: choice
+        options:
+          - official-25.12
+          - official-main
+          - qosmio-25.12-nss
+          - kuncy7-6.18-nss
+      device:
+        description: '机型（默认两台一起出，每机型 1 个固件）'
+        required: true
+        default: 'both'
+        type: choice
+        options: [both, vs010, rax3000q]
+      default_mode:
+        description: '刷完首次开机的默认模式（之后在界面里随时切，不用重刷）'
+        required: true
+        default: 'wds'
+        type: choice
+        options: [wds, ap]
+      source_url:
+        description: '可选：覆盖上游仓库 URL（留空用 baseline.env）'
+        required: false
+        default: ''
+        type: string
+      source_ref:
+        description: '可选：覆盖上游 ref，填具体 commit 可完全锁死版本'
+        required: false
+        default: ''
+        type: string
+      nand_patch:
+        description: 'NAND V2 补丁（默认关，EUCLEAN 风险）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+# push 不触发编译：只有 Actions → Run workflow 才编。
+# ★ 单包双模式：AP 与 WDS 在同一固件里，一个机型只出 1 个包，不按模式展开 matrix。
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+  KEEP_RELEASES: 5
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [vs010, rax3000q]     # 一次运行 2 个 job = 2 个固件（每机型 1 个）
+
+    steps:
+      - name: Gate (device=both / 单机)
+        id: gate
+        run: |
+          D='${{ github.event.inputs.device }}'
+          GO=true
+          [ "$D" = both ] || [ "$D" = '${{ matrix.device }}' ] || GO=false
+          echo "go=$GO" >> "$GITHUB_OUTPUT"
+          echo "[gate] baseline=${{ github.event.inputs.baseline }} device=${{ matrix.device }} default_mode=${{ github.event.inputs.default_mode }} → $GO"
+
+      - name: Checkout
+        if: steps.gate.outputs.go == 'true'
+        uses: actions/checkout@v4
+
+      - name: 本地自检（PASS 才继续）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          sh scripts/verify.sh
+
+      - name: 解析基线（唯一真值 baseline.env）
+        if: steps.gate.outputs.go == 'true'
+        id: base
+        run: |
+          set -eu
+          eval "$(sh scripts/resolve-baseline.sh '${{ github.event.inputs.baseline }}' \
+                 '${{ github.event.inputs.source_url }}' '${{ github.event.inputs.source_ref }}')"
+          echo "SOURCE_REPO=$SOURCE_REPO"   >> "$GITHUB_ENV"
+          echo "SOURCE_REF=$SOURCE_REF"     >> "$GITHUB_ENV"
+          echo "NSS=$NSS"                   >> "$GITHUB_ENV"
+          echo "BOARD_POLICY=$BOARD_POLICY" >> "$GITHUB_ENV"
+          echo "KERNEL_HINT=$KERNEL_HINT"   >> "$GITHUB_ENV"
+          echo "BASELINE=${{ github.event.inputs.baseline }}" >> "$GITHUB_ENV"
+          echo "[baseline] repo=$SOURCE_REPO ref=$SOURCE_REF nss=$NSS board=$BOARD_POLICY"
+
+      - name: Install build dependencies
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3 python3-distutils rsync unzip zlib1g-dev file wget cpio bc \
+            squashfs-tools device-tree-compiler libelf-dev
+          command -v gawk >/dev/null || { echo "::error::缺 gawk，OpenWrt 编译必挂"; exit 1; }
+          sudo timedatectl set-timezone "$TZ" || true
+
+      - name: Clone OpenWrt 源码（锁 ref，不滚动）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          set -eu
+          test -n "$SOURCE_REPO" || { echo "::error::该基线未配置 REPO，见 baseline.env"; exit 1; }
+          git clone --depth 1 --single-branch "$SOURCE_REPO" -b "$SOURCE_REF" openwrt
+          cd openwrt && git rev-parse HEAD | tee "$GITHUB_WORKSPACE/source-commit.txt"
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: 注入两台板级（DTS / Device / 02_network / BDF 包）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          set -eu
+          sh scripts/board-inject.sh "$GITHUB_WORKSPACE" "$BOARD_POLICY" '${{ matrix.device }}'
+
+      - name: Update & install feeds
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 合并 rootfs（公共 + 机型；单包双模式不按模式拆包）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          set -eu
+          MODE='${{ github.event.inputs.default_mode }}'
+          case "$MODE" in wds|ap) ;; *) MODE=wds ;; esac
+          D='${{ matrix.device }}'
+          rm -rf openwrt/files; mkdir -p openwrt/files/etc/rc.d
+          N=0
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            case "$p" in \#*) continue ;; esac
+            [ -f "files/$p" ] || { echo "::error::清单里的文件不存在: files/$p"; exit 1; }
+            mkdir -p "openwrt/files/$(dirname "$p")"
+            install -m 644 "files/$p" "openwrt/files/$p"
+            case "$p" in
+              etc/init.d/*|www/cgi-bin/*|usr/sbin/*|*.sh) chmod 755 "openwrt/files/$p" ;;
+            esac
+            N=$((N+1))
+          done < files.manifest
+          # 机型差异（hostname 等）；★ 不再叠加 files.wds / files.ap —— 单包两套界面全注入
+          if [ -d "files.$D" ]; then
+            cp -a "files.$D/." openwrt/files/
+            echo "[files] 叠加机型差异 files.$D"
+          fi
+          # squashfs 只读，开机自启链接必须构建期自备；nwrt-tick 是唯一常驻
+          for pair in 18:luci-fix 21:bridge-netfix 22:l2-guard 23:no-firewall 24:nwrt-mode 25:nwrt-tick; do
+            n=${pair%%:*}; s=${pair##*:}
+            ln -sf "../init.d/$s" "openwrt/files/etc/rc.d/S${n}${s}"
+          done
+          # default_mode 只写进 squashfs；切模式写 overlay，刷机不勾「保留配置」回到默认
+          printf '%s\n' "$MODE" > openwrt/files/etc/nwrt/mode
+          printf '%s\n' "$MODE" > openwrt/files/etc/nwrt/default_mode
+          printf '%s\n' "$BASELINE" > openwrt/files/etc/nwrt/baseline
+          printf '%s\n' "$SOURCE_COMMIT" > openwrt/files/etc/nwrt/source-commit
+          printf 'Nwrt-WDS-AP-UBNT-%s-%s-dual\n' "$KERNEL_HINT" "$(date +%Y%m%d-%H%M)" \
+            > openwrt/files/etc/nwrt/build
+          echo "[files] 注入 $N 个公共文件（UBNT 三页 + 两套模式配置全在）；常驻仅 nwrt-tick"
+
+      - name: 生成 .config（精简 + 幽灵包清理 + defconfig）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          set -eu
+          sh config/gen-config.sh "$GITHUB_WORKSPACE" '${{ matrix.device }}' 'dual' "$BASELINE" "$NSS"
+
+      - name: Download package
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          cd openwrt
+          make download -j8
+          find dl -size -1024c -delete || true
+
+      - name: Compile the firmware
+        if: steps.gate.outputs.go == 'true'
+        id: compile
+        run: |
+          set -o pipefail
+          cd openwrt
+          LOG=/tmp/nwrt-build.log
+          echo "[compile] $(nproc) 线程 · 基线 $BASELINE · 机型 ${{ matrix.device }} · 单包双模式"
+          if make -j"$(nproc)" 2>&1 | tee "$LOG"; then
+            echo "[compile] 首轮成功"
+          elif make -j1 2>&1 | tee -a "$LOG"; then
+            echo "[compile] -j1 重试成功"
+          elif make -j1 V=s 2>&1 | tee -a "$LOG"; then
+            echo "[compile] -j1 V=s 重试成功"
+          else
+            echo "::group::[失败摘要] 错误行（最后 100 条）"
+            grep -nE 'make(\[[0-9]+\])?: \*\*\*|Error [0-9]+|error:|fatal error|No rule to make|undefined reference|Package .* is missing|missing separator' "$LOG" | tail -100
+            echo "::endgroup::"
+            echo "::group::[失败摘要] 日志最后 120 行"
+            tail -n 120 "$LOG"
+            echo "::endgroup::"
+            echo "::error::编译失败，上面两段就是定位依据"
+            exit 1
+          fi
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: 实抓内核版本 → 重命名产物（单包 dual）
+        if: steps.compile.outputs.status == 'success'
+        id: organize
+        run: |
+          set -eu
+          cd openwrt
+          KVER=$(make -s kernel_version 2>/dev/null || true)
+          [ -n "$KVER" ] || KVER=$(grep -m1 '^LINUX_VERSION' target/linux/qualcommax/Makefile 2>/dev/null | cut -d= -f2 | tr -d ' "')
+          [ -n "$KVER" ] || KVER="$KERNEL_HINT"
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          STAMP=$(date +%Y%m%d)
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          found=0
+          for f in $(find bin/targets/qualcommax/ipq50xx -maxdepth 1 -type f \
+                     \( -name '*sysupgrade.bin' -o -name '*factory.ubi' -o -name '*nand-factory.ubi' -o -name '*factory.bin' \) 2>/dev/null); do
+            b=$(basename "$f")
+            out="Nwrt-WDS-AP-UBNT-${KVER}-${STAMP}-"'${{ matrix.device }}'"-dual-${b}"
+            cp "$f" "$GITHUB_WORKSPACE/out/$out"
+            echo "[name] $out"
+            found=$((found+1))
+          done
+          [ "$found" -gt 0 ] || { echo "::error::没找到固件产物，检查 make 是否只编出了包"; exit 1; }
+          sha256sum "$GITHUB_WORKSPACE/out"/* > "$GITHUB_WORKSPACE/out/sha256sums.txt"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "KVER=$KVER" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware
+        if: steps.organize.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ env.KVER }}-${{ matrix.device }}-dual-${{ github.run_id }}
+          path: out/
+          retention-days: 90
+
+      - name: Release
+        if: steps.organize.outputs.status == 'success'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fw-${{ env.KVER }}-${{ github.run_id }}-${{ matrix.device }}-dual
+          name: WDS/AP（仿UBNT）· ${{ env.KVER }} · ${{ matrix.device }} · 单包双模式
+          body: |
+            **源码基线**：`${{ github.event.inputs.baseline }}` · `openwrt/openwrt` 同源，锁 ref（commit `${{ env.SOURCE_COMMIT }}`）
+            **内核**：`${{ env.KVER }}`（编译期 `make -s kernel_version` 实抓，不写死）
+            **机型**：`${{ matrix.device }}` · **首启默认**：`${{ github.event.inputs.default_mode }}`
+
+            🟢 **一个固件内置 AP + WDS 双模式**：三界面（`/ubnt/` `/bridge/` `/ap/`）全互访，
+            在 LuCI「WDS / AP 模式」或 TTYD/SSH `nwrt-apply-mode wds|ap` 里随时切，**不用重刷**。
+            切换只写 overlay + 一次 `wifi reload`，不重建 radio、不 `wifi down`、不重启。
+
+            - 轻量巡检：单个 `nwrt-tick` 常驻（NTP 校时 + WDS 关联只读巡检），默认 dryrun=1 不自动动作
+            - 只编 dropbear + TTYD + LuCI 底座/中文/bootstrap + 必要驱动；防火墙 / IPv6 / 第三方插件全关
+            - 刷前读 `FLASHING.md`：aarch64 不死 U-Boot、TTL、别勾「保留配置」
+          files: |
+            out/*.ubi
+            out/*.bin
+            out/sha256sums.txt
+
+  cleanup:
+    needs: build
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 只保留最新 N 个 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ env.KEEP_RELEASES }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName,createdAt --jq 'map(select(.tagName|startswith("fw-"))) | sort_by(.createdAt) | reverse | .[] | .tagName' \
+            > /tmp/tags
+          n=0
+          while read -r t; do
+            n=$((n+1)); [ "$n" -le "$KEEP" ] && continue
+            echo "[cleanup] 删除 $t"
+            gh release delete "$t" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          done < /tmp/tags

@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# START=22：独立 nft bridge 表，只丢无线侧进来的 DHCP Offer/ACK
+# ⚠ NSS 卸载后部分报文不过 host bridge hook，属尽力防护
+START=22
+start() {
+  [ "$(uci -q get l2guard.main.enabled)" = 1 ] || { logger -t l2-guard "disabled"; return 0; }
+  command -v nft >/dev/null 2>&1 || { logger -t l2-guard "nft 不可用，跳过（不报错）"; return 0; }
+  nft -f - <<'NFT'
+table bridge nwrt_l2guard {
+  chain input {
+    type filter hook input priority 0; policy accept;
+    iifname { "wlan*", "phy*-ap*" } udp sport 67 udp dport 68 drop
+    iifname { "wlan*", "phy*-ap*" } udp sport 547 udp dport 546 drop
+  }
+}
+NFT
+  logger -t l2-guard "OK 无线侧 DHCP 已拦"
+}
+stop(){ nft delete table bridge nwrt_l2guard 2>/dev/null || true; }

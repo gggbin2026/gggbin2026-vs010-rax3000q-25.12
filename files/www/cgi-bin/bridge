@@ -1,0 +1,3 @@
+#!/bin/sh
+# 兼容 vs010-ubnt-skin.js 原正则（cgi-bin/bridge|apstatus）
+exec /www/cgi-bin/state

@@ -1,0 +1,60 @@
+上传到 https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-25.12
+=====================================================================
+
+该仓库当前 main 最新提交是空提交（qqqqqqqq），没有任何文件。
+把本压缩包解压后，把里面的【全部内容】上传到仓库根目录（保留目录结构）。
+
+方式 A · 网页上传
+  1. 打开仓库 → Add file → Upload files
+  2. 把解压后的所有文件/文件夹拖进去（包括 .github / .gitignore 等隐藏项）
+  3. Commit changes 到 main
+
+方式 B · 命令行
+  cd 解压目录
+  git init && git checkout -b main
+  git remote add origin https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-25.12.git
+  git add -A
+  git commit -m "重建 25.12 新内核 WDS/AP 双机型编译链（仿 UBNT）"
+  git push -f origin main          # 仓库是空的，强制覆盖那个空提交
+
+上传后必做
+----------
+  sh scripts/verify.sh
+  必须输出：RESULT: PASS（N 项非阻断警告）
+  有任何 BLOCK 项先修，不要直接 Run workflow。
+
+开始编译
+--------
+  Actions → 选「Build WDS/AP (新内核 · 单包双模式)」→ Run workflow
+    baseline      : official-25.12（默认，xiangye277 同源官方稳定版；想尝新选 official-main 并填 commit）
+    device        : both / rax3000q / vs010（首次建议 vs010 单跑）
+    default_mode  : wds（默认）/ ap —— 只决定刷完首启模式，之后界面里随时切，不用重刷
+    source_url / source_ref : 可空；要精确锁某个上游 commit 就填这里
+    nand_patch : 默认 false
+
+  push 不触发编译，只有手动 Run workflow 才编。
+
+产物
+----
+  Nwrt-WDS-AP-UBNT-<实抓内核>-YYYYMMDD-<机型>-dual-*.ubi / *.bin
+  每机型 1 个固件（AP 与 WDS 都在里面）；device=both 一次出 2 个。
+  Release tag: fw-<内核>-<run_id>-<机型>-dual（滚动保留最新 5 个）
+
+刷前必读 FLASHING.md：aarch64 不死 U-Boot、TTL、别勾「保留配置」。
+切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
+切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
+切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
+切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
+
+## 下载后核对（先看大小再解压）
+
+```sh
+stat -c %s nwrt-25.12-ubnt.zip       # 对比交付回复里的「精确字节数」
+sha256sum nwrt-25.12-ubnt.zip         # 对比交付回复里的「SHA256」
+unzip -q nwrt-25.12-ubnt.zip && cd nwrt-25.12-ubnt
+sha256sum -c CHECKSUMS.sha256         # 逐文件校验，应全部 OK
+sh scripts/verify.sh                  # 应输出 RESULT: PASS
+```
+
+包内 `CHECKSUMS.sha256` 排除自身；外层 zip 的大小与 SHA256 以交付回复为准。
+以后全量包 / 增量包都按 `交付核对规范.md` 给这 7 项数值。

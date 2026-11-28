@@ -1,0 +1,20 @@
+<%+header%>
+<h2 name="content">WDS / AP 模式切换</h2>
+<% if ok then %><p style="color:#2f7bff"><b>已切换，请刷新状态页；根路径 / 会自动跳到对应界面。</b></p><% end %>
+<div class="cbi-section">
+  <p>当前模式：<b><%=cur%></b>　·　出厂默认：<b><%=def%></b>（刷机不勾「保留配置」回到默认）</p>
+  <p>一个固件内置 AP + WDS 双模式。切换只写 overlay + 一次 <code>wifi reload</code>，
+     不重刷、不重启、不 <code>wifi down</code>、不重建 radio。</p>
+  <form method="post" action="" style="display:inline">
+    <input type="hidden" name="mode" value="wds">
+    <input class="cbi-button cbi-button-apply" type="submit" value="切到 WDS 网桥（/bridge/）">
+  </form>
+  <form method="post" action="" style="display:inline">
+    <input type="hidden" name="mode" value="ap">
+    <input class="cbi-button cbi-button-apply" type="submit" value="切到 AP（/ap/）">
+  </form>
+</div>
+<p><a href="/ubnt/">概览</a> · <a href="/bridge/">网桥状态</a> · <a href="/ap/">AP 状态</a> · <a href="/">根路径</a></p>
+<p>若本页打不开（<code>luci-compat</code> 未编入该基线），用 TTYD / SSH / 串口执行
+   <code>nwrt-apply-mode wds</code> 或 <code>nwrt-apply-mode ap</code>，效果完全一致。</p>
+<%+footer%>

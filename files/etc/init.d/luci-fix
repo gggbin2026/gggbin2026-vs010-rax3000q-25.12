@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+# START=18：重建 named main + 按实际目录生成主题下拉 + 清缓存（防 427 / 白屏）
+START=18
+USE_PROCD=0
+start() {
+  [ -f /lib/functions.sh ] && . /lib/functions.sh
+  cfg=/etc/config/luci
+  [ -f "$cfg" ] || printf 'config core '"'"'main'"'"'\n' > "$cfg"
+  # 1) 永远保证 named section；匿名 config main 直接重建
+  if ! uci -q get luci.main >/dev/null 2>&1; then
+    uci -q delete luci.@core[0] 2>/dev/null || true
+    uci set luci.main=core
+  fi
+  # 2) mediaurlbase 只指向真实存在的主题目录
+  theme=bootstrap
+  for d in /www/luci-static/*; do
+    [ -d "$d" ] || continue
+    b=$(basename "$d")
+    case "$b" in bootstrap|argon*|material*|openwrt*) theme="$b" ;; esac
+  done
+  uci set luci.main.mediaurlbase="/luci-static/$theme"
+  uci set luci.main.lang='zh_cn'
+  # 3) themes 段只列实际存在的，清掉幽灵项
+  uci -q delete luci.themes 2>/dev/null || true
+  uci set luci.themes=internal
+  for d in /www/luci-static/*; do
+    [ -d "$d" ] || continue
+    b=$(basename "$d"); case "$b" in cgi-bin|resources) continue ;; esac
+    uci set "luci.themes.$b=$b"
+  done
+  uci commit luci
+  # 4) 根路径必须是状态页跳转，不是 cgi-bin/luci
+  uci -q set uhttpd.main.index_page='index.html'
+  uci commit uhttpd
+  rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
+  [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
+  logger -t luci-fix "OK theme=$theme named-main"
+}

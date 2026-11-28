@@ -1,0 +1,14 @@
+#!/bin/sh
+# 串口自助修复：LuCI 427 / 白屏 / 主题下拉幽灵项 / 桥成员 / 缓存 / 巡检
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+echo "=== health-fix · WDS/AP（仿UBNT）· 单包双模式 ==="
+for s in luci-fix bridge-netfix l2-guard no-firewall nwrt-mode nwrt-tick; do
+  if [ -x "/etc/init.d/$s" ]; then
+    printf '  [%s] ' "$s"; /etc/init.d/"$s" start >/dev/null 2>&1 && echo OK || echo "跳过/失败（看 logread）"
+  fi
+done
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
+[ -x /usr/sbin/oem-stack-check ] && /usr/sbin/oem-stack-check || true
+echo "  当前模式: $(cat /etc/nwrt/mode 2>/dev/null || echo '?')  出厂默认: $(cat /etc/nwrt/default_mode 2>/dev/null || echo '?')"
+echo "  切模式: nwrt-apply-mode wds|ap（不用重刷）"
+echo "=== 完成：刷新浏览器；Web 仍 427 就贴 logread 尾部 ==="

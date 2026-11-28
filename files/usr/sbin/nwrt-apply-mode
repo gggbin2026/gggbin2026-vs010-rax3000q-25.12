@@ -1,0 +1,84 @@
+#!/bin/sh
+# WDS/AP（仿UBNT）· 模式配置唯一入口
+#   boot     = 开机重放（读 /etc/nwrt/mode，不写文件）
+#   wds | ap = 界面 / TTYD / SSH 切换（写 overlay，不重刷）
+#
+# 🔴 硬红线（沿用 5.4 老仓 STANDARDS）：
+#   · 固定枚举，零 eval、零参数注入面
+#   · 只改既有 wifi-device / wifi-iface 的 option 与 disabled
+#   · 不重建 radio、不做射频下线、不重启机器、仅一次 wifi reload
+#   · 切完清 LuCI 缓存 + uhttpd reload，菜单与界面按 mode 重建
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+# 本脚本只用 uci / wifi / logger 等外部命令，不需要 source /lib/functions.sh。
+# dash 在 dot 找不到文件时会直接退出整个 shell（|| true 也救不回来），故不 source。
+ACT=${1:-boot}
+case "$ACT" in
+  boot) MODE=$(cat /etc/nwrt/mode 2>/dev/null || echo wds) ;;
+  wds|ap) MODE="$ACT" ;;
+  *) echo "usage: nwrt-apply-mode boot|wds|ap" >&2; exit 2 ;;
+esac
+case "$MODE" in wds|ap) ;; *) MODE=wds ;; esac
+
+if [ "$ACT" != boot ]; then
+  # 真机 /etc/nwrt 由 files.manifest 建好；这里兜底，目录建不出来也只跳过写入、不退出 shell
+  mkdir -p /etc/nwrt 2>/dev/null || true
+  if [ -d /etc/nwrt ]; then
+    printf '%s\n' "$MODE" > /etc/nwrt/mode
+    chmod 600 /etc/nwrt/mode 2>/dev/null || true
+  fi
+  rm -f /etc/nwrt/.applied /tmp/nwrt-mode-applied 2>/dev/null || true
+  logger -t nwrt-mode "switch -> $MODE（写 overlay，刷机不勾保留配置回 default_mode）"
+fi
+
+[ -s /etc/config/wireless ] || wifi config
+
+# ── 射频：两台硬件同构，参数共用；只按 band/hwmode 判 2.4G / 5G ──
+for sec in $(uci show wireless 2>/dev/null | grep '=wifi-device' | cut -d. -f2 | cut -d= -f1); do
+  B=$(uci -q get "wireless.$sec.band" 2>/dev/null)
+  H=$(uci -q get "wireless.$sec.hwmode" 2>/dev/null)
+  case "$B$H" in *5g*|*11a*|*11axa*) FIVE=1 ;; *) FIVE=0 ;; esac
+  uci -q set "wireless.$sec.country='CN'"
+  uci -q set "wireless.$sec.disabled='0'"
+  uci -q set "wireless.$sec.channel='36'"
+  uci -q set "wireless.$sec.htmode='HE160'"
+  [ "$FIVE" = 0 ] && {
+    uci -q set "wireless.$sec.channel='1'"
+    uci -q set "wireless.$sec.htmode='HE40'"
+    # noscan 默认不开：无视邻区共存，只在明确需要时手动开
+    [ "$MODE" = wds ] && uci -q set "wireless.$sec.disabled='1'"
+  }
+done
+
+# ── 接口：只改既有 wifi-iface，不新增、不重建 ──
+for sec in $(uci show wireless 2>/dev/null | grep '=wifi-iface' | cut -d. -f2 | cut -d= -f1); do
+  dev=$(uci -q get "wireless.$sec.device" 2>/dev/null)
+  B=$(uci -q get "wireless.$dev.band" 2>/dev/null); H=$(uci -q get "wireless.$dev.hwmode" 2>/dev/null)
+  case "$B$H" in *5g*|*11a*|*11axa*) FIVE=1 ;; *) FIVE=0 ;; esac
+  uci -q set "wireless.$sec.mode='ap'"
+  uci -q set "wireless.$sec.network='lan'"
+  uci -q set "wireless.$sec.encryption='psk2'"
+  if [ "$MODE" = wds ]; then
+    [ "$FIVE" = 1 ] && {
+      uci -q set "wireless.$sec.ssid='NWRT-WDS'"
+      uci -q set "wireless.$sec.key='WDS123456'"
+      uci -q set "wireless.$sec.wds='1'"
+    } || uci -q set "wireless.$sec.disabled='1'"
+  else
+    uci -q set "wireless.$sec.disabled='0'"
+    if [ "$FIVE" = 1 ]; then
+      uci -q set "wireless.$sec.ssid='NWRT-AP-5G'"
+    else
+      uci -q set "wireless.$sec.ssid='NWRT-AP-2G'"
+    fi
+    uci -q set "wireless.$sec.key='AP123456'"
+    uci -q delete "wireless.$sec.wds" 2>/dev/null || true
+  fi
+done
+uci commit wireless
+wifi reload >/dev/null 2>&1 || true
+
+# 清 LuCI 缓存 + uhttpd reload（菜单 / 界面按 mode 重建）
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
+[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
+logger -t nwrt-mode "OK act=$ACT mode=$MODE 一次 wifi reload"
+[ "$ACT" = boot ] || echo "OK 已切到 $MODE；根路径 / 会自动跳 /bridge/ 或 /ap/（不用重刷）"

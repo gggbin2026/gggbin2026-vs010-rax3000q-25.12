@@ -1,0 +1,36 @@
+#!/bin/sh
+# 一键核对：内核 / 模块 / NSS / eth 计数 / 射频 / UCI / 模式 / 巡检 / 温度
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+echo "=== wifi-fullspeed · $(cat /etc/nwrt/product 2>/dev/null || echo WDS/AP) ==="
+echo "kernel   : $(uname -r 2>/dev/null)"
+echo "baseline : $(cat /etc/nwrt/baseline 2>/dev/null || echo '?')  build=$(cat /etc/nwrt/build 2>/dev/null || echo '?')"
+echo "mode     : $(cat /etc/nwrt/mode 2>/dev/null || echo '?')  default=$(cat /etc/nwrt/default_mode 2>/dev/null || echo '?')"
+echo "-- modules --"
+lsmod 2>/dev/null | grep -E 'ath11k|mac80211|nss|ecm' || echo "  （无匹配模块）"
+echo "-- NSS --"
+for f in /sys/kernel/debug/qca-nss-drv/stats/* /sys/kernel/debug/ecm/*; do
+  [ -r "$f" ] && echo "  $(basename "$f"): $(head -c 120 "$f" 2>/dev/null)" || true
+done
+echo "-- eth0/eth1 计数（判速看这里，不看 br-lan）--"
+for i in eth0 eth1 br-lan; do
+  [ -d "/sys/class/net/$i" ] && echo "  $i rx=$(cat /sys/class/net/$i/statistics/rx_bytes 2>/dev/null) tx=$(cat /sys/class/net/$i/statistics/tx_bytes 2>/dev/null) carrier=$(cat /sys/class/net/$i/carrier 2>/dev/null)" || echo "  $i —"
+done
+echo "-- 射频 --"
+uci show wireless 2>/dev/null | grep -E '\.band=|\.channel=|\.htmode=|\.country=|\.disabled=|\.ssid=|\.wds=' || echo "  （无 wireless 配置）"
+echo "-- 巡检 / 机器狗（单常驻 nwrt-tick）--"
+echo "  状态: $(head -1 /tmp/nwrt-tick.status 2>/dev/null || echo '—')"
+echo "  配置: $(tr '\n' ' ' < /etc/nwrt/tick.conf 2>/dev/null || echo '—')"
+echo "  进程: $(pgrep -f '/usr/sbin/nwrt-tick' 2>/dev/null | tr '\n' ' ' || echo '—')"
+echo "-- 温度 --"
+for t in /sys/class/thermal/thermal_zone*/type; do
+  [ -r "$t" ] || continue
+  case "$(cat "$t")" in *cpu*|*CPU*) echo "  CPU $(cat "${t%/*}/temp" 2>/dev/null) mK" ;; esac
+done
+for h in /sys/class/hwmon/hwmon*/name; do
+  [ -r "$h" ] || continue
+  case "$(cat "$h")" in *ath11k*) echo "  射频 $(dirname "$h"): $(cat "$(dirname "$h")"/temp1_input 2>/dev/null) mC" ;; esac
+done
+echo "-- 防火墙 / IPv6 / DHCP 防护 --"
+echo "  firewall: $(/etc/init.d/firewall enabled 2>/dev/null && echo on || echo off)  ipv6: $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo '?')"
+echo "  l2guard : $(uci -q get l2guard.main.enabled 2>/dev/null || echo '?')"
+echo "=== 完 · 切模式: nwrt-apply-mode wds|ap ==="

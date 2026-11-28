@@ -1,0 +1,12 @@
+# 第 43/44 次：必须是 named section，不能是匿名 config main。
+# 旧 overlay 残留 / sysupgrade 勾「保留配置」会盖掉它 → dispatcher.lua:427。
+config core 'main'
+	option lang 'zh_cn'
+	option mediaurlbase '/luci-static/bootstrap'
+	option resourcebase '/luci-static/resources'
+
+config themes 'bootstrap'
+	option title 'Bootstrap（官方稳定）'
+
+# argon / footstrap 不在官方 25.12 luci feed。写进去 = 指向空气 → 白屏 / 500。
+# luci-fix 每次开机按 /www/luci-static/ 实际目录重建主题下拉。

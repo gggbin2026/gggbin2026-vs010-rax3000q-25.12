@@ -1,0 +1,4 @@
+config system 'main'
+	option hostname 'RAX3000Q'
+	option timezone 'CST-8'
+	option zonename 'Asia/Shanghai'

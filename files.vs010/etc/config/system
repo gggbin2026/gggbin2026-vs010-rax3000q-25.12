@@ -1,0 +1,4 @@
+config system 'main'
+	option hostname 'VS010'
+	option timezone 'CST-8'
+	option zonename 'Asia/Shanghai'
