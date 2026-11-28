@@ -1,7 +1,0 @@
-#!/bin/sh /etc/rc.common
-# 每次开机跑一次网卡自检 + 自愈（等 switch/ath11k probe 完）
-# 由 12 秒提到 12 秒：preinit 那 4 句 Failed to connect 之后驱动才注册完
-START=99
-start() {
-    ( sleep 12; /usr/sbin/nic-guard >/dev/null 2>&1 ) &
-}

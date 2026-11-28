@@ -1,7 +1,0 @@
-# AP 模式追加（哑 AP：WAN+LAN+2.4G+5G 全在 br-lan，本机 DHCP 关）
-# 2026-11-24：按「不要编译无用插件」全部砍掉，只比 WDS 多一个显式 dnsmasq 关闭 DHCP 的
-# 运行期配置（在 files.ap/etc/config/dhcp 里，不需要额外包）。
-# 主题/插件只在 common.seed / themes.seed 给官方 bootstrap；想加回任何插件，取消对应行注释即可，
-# 但会牺牲「最稳」，请先读 MIGRATION.md 第 9 节。
-CONFIG_PACKAGE_kmod-bridge=y
-CONFIG_PACKAGE_wpad-basic-mbedtls=y

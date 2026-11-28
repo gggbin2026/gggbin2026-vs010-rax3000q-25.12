@@ -1,9 +1,0 @@
-#!/bin/sh /etc/rc.common
-# 第 44 次 · 开机自动「一主一备」。cnss2 / QMI 校准要 60~180 秒，必须后台跑。
-# 由 oem54-firstboot 自动 enable；之后每次冷启自动收敛，不阻塞 rcS。
-START=99
-STOP=10
-start() {
-    ( /usr/sbin/qsdk-bridge-role run ) >/dev/null 2>&1 &
-}
-stop() { :; }

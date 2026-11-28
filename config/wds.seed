@@ -1,6 +1,0 @@
-# WDS 网桥模式追加（沿用老仓库「极简纯二层」语义）
-# 不装任何第三方 luci-app-*；common.seed 已给足 SSH + TTYD + LuCI + 主题。
-# 4addr WDS 靠 mac80211 原生支持；NSS 的 Wi-Fi WDS 在 IPQ50XX 上社区标 Unvalidated，
-# 所以这里只保留原生能力，满速优先在 AP 模式，见 FIRMWARE.md 边界说明。
-CONFIG_PACKAGE_kmod-bridge=y
-CONFIG_PACKAGE_wpad-basic-mbedtls=y
