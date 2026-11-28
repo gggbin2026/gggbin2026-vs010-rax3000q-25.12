@@ -30,6 +30,8 @@
     device        : both / rax3000q / vs010（首次建议 vs010 单跑）
     default_mode  : wds（默认）/ ap —— 只决定刷完首启模式，之后界面里随时切，不用重刷
     source_url / source_ref : 可空；要精确锁某个上游 commit 就填这里
+    baseline   : 默认 official-25.12（无 NSS、占用最低）；要硬件加速选 qosmio-25.12-nss
+                 r22 已修正 NSS 包名并加 defconfig 后硬校验，缺包会停编，不会编出假加速固件
     nand_patch : 默认 false（上游 0401 4-bit ECC 补丁已内置，本仓无需再加；当前 patches/ 无 .patch，勾 true 只打 warning 跳过）
 
   push 不触发编译，只有手动 Run workflow 才编。

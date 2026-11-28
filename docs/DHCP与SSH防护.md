@@ -47,3 +47,13 @@ WDS 主 / 客户端两端都绝不能开本机 DHCP 服务端。
   （`/cgi-bin/luci/admin/nwrt`，继承 sysauth）或 TTYD/SSH 固定枚举命令
   `nwrt-apply-mode wds|ap`；`mode` 白名单、零 eval、零参数注入面。
   状态页全只读，不提供任何保存按钮、不做裸 CGI 写入端点。
+
+
+## r23 口径补充（25.12 变体包名）
+
+镜像里编的是 **`nftables-nojson`**（25.12 默认变体，不带 jansson），
+不是裸 `nftables`：主树 `package/network/utils/nftables/Makefile` 只
+`BuildPackage,nftables-nojson/nftables-json`，`PROVIDES:=nftables` 是虚拟提供名。
+`l2-guard` 只依赖 `/usr/sbin/nft` 命令与 `kmod-nft-bridge`，两者都在。
+Actions run `46149348907` 的失败就是写裸符号被 `make defconfig` 静默删除，
+详见 `FIRMWARE.md` 第 23 轮。

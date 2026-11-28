@@ -151,3 +151,118 @@ VS010 `step=512 / strength=4`、RAX3000Q `step=512 / strength=8`，
 `drivers/spi/spi-qpic-snand.c`，内核源码构建期才展开），脚本只打 warning 跳过，
 **不会生效也不会破坏编译**。`nand_patch` 保持默认 `false` 即可。
 EUCLEAN / FM25LS01 V2 批次是 UBI 层坏块问题，与这个驱动修复不是一回事。
+
+## qosmio-25.12-nss：加速 / 占用 / 速度（第 22 轮实证）
+
+用户问「这个基线的固件能无线加速吗、资源占用低吗、运行速度快吗」。逐条实证：
+
+**① 能加速，但要先修两个写错的包名。** qosmio 的 `feeds.conf.default` 确实含
+`src-git nss_packages https://github.com/qosmio/nss-packages.git;NSS-12.5-K6.x`，
+workflow `feeds update -a && install -a` 会装；主树
+`package/kernel/qca-nss-dp/Makefile` 存在。但本仓 `gen-config.sh` 旧写法
+`nss-ecm` / `qca-nss-fw-ipq50xx-retail` 在 feed 里**不存在**
+（feed 实名 `KernelPackage/qca-nss-ecm` → `kmod-qca-nss-ecm`、
+`Package/nss-firmware-ipq50xx`），`make defconfig` 静默丢弃 → ECM 不进镜像。
+r22 已改名为 5 个实证符号并在 defconfig 后硬校验、缺包停编。
+**默认 `official-25.12` 是 NSS=0，不受影响。**
+
+**② 加速的是转发，不是空口。** NSS/ECM/DP 卸载 Linux 网桥 + CPU 的转发路径，
+5G 空口速率由 ath11k / HE160 / 射频环境决定。参考仓 PZ-L8 实测的
+`ECM→NSS + wifili 双射频卸载` 来自 QSDK 闭源 `qca_ol/umac` 栈；
+本仓是**主线 ath11k**，wifili 无线卸载在 VS010 / RAX3000Q 上**未实机验证**，
+不能把旧栈数字当本仓保证。能确认的是有线/桥接卸载与 CPU 下降。
+
+**③ 占用：静态更高、运行时 CPU 更低。** 多编 5 个加速包 + `qca-nss0/1-retail.bin`，
+镜像更大、内核模块与常驻内存更多；NSS 基线还保留 IPv6 内核符号（官方基线编译期
+直接 `CONFIG_IPV6=n`）。「占用最低」是默认 `official-25.12` 那条；
+qosmio 是拿静态资源换 CPU 与吞吐。规格日志边界第 11 条写得很明确。
+
+**④ 速度口径（参考仓 / 老仓实测，非这两台实机）**
+
+| 项 | 数字 | 来源 |
+|---|---|---|
+| 5G 160MHz（NSS 基线） | 773~833 Mbps | `baseline.env` 注释 |
+| 5G 160MHz（PZ-L8 QSDK 参考仓） | 697 Mbps @ 2.9% CPU | README 参考实现段 |
+| 5G 80MHz | 462 Mbps（少约 1/3） | 同上 |
+| 有线 | 949/949 Mbps @ +0% 主机 CPU | 同上（QSDK 双 GMAC） |
+| `official-25.12` 无 NSS | DSA 软转约 502 Mbps 跑满双核 | README 基线表 |
+| `kuncy7-6.18-nss`（尝鲜，本仓编不了） | 915 Mbps AP→STA @ CPU 1~3% | README |
+
+代价：CN + HE160 开机约 60 秒 DFS CAC（期间 5G 不可见、2.4G 先起），
+改 HE80 可免等；2.4G HE40 因共存扫描退 20MHz，MCS 6–7 是该平台固有弱项。
+**判速看 `eth0/eth1` + NSS debugfs，不看 `br-lan`**（卸载流量不过 Linux 网桥）。
+
+**⑤ 边界**：三条基线都没有这两台板级（RAX3000Q 2026-09-27 才入 main、
+稳定 tag 与 qosmio 25.12-nss 都没有），靠本仓注入；RAX3000Q 板级未在
+6.12 主线实机验证，首次刷接 TTL。所有速率是参考仓实测，本仓未在 Actions
+真跑 `make`、未实机。选 qosmio 要在 Run workflow 手动选
+`baseline=qosmio-25.12-nss`，默认仍是 `official-25.12`。
+
+## 第 23 轮 · Actions run `46149348907` 失败分析与修复
+
+### 拿到的日志信息
+
+页面 `https://github.com/gggbin2026/gggbin2026-vs010-rax3000q-25.12/actions/runs/46149348907`
+（HEAD `11ad569`，2026-11-28 13:23，2m22s，**Failure**，0 artifacts）：
+
+- **6 errors**：`build (vs010)` / `build (rax3000q)` 各
+  `Process completed with exit code 1.` +
+  `nftables 未进 .config（feed 缺包或被依赖覆盖），无线侧 DHCP 防护会失效` +
+  `请检查 feeds.conf.default 与所选基线；不要编一个假防护的固件`。
+- **2 warnings**：`Node.js 20 is deprecated ... actions/checkout@v4 ... forced to run on Node.js 24`
+  —— runner 层面提示，**与失败无关**。
+- 页面显示 `Sign in to view logs`，完整 step 日志需登录；匿名 GitHub API
+  被 rate limit。上述 annotation 已给出确切失败点（gen-config 的 6.5 段），
+  结合本地 `openwrt/openwrt @ v25.12.6` 源码实证即可精确定位，不靠猜。
+
+### 根因（逐基线实证）
+
+| 基线 | `package/network/utils/nftables/Makefile` 的 BuildPackage |
+|---|---|
+| `openwrt/openwrt @ v25.12.6`（默认） | `nftables-nojson`、`nftables-json` |
+| `openwrt/openwrt @ main` | 同左（2006 字节） |
+| `qosmio/openwrt-ipq @ 25.12-nss` | 同左（2006 字节） |
+
+`define Package/nftables/Default` 只是被两个变体继承的模板，
+里面的 `PROVIDES:=nftables` 是**虚拟提供名**，不会生成
+`CONFIG_PACKAGE_nftables` Kconfig 符号。本仓 `common.seed` 写
+`CONFIG_PACKAGE_nftables=y` 是幽灵符号 → `make defconfig` 静默删除
+→ 6.5) 硬校验 `grep "^CONFIG_PACKAGE_nftables=y"` 必然失败。
+
+`kmod-nft-bridge` 实证存在（`package/kernel/linux/modules/netfilter.mk`
+的 `define KernelPackage/nft-bridge`，`$(eval $(call KernelPackage,nft-bridge))`），
+无需改。循环是先查用户态，所以只报了 nftables 一条。
+
+**这次失败是好事**：第 5 轮加的「防假防护」硬校验在真编译里第一次生效，
+拦下了一个镜像里没有 `nft` 命令、无线侧 DHCP Snooping 会完全空转的固件。
+
+### 修复
+
+1. `config/common.seed`：`CONFIG_PACKAGE_nftables=y`
+   → `CONFIG_PACKAGE_nftables-nojson=y`（默认变体，不带 `jansson`，**占用更低**）。
+2. `config/gen-config.sh` 6.5)：接受 `nftables-nojson` / `nftables-json` /
+   `nftables` 任一 `=y`（兼容旧树）；全缺时打印 `.config` 里实际
+   `CONFIG_PACKAGE_(nft|kmod-nft)` 行；成功日志改为
+   `[gen-config] 二层防护 OK：nft=nftables-nojson + kmod-nft-bridge 均已进 .config`。
+3. `scripts/verify.sh` 新增 `[4.12/9]` 9 条断言（禁裸幽灵符号回归）。
+4. README / 修复总览 / 交付核对规范 / 规格日志同步；
+   `docs/DHCP与SSH防护.md` 口径对齐。
+
+### 线上仓库状态（clone 实证）
+
+`git clone` 当前 HEAD `11ad569`（*Expand wireless controls and NAND workflow*，
+2026-11-28 21:21 +0800）逐文件比对：`common.seed` 与本地一致，
+但 `gen-config.sh` / `verify.sh` / `baseline.env` / `README.md` 仍是 **r21** 状态
+→ **r22 的 NSS 包名修复没上线**。所以本次增量包基于 r21，
+一次补齐 **r22 + r23 全部改动**（含 NSS 5 个实证包名与缺包停编）。
+
+### 本地 mock 真跑（模拟 defconfig 删除幽灵符号）
+
+| 场景 | 结果 |
+|---|---|
+| r23 + NSS=0（默认 official-25.12） | `二层防护 OK：nft=nftables-nojson ...`、`RESULT: OK ... nss=0 nss_pkgs=0/0` |
+| r23 + NSS=1（qosmio） | `5/5` NSS 包 + `nft=nftables-nojson` 同时通过 |
+| 改回 r21 裸 `nftables=y` | `rc=1`，`::error::nft 用户态未进 .config ... 裸 CONFIG_PACKAGE_nftables=y 是幽灵符号` |
+
+刷机后核对：`/etc/init.d/l2-guard status` 应显示「已生效」；
+`nft list table bridge nwrt_l2guard` 能看到 `udp sport 67` 规则。

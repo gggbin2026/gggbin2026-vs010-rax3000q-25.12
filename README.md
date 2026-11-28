@@ -96,6 +96,47 @@ bootstrap 的完整资源，再叠 UBNT 深色覆盖（侧栏蓝条、深色卡�
 
 Web 若仍报 427：串口 `sh /usr/sbin/health-fix`（或单跑 `/etc/init.d/luci-fix start`），刷新即可，不用重刷。
 
+### r23：首次真编译失败的根因（Actions run 46149348907）
+
+两个 job 都停在「生成 .config」，annotation 报
+`nftables 未进 .config（feed 缺包或被依赖覆盖），无线侧 DHCP 防护会失效`。
+这不是 feed 没装，是**符号名写错**：
+
+| | 本仓 r21 | OpenWrt 25.12 / main / qosmio 主树 |
+|---|---|---|
+| 用户态 | `CONFIG_PACKAGE_nftables=y` | 只有 `CONFIG_PACKAGE_nftables-nojson`（`DEFAULT_VARIANT:=1`）与 `nftables-json` |
+| 内核 | `CONFIG_PACKAGE_kmod-nft-bridge=y` | ✅ `KernelPackage/nft-bridge` 存在，无需改 |
+
+**25.12 起主树只有 `nftables-nojson`(默认)/`nftables-json` 两个变体**：
+`package/network/utils/nftables/Makefile` 的 `Package/nftables/Default` 只是模板，
+`PROVIDES:=nftables` 不生成 CONFIG 符号 → `make defconfig` 把裸 `nftables=y`
+静默删除 → 第 5 轮加的 6.5) 硬校验如实拦下（**它防的正是「编出没有 nft、
+DHCP Snooping 空转」的假防护固件，不是误报**）。
+
+修复：seed 改 `nftables-nojson=y`；6.5) 接受 nojson/json/裸符号任一，
+全缺时打印 `.config` 里实际 nft 行便于诊断；日志输出改
+`[gen-config] 二层防护 OK：nft=nftables-nojson + kmod-nft-bridge 均已进 .config`。
+
+两条 `Node.js 20 is deprecated / actions/checkout@v4 forced to Node.js 24`
+是 runner 层面的 **warning，不是失败原因**，不改 workflow。
+
+### qosmio NSS 基线：能加速什么、不能加速什么（r22 实证）
+
+- **加速的是转发数据面，不是空口速率**：`nss_packages` feed（`NSS-12.5-K6.x`）里的
+  `kmod-qca-nss-drv` / `kmod-qca-nss-dp` / `kmod-qca-nss-ecm` / `kmod-nss-ifb` /
+  `nss-firmware-ipq50xx` 把原本走 Linux 网桥 + CPU 的转发卸到 NSS 核，
+  **5G 空口速率仍由 ath11k / HE160 决定**，NSS 只是让它跑满而不吃 CPU。
+- **静态占用更高、运行时 CPU 更低**：多编 5 个加速包 + NSS FW，镜像/常驻内存更大；
+  默认 `official-25.12`（无 NSS）才是「占用最低」。二者是取舍，不要混着要。
+- 🔴 **r22 修复**：旧 `config/gen-config.sh` 把 ECM 写成不存在的 `nss-ecm`、
+  固件写成 `qca-nss-fw-ipq50xx-retail`，`make defconfig` 会静默丢弃 →
+  选了 qosmio 也编不出加速。现按上游 feed 实证改名，并在 defconfig 后
+  **逐个硬校验，缺一个 `::error::` 停编**，绝不编假加速固件。
+- ⚠ **无线侧 wifili 双射频卸载未经这两台实机验证**：参考仓 PZ-L8 的
+  `ECM→NSS + wifili` 实测来自 QSDK 闭源 `qca_ol/umac` 栈，本仓是**主线 ath11k**；
+  能确认的是有线/桥接路径卸载与 CPU 下降，无线卸载属尽力而为。
+- ⚠ NSS 卸载后部分报文不过 host bridge hook，DHCP Snooping 是**尽力防护**。
+
 ## 四、稳定 / 低占用 / 无线（沿用 5.4 老仓 STANDARDS 硬标准）
 
 - 只编：dropbear(SSH) + TTYD(`luci-app-ttyd`) + LuCI 底座/中文 + UBNT 主题（bootstrap 底资源） + 状态页 +
@@ -108,6 +149,9 @@ Web 若仍报 427：串口 `sh /usr/sbin/health-fix`（或单跑 `/etc/init.d/lu
   （NSS 基线保留内核 IPv6 符号，驱动有编译期依赖，只关网络层。）
 - WAN + LAN + 2.4G + 5G 全在 `br-lan`（纯二层）；上级 DHCP 照常透传，
   无线侧 DHCP 由独立 nft bridge 表 `l2-guard` 拦截（67→68 / 547→546）。
+  🔴 r23：镜像里编的是 **`nftables-nojson`**（25.12 默认变体，不带 jansson），
+  不是裸 `nftables` —— 25.12 主树只 `BuildPackage,nftables-nojson/nftables-json`，
+  `PROVIDES:=nftables` 是虚拟提供名，写裸符号会被 `make defconfig` 静默删除。
   ⚠ NSS 卸载后部分报文不过 host bridge hook，属尽力防护，见 `docs/DHCP与SSH防护.md`。
 - 端口归属不猜默认路由：`bridge-netfix` 读 sysfs 桥成员 + `eth*` + 无线口动态补齐。
 - 温度口径：CPU 取 `/sys/class/thermal` 里 type 含 cpu 的热区；射频取

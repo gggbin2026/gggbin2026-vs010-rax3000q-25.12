@@ -32,8 +32,14 @@ CONFIG_PACKAGE_opkg=y
 CONFIG_PACKAGE_ubus=y
 CONFIG_PACKAGE_uci=y
 
-# ── 二层防护 MUST：关了 firewall4 后没人拉 nftables，必须显式编，否则 DHCP Snooping 空转 ──
-CONFIG_PACKAGE_nftables=y
+# ── 二层防护 MUST：关了 firewall4 后没人拉 nft，必须显式编，否则 DHCP Snooping 空转 ──
+# 🔴 r23：OpenWrt 25.12 / main / qosmio 主树 package/network/utils/nftables/Makefile
+#    只 BuildPackage,nftables-nojson(DEFAULT_VARIANT:=1) 与 nftables-json；
+#    `Package/nftables/Default` 是模板，PROVIDES:=nftables 是虚拟提供名，
+#    **不生成 CONFIG_PACKAGE_nftables 符号**。写裸 nftables=y 会被 make defconfig
+#    静默删除 → 6.5) 硬校验失败（Actions run 46149348907 的真实原因）。
+#    nojson 不带 jansson，占用更低，正合本仓口径。
+CONFIG_PACKAGE_nftables-nojson=y
 CONFIG_PACKAGE_kmod-nft-bridge=y
 # 老仓 r29.7 对齐：AP 可选本机 DHCP。默认 dhcp.lan.ignore=1 + disable，
 # 不开启时零常驻、不占运行内存；WDS 模式硬禁。不是 luci-app-* 插件。
