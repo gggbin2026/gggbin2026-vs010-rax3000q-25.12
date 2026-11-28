@@ -1,0 +1,10 @@
+#!/bin/sh
+# 维护动作：只读汇总本机运行日志（固定命令、零参数）
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+echo "=== WDS/AP（仿UBNT）· 运行自检 ==="
+echo "[mode] $(cat /etc/nwrt/mode 2>/dev/null || echo '?') / default $(cat /etc/nwrt/default_mode 2>/dev/null || echo '?')"
+echo "[l2-guard] $(head -1 /tmp/nwrt-l2guard.status 2>/dev/null || echo '未运行')"
+echo "[nwrt-tick] $(head -1 /tmp/nwrt-tick.status 2>/dev/null || echo '未运行')"
+echo "[wireless] $(uci -q get wireless.radio0.htmode 2>/dev/null || echo '?') / $(uci -q get wireless.radio1.htmode 2>/dev/null || echo '?')"
+echo "--- logread 尾部 ---"
+logread 2>/dev/null | tail -25 || echo "（logread 不可用）"

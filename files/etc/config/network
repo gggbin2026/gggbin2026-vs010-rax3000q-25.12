@@ -10,8 +10,13 @@ config interface 'loopback'
 config device 'br_lan'
 	option name 'br-lan'
 	option type 'bridge'
-	option stp '1'
+	option stp '1'      # STP 开：防两台 WDS 成环
+	option ipv6 '0'
+	# ports 由 bridge-netfix 按 sysfs 动态补齐（必须写在本 device 段，不是 interface 段）
 
+# 下面 ipaddr/netmask 只是出厂默认。用户改过就保存、绝不自动改回：
+#   /etc/nwrt/ipaddr|netmask 覆盖文件 > user.cfg 的 ip|mask > 这里的默认值
+# bridge-netfix(21) 与 nwrt-apply-config(24) 只读覆盖文件，不删不写。
 config interface 'lan'
 	option device 'br-lan'
 	option proto 'static'

@@ -66,7 +66,52 @@ TC=/etc/nwrt/tick.conf
 cget(){ x=$(grep -m1 "^$1=" "$TC" 2>/dev/null | cut -d= -f2); case "$x" in ''|*[!0-9]*) echo "$2" ;; *) echo "$x" ;; esac; }
 TEN=$(cget ENABLED 1); TDRY=$(cget DRYRUN 1)
 TLAST=$(head -1 /tmp/nwrt-tick.status 2>/dev/null || echo '—')
-GUARD=$(uci -q get l2guard.main.enabled 2>/dev/null); [ "$GUARD" = 1 ] && GUARD='开启（无线侧 DHCP 已拦）' || GUARD='关闭'
+# 唯一真值是 l2-guard 开机写的实际结果；不读 UCI 配置值，避免「配了但没生效」也显示开启
+GUARD=$(head -1 /tmp/nwrt-l2guard.status 2>/dev/null || echo '')
+[ -n "$GUARD" ] || GUARD='未运行（开机后由 l2-guard 写入结果）'
+# ── 内网 LAN 6 列：物理口固定命名，br-lan 不占号；读不到如实留白 ──
+LANROWS=''
+idx=0
+for p in /sys/class/net/eth* /sys/class/net/lan* /sys/class/net/wan*; do
+  [ -d "$p" ] || continue
+  nm=$(basename "$p")
+  case "$nm" in br-lan|lo) continue ;; esac
+  idx=$((idx+1))
+  label="内网LAN$idx"; [ "$nm" = wan ] && label='WAN(内网)'
+  sp=$(cat "$p/speed" 2>/dev/null); case "$sp" in ''|-1) sp='—' ;; 1000) sp='1G' ;; 2500) sp='2.5G' ;; 100) sp='100M' ;; 10) sp='10M' ;; esac
+  ca=$(cat "$p/carrier" 2>/dev/null); [ "$ca" = 1 ] && ca=1 || ca=0
+  rx=$(cat "$p/statistics/rx_bytes" 2>/dev/null || echo 0); tx=$(cat "$p/statistics/tx_bytes" 2>/dev/null || echo 0)
+  LANROWS="${LANROWS:+$LANROWS,}{\"name\":\"$label\",\"speed\":\"$sp\",\"source\":\"PHY 实测\",\"carrier\":$ca,\"rx\":\"$rx B\",\"tx\":\"$tx B\"}"
+done
+# 关联客户端（只读；无 iw / 无接口保持空数组，绝不伪造）
+STATIONS=''
+IF=''
+for i in /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
+  [ -e "$i" ] && { IF=$(basename "$i"); break; }
+done
+if [ -n "$IF" ] && command -v iw >/dev/null 2>&1; then
+  STATIONS=$(iw dev "$IF" station dump 2>/dev/null | awk '
+    /^Station /{if(mac!="")printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate;sep=",";mac=$2;sig="";rate=""}
+    /signal:/{sig=$2" dBm"}
+    /tx bitrate:/{rate=$3" "$4}
+    END{if(mac!="")printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate}' iface="$IF")
+fi
+# setup 当前值（读 user.cfg，页面回填；不伪造）
+SETUP=''
+UC=/etc/nwrt/user.cfg
+[ -r "$UC" ] || UC=/rom/etc/nwrt/user.cfg
+if [ -r "$UC" ]; then
+  SETUP=$(awk -F= '/^[a-z_]+=/{printf "%s\"%s\":\"%s\"",s,$1,$2;s=","}' "$UC" 2>/dev/null)
+fi
+BDF_FILE='board-2.bin'; BDF_SRC='官方通用容器'
+[ -f /lib/firmware/ath11k/IPQ5018/hw1.0/board-2.bin ] && BDF_SRC='官方通用容器（已装配）' || BDF_SRC='—（镜像内未检出）'
+NETIP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo 172.10.10.241)
+NETMASK=$(uci -q get network.lan.netmask 2>/dev/null || echo 255.255.252.0)
+NETSTP=$(uci -q get network.br_lan.stp 2>/dev/null || echo 1)
+DHCPSRV=$(uci -q get dhcp.lan.ignore 2>/dev/null); [ "$DHCPSRV" = 0 ] && DHCPSRV='开启（本机发地址）' || DHCPSRV='关闭（上级透传）'
+# 面板 ⑤ 回填必须显示「实际生效」的 IP/掩码（串口写 ipaddr 覆盖后 user.cfg 仍是旧值）
+SETUP=$(printf '%s' "$SETUP" | sed "s/\"ip\":\"[^\"]*\"/\"ip\":\"$NETIP\"/;s/\"mask\":\"[^\"]*\"/\"mask\":\"$NETMASK\"/")
+
 TTYD='未装'; [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enabled 2>/dev/null && TTYD='已启用' || TTYD='已装未启用'; }
 printf '{"ok":1,'
 j product "$(cat /etc/nwrt/product 2>/dev/null || echo 'WDS/AP（仿UBNT）')"; printf ','
@@ -80,6 +125,14 @@ printf '"ports":[%s],' "$PORTS"
 printf '"radios":[%s],' "$RADIOS"
 printf '"nss":{'; num present "$NSSP"; printf ','; j fw "$NSF"; printf ','; j conn "$NSC"; printf ','; j load "$NSL"; printf '},'
 printf '"tick":{'; num enabled "$TEN"; printf ','; num dryrun "$TDRY"; printf ','; j last "$TLAST"; printf '},'
-j guard "$GUARD"; printf ','; j ttyd "$TTYD"; printf ','; j ssh 'dropbear · ttyMSM0 115200n8'; printf ','
+printf '"net":{'; j ip "$NETIP"; printf ','; j mask "$NETMASK"; printf ','
+j stp "$NETSTP"; printf ','; j wan '已删除'; printf ','; j wan6 '已删除'; printf ','
+j dhcp_server "$DHCPSRV"; printf '},'
+printf '"lan":[%s],' "$LANROWS"
+printf '"stations":[%s],' "$STATIONS"
+printf '"setup":{%s},' "$SETUP"
+printf '"bdf":{'; j file "$BDF_FILE"; printf ','; j source "$BDF_SRC"; printf ','; j caldata 'off'; printf '},'
+j guard "$GUARD"; printf ','; j l2guard_status "$GUARD"; printf ','; j dhcp_server "$DHCPSRV"; printf ','
+j ttyd "$TTYD"; printf ','; j ssh 'dropbear · ttyMSM0 115200n8'; printf ','
 j ipv6 'off'; printf ','; j firewall 'off'
-printf '}\n'
+printf '}\n' 

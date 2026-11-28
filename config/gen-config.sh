@@ -73,6 +73,16 @@ if ! make defconfig >/tmp/nwrt-defconfig.log 2>&1; then
 fi
 echo "[gen-config] defconfig OK，丢弃幽灵包 $DROPPED 个"
 
+# 6.5) 二层防护硬校验：defconfig 静默丢包会让 DHCP Snooping 变成空转，宁可停编
+for p in nftables kmod-nft-bridge; do
+  grep -q "^CONFIG_PACKAGE_$p=y" "$OUT" || {
+    echo "::error::$p 未进 .config（feed 缺包或被依赖覆盖），无线侧 DHCP 防护会失效"
+    echo "::error::请检查 feeds.conf.default 与所选基线；不要编一个假防护的固件"
+    exit 1
+  }
+done
+echo "[gen-config] 二层防护 OK：nftables + kmod-nft-bridge 均已进 .config"
+
 # 7) 硬校验：luci-app-* 只能有 1 个（ttyd）
 N=$(grep -c '^CONFIG_PACKAGE_luci-app-' "$OUT" 2>/dev/null || true)
 [ "${N:-0}" -le 1 ] || { echo "::error::luci-app-* 出现 $N 个，插件精简被破坏"; exit 1; }

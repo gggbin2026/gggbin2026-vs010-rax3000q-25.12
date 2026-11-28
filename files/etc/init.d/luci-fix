@@ -1,5 +1,7 @@
 #!/bin/sh /etc/rc.common
-# START=18：重建 named main + 按实际目录生成主题下拉 + 清缓存（防 427 / 白屏）
+# START=18：重建 named main + UBNT 主题 + 按实际目录生成主题下拉 + 清缓存（防 427 / 白屏）
+# 🔴 UBNT 主题是覆盖层：ubnt/cascade.css 用 @import 引 bootstrap 的完整资源。
+#    只有两个文件都在才切 ubnt；任一缺失立刻回退 bootstrap，绝不指向空气。
 START=18
 USE_PROCD=0
 start() {
@@ -11,22 +13,30 @@ start() {
     uci -q delete luci.@core[0] 2>/dev/null || true
     uci set luci.main=core
   fi
-  # 2) mediaurlbase 只指向真实存在的主题目录
+  # 2) mediaurlbase：UBNT 优先，依赖缺失回退 bootstrap
   theme=bootstrap
-  for d in /www/luci-static/*; do
-    [ -d "$d" ] || continue
-    b=$(basename "$d")
-    case "$b" in bootstrap|argon*|material*|openwrt*) theme="$b" ;; esac
-  done
+  if [ -f /www/luci-static/ubnt/cascade.css ] && [ -f /www/luci-static/bootstrap/cascade.css ]; then
+    theme=ubnt
+  else
+    for d in /www/luci-static/*; do
+      [ -d "$d" ] || continue
+      b=$(basename "$d")
+      case "$b" in bootstrap|argon*|material*|openwrt*) theme="$b" ;; esac
+    done
+    logger -t luci-fix "WARN ubnt 主题依赖不全，回退 $theme（不白屏）"
+  fi
   uci set luci.main.mediaurlbase="/luci-static/$theme"
   uci set luci.main.lang='zh_cn'
-  # 3) themes 段只列实际存在的，清掉幽灵项
+  # 3) themes 段只列实际存在的，清掉幽灵项；标准 internal section
   uci -q delete luci.themes 2>/dev/null || true
   uci set luci.themes=internal
+  if [ "$theme" = ubnt ]; then
+    uci set luci.themes.UBNT='/luci-static/ubnt'
+  fi
   for d in /www/luci-static/*; do
     [ -d "$d" ] || continue
-    b=$(basename "$d"); case "$b" in cgi-bin|resources) continue ;; esac
-    uci set "luci.themes.$b=$b"
+    b=$(basename "$d"); case "$b" in cgi-bin|resources|ubnt) continue ;; esac
+    uci set "luci.themes.$b=/luci-static/$b"
   done
   uci commit luci
   # 4) 根路径必须是状态页跳转，不是 cgi-bin/luci
@@ -34,5 +44,5 @@ start() {
   uci commit uhttpd
   rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
   [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload >/dev/null 2>&1 || true
-  logger -t luci-fix "OK theme=$theme named-main"
+  logger -t luci-fix "OK theme=$theme named-main UBNT(仿UniFi)"
 }

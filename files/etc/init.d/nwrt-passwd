@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+# START=19：出厂账号 root / admin（SSH 22、LuCI、TTYD、串口同一个账号）
+# 🔴 之前版本只在文档里写了 root/admin，镜像里既没有 /etc/shadow 也没有 chpasswd /
+#    uci-defaults → 编出来 root 密码为空，SSH/LuCI 很可能登不进去。本轮补真落地。
+# 幂等：只在密码为空 / 锁定（!、*、x）时设为 admin；用户自己改过绝不覆盖。
+# 不新增常驻进程，只跑一次；失败如实记日志并返回 1，不假装成功。
+START=19
+USE_PROCD=0
+start() {
+  [ -f /etc/shadow ] || { logger -t nwrt-passwd "FAILED 无 /etc/shadow"; return 1; }
+  cur=$(awk -F: '$1=="root"{print $2;exit}' /etc/shadow 2>/dev/null)
+  case "$cur" in
+    ''|'!'|'*'|'x')
+      if printf 'root:admin\n' | chpasswd >/dev/null 2>&1; then
+        logger -t nwrt-passwd "OK 出厂密码已设 root/admin（用户改过则不覆盖）"
+        return 0
+      fi
+      logger -t nwrt-passwd "FAILED chpasswd 不可用，root 密码仍为空"
+      return 1 ;;
+    *)
+      logger -t nwrt-passwd "OK 用户已设 root 密码，保持不变"
+      return 0 ;;
+  esac
+}

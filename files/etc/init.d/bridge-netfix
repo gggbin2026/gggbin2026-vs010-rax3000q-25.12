@@ -1,29 +1,53 @@
 #!/bin/sh /etc/rc.common
 # START=21：WAN+LAN+无线全在 br-lan；端口归属读 sysfs，不猜默认路由
+# 🔴 netifd 里 ports / stp 属于 config device 段，不是 config interface 段。
+#    写 network.lan.ports 会被静默忽略 → WAN 口和无线口根本没进桥。
 START=21
 start() {
   [ -f /lib/functions.sh ] && . /lib/functions.sh
-  uci -q delete network.wan 2>/dev/null; uci -q delete network.wan6 2>/dev/null || true
+  # ① 删 WAN / WAN6 逻辑接口（出厂 network 里本来就没有，这里兜住旧 overlay 残留）
+  uci -q delete network.wan 2>/dev/null || true
+  uci -q delete network.wan6 2>/dev/null || true
+
+  # ② 确保 br-lan 这个 bridge device 段存在（section 名 br_lan，option name br-lan）
+  uci set network.br_lan='device'
+  uci set network.br_lan.name='br-lan'
+  uci set network.br_lan.type='bridge'
+  uci set network.br_lan.stp='1'
+  uci set network.br_lan.ipv6='0'
+  uci -q delete network.br_lan.ports 2>/dev/null || true
+  # 清掉可能写到错段的历史残留
+  uci -q delete network.lan.ports 2>/dev/null || true
+  uci -q delete network.lan.stp 2>/dev/null || true
+
+  # ③ lan 只挂到 br-lan；静态地址，不发 DHCP、不做网关
+  # 🔴 用户改过的 IP 只保存、绝不自动改回。优先级（全部只读）：
+  #      /etc/nwrt/ipaddr   >  /etc/nwrt/user.cfg 的 ip   >  172.10.10.241
+  #      /etc/nwrt/netmask  >  /etc/nwrt/user.cfg 的 mask >  255.255.252.0
+  #    本脚本绝不 rm / 绝不写这两个覆盖文件；唯一写入点是面板 save 中用户显式提交字段。
   uci set network.lan='interface'
   uci set network.lan.device='br-lan'
   uci set network.lan.proto='static'
-  # 第二台 WDS 客户端：echo 172.10.10.242 > /etc/nwrt/ipaddr，重启不丢
-  IP=$(cat /etc/nwrt/ipaddr 2>/dev/null || echo 172.10.10.241)
-  case "$IP" in *[!0-9.]*|'') IP=172.10.10.241 ;; esac
+  IP=$(cat /etc/nwrt/ipaddr 2>/dev/null)
+  case "$IP" in ''|*[!0-9.]*) IP=$(grep -m1 '^ip=' /etc/nwrt/user.cfg 2>/dev/null | cut -d= -f2-) ;; esac
+  case "$IP" in ''|*[!0-9.]*) IP=172.10.10.241 ;; esac
+  MASK=$(cat /etc/nwrt/netmask 2>/dev/null)
+  case "$MASK" in ''|*[!0-9.]*) MASK=$(grep -m1 '^mask=' /etc/nwrt/user.cfg 2>/dev/null | cut -d= -f2-) ;; esac
+  case "$MASK" in ''|*[!0-9.]*) MASK=255.255.252.0 ;; esac
   uci set network.lan.ipaddr="$IP"
-  uci set network.lan.netmask='255.255.252.0'
+  uci set network.lan.netmask="$MASK"
   uci set network.lan.ipv6='0'
-  uci set network.lan.stp='1'
-  uci -q delete network.lan.ports 2>/dev/null || true
-  # 先取 br-lan 现有成员，再补 eth*/lan*/wan* 与无线口
+
+  # ④ 所有物理网口（含 WAN 物理口）+ 无线口全进同一个桥：全内网、纯二层
+  #    先取 br-lan 现有成员，再补 eth*/lan*/wan* 与无线口
   for p in /sys/class/net/br-lan/brif/* /sys/class/net/eth* /sys/class/net/lan* \
            /sys/class/net/wan* /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
     [ -e "$p" ] || continue
     n=$(basename "$p")
     case "$n" in br-lan|lo) continue ;; esac
-    uci add_list network.lan.ports="$n"
+    uci add_list network.br_lan.ports="$n"
   done
   uci commit network
   /etc/init.d/network reload >/dev/null 2>&1 || true
-  logger -t bridge-netfix "OK br-lan 成员=$(uci -q get network.lan.ports)"
+  logger -t bridge-netfix "OK stp=1 ip=$IP mask=$MASK wan/wan6=deleted br-lan 成员=$(uci -q get network.br_lan.ports)"
 }

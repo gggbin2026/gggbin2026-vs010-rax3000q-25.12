@@ -1,46 +1,51 @@
-# 为什么是「bootstrap + 独立 UBNT 页」，而不是直接装 Argon
+# 主题：UBNT（仿 UniFi）· 深色
 
-## 老仓库那个坑（两个根因叠加）
+用户要的就是**这个 UBNT 主题**。现在的落地口径：
 
-1. `/etc/config/luci` 缺 named `config core 'main'`。它是 luci-base 的 conffile，
-   sysupgrade 勾「保留配置」或旧 overlay 残留会盖掉编译期文件；此时任何
-   `uci set luci.main=...` 都会让 UCI 造出**匿名** config main，LuCI 按名字找
-   `main` 找不到 → `dispatcher.lua:427`，整个 `/cgi-bin/luci` 打不开。
-2. `mediaurlbase` 写死 `/luci-static/argon`、主题下拉里还列 Argon / Footstrap，
+| 位置 | 主题 |
+|---|---|
+| `/ubnt/`、`/bridge/`、`/ap/` 三页状态页 | **UBNT（仿 UniFi）深色**：左侧蓝条侧栏、深色卡片、胶囊 KPI / 按钮 / 输入项、六入口互访 |
+| `/cgi-bin/luci/` 后台 | **UBNT（仿 UniFi）深色**：真·主题目录 `/www/luci-static/ubnt/`，主题下拉显示 `UBNT` |
+| 底层资源 | 官方 `luci-theme-bootstrap`（**必须编入**，见下） |
+
+## 为什么这样不会白屏（老仓那个坑）
+
+老仓「主题页进不去 / dispatcher.lua:427」是两个根因叠加：
+
+1. `/etc/config/luci` 缺 named `config core 'main'`，`uci set luci.main=...` 会造出匿名
+   section，LuCI 按名字找不到 `main` → 427，整个 `/cgi-bin/luci` 打不开。
+2. `mediaurlbase` 写死 `/luci-static/argon`、下拉里还列 Argon / Footstrap，
    但这两个是**社区主题，官方 25.12 luci feed 里没有**。写 `=y` 会被
-   `make defconfig` 静默丢掉，镜像里只有 bootstrap；配置却指向空气 → 白屏，
-   在「系统 → 语言与样式」点一下幽灵主题就 500，之后再也进不去。
+   `make defconfig` 静默丢掉，镜像里只有 bootstrap；配置却指向空气 → 白屏 / 500。
 
-## 本仓四层兜住
+本仓三层兜住：
 
 | 层 | 做法 |
 |---|---|
-| 编译期 `.config` | 只 `luci-theme-bootstrap=y`；argon/footstrap 显式 `is not set`；`gen-config.sh` 发现 feed 里没有的包会**从 .config 删掉**而不是只打 warning |
-| 编译期配置 | `files/etc/config/luci` 写死 named `config core 'main'` + `mediaurlbase=/luci-static/bootstrap`，themes 段只 Bootstrap |
-| 每次开机 | `luci-fix`(START=18) 重建 named main、按 `/www/luci-static/` 实际目录生成主题下拉、修正指向空气的 mediaurlbase、清 LuCI 缓存、`uhttpd.main.index_page=index.html` |
-| 页面本身 | `/ubnt/`、`/bridge/`、`/ap/` 是独立静态页 + 只读 CGI，**不依赖 LuCI 主题**，LuCI 万一挂了也照常能开；CGI 取不到数据时显示明确原因 |
+| 编译期 | `luci-theme-bootstrap=y` 保留（**底资源**），argon/footstrap 显式 `is not set`；UBNT 主题由本仓 `files/` 注入，不依赖任何第三方 feed |
+| 主题文件 | `files/www/luci-static/ubnt/cascade.css` 第一行 `@import url("/luci-static/bootstrap/cascade.css")`。被导入 CSS 里的相对 `url()` 基于**被导入文件自身 URL** 解析，所以图片/字体全部正确落在官方 bootstrap 目录，无需复制文件；后面叠 UBNT 深色覆盖 |
+| 出厂配置 | `files/etc/config/luci` 写死 named `config core 'main'` + `mediaurlbase='/luci-static/ubnt'` + 标准 `config internal 'themes'`（option `UBNT`、`Bootstrap`，值都是真实路径） |
+| 每次开机 | `luci-fix`(START=18) 校验 `ubnt/cascade.css` **和** `bootstrap/cascade.css` 都在才用 ubnt，任一缺失立刻回退 bootstrap 并记 WARN；重建 named main、按实际目录重建下拉、清 LuCI 缓存、`uhttpd.main.index_page=index.html` |
+| 页面本身 | 三页状态页是独立静态页 + 只读 CGI，**不依赖 LuCI 主题**，LuCI 万一挂了也照常能开 |
 
-## UBNT 皮肤
+⚠ **别删 `common.seed` 里的 `luci-theme-bootstrap=y`**：它是 UBNT 主题 `@import`
+的底资源，删了就是真的「指向空气」。`gen-config.sh` 有硬校验会拦。
+`verify.sh` 也把这条列为阻断项。
 
-直接移植 5.4 老仓的 `vs010-ubnt.css` + `vs010-ubnt-skin.js`（见
-`reference/old54/`），零侵入：
+## 切回官方原样
 
-- 只定义 `u-*` 新类与 `body.ubnt-body` 布局，**绝不覆盖两页原有选择器**；
-- 注入器只搬移 DOM 外层，不删、不重命名、不改写任何原有节点与 id；
-- `window.fetch` hook + `Response.clone()` 读一份，**零额外请求**；
-- 只接主 CGI（本仓 `/cgi-bin/state`，另留 `bridge`/`apstatus` 兼容别名），
-  **绝不**调用任何写入端点；未登录只读；
-- 宽屏 ≥900px 左侧 220px 深色栏，<900px 折叠顶部横向 pill；
-- 六个互访入口（含「⇄ 模式切换」→ `/cgi-bin/luci/admin/nwrt`）+ 登录/退出 + TTYD :7681；
-- 竖屏按钮条 `overflow-x:auto` 横向滚动，绝不 `display:none`。
+面板 `⑦ 主题与界面` 把「LuCI 主题」选成 `Bootstrap（官方原样）` → 保存，
+`nwrt-apply-config` 会把 `mediaurlbase` 指回 `/luci-static/bootstrap`。
+或直接串口：`uci set luci.main.mediaurlbase='/luci-static/bootstrap'; uci commit luci`。
+三页状态页**永远是 UBNT 风格**，不受这个开关影响。
 
-状态页渲染由 `www/app.js` 完成，字段与 `www/cgi-bin/state` 一一对应；
-读不到传感器如实显示「—」，绝不写假数值。非当前模式的页显示一条非强制提示条，
-不 2 秒踢走（保留三页全互访）；「服务与防护」里给 `nwrt-apply-mode` 命令兜底，
-防止 `luci-compat` 未编入时切换页 404 却假装能点。非当前模式的页显示一条非强制提示条，
-不 2 秒踢走（保留三页全互访）；「服务与防护」里给 `nwrt-apply-mode` 命令兜底，
-防止 `luci-compat` 未编入时切换页 404 却假装能点。非当前模式的页显示一条非强制提示条，
-不 2 秒踢走（保留三页全互访）；「服务与防护」里给 `nwrt-apply-mode` 命令兜底，
-防止 `luci-compat` 未编入时切换页 404 却假装能点。非当前模式的页显示一条非强制提示条，
-不 2 秒踢走（保留三页全互访）；「服务与防护」里给 `nwrt-apply-mode` 命令兜底，
-防止 `luci-compat` 未编入时切换页 404 却假装能点。
+## 出厂账号（同一套，SSH / LuCI / TTYD / 串口）
+
+```
+root / admin
+```
+
+`nwrt-passwd`(START=19) 在 root 密码为空 / 锁定（`!`、`*`、`x`）时设为 `admin`；
+用户自己改过就保持不变，开机不会反复盖回去。改密码请走 LuCI
+「系统 → 管理权」或 `passwd`，**不要**写进 `/etc/nwrt/user.cfg`（它是明文配置）。
+Web 若仍报 427：串口 `sh /usr/sbin/health-fix`（或单跑 `luci-fix`），刷新即可，不用重刷。

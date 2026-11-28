@@ -1,0 +1,91 @@
+/* WDS/AP（仿UBNT）· LuCI 主题：UBNT / UniFi 深色
+   🔴 @import 必须是文件第一条规则，且用绝对路径。
+      被导入的 bootstrap/cascade.css 内部所有相对 url() 都基于「被导入文件自身
+      的 URL」解析 → 图标 / 字体 / 背景资源全部正确落在官方 bootstrap 目录，
+      无需复制任何文件，也不会出现「指向空气」的白屏。
+      bootstrap 仍必须编进镜像（common.seed 的 luci-theme-bootstrap=y），
+      它是 UBNT 主题的底资源，删了才会 404。 */
+@import url("/luci-static/bootstrap/cascade.css");
+
+:root{
+  --ubnt-nav:#0b1422; --ubnt-nav2:#132238; --ubnt-brand:#2f7bff;
+  --ubnt-line:#22334b; --ubnt-card:#132033; --ubnt-soft:#17273c;
+  --ubnt-bg:#0e1520; --ubnt-tx:#e8eef7; --ubnt-mut:#8fa3bd;
+  --ubnt-ok:#3ddc97; --ubnt-warn:#ffc46b; --ubnt-bad:#ff7b7b;
+}
+html,body{background:var(--ubnt-bg) !important;color:var(--ubnt-tx) !important}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif !important}
+
+/* 顶栏 / 侧栏 / 页脚 */
+header,.navbar,#menubar,.main > .menu,.main > .sidebar,.sidebar,
+#header,.header,.brand,.navbar-brand,footer,.footer,
+.uci-change-list,.cbi-section-descr{
+  background:var(--ubnt-nav) !important;color:var(--ubnt-mut) !important;
+  border-color:var(--ubnt-line) !important}
+header a,.navbar a,#menubar a,.sidebar a,footer a{color:var(--ubnt-mut) !important}
+header a:hover,.navbar a:hover,#menubar a:hover,.sidebar a:hover{color:#fff !important}
+
+/* 主区与卡片 */
+#maincontent,.main,.main > .content,.container,.cbi-map,.cbi-section,
+.cbi-section-node,.cbi-value,.cbi-value-field,.panel,.card,.table,
+.cbi-section-table,fieldset,.ifacebox,.zonebadge{
+  background:var(--ubnt-card) !important;color:var(--ubnt-tx) !important;
+  border:1px solid var(--ubnt-line) !important;border-radius:12px !important}
+h1,h2,h3,h4,strong,b,legend,label,.cbi-value-title{color:var(--ubnt-tx) !important}
+small,.cbi-value-description,.cbi-section-descr,.description{color:var(--ubnt-mut) !important}
+a,a:visited{color:#8ab4ff !important}
+
+/* 表格 */
+table,tr,td,th,thead,tbody,.table td,.table th,.cbi-section-table td,
+.cbi-section-table th{background:transparent !important;color:var(--ubnt-tx) !important;
+  border-color:var(--ubnt-line) !important}
+thead th,.tr.table-titles th,.cbi-section-table th{background:var(--ubnt-soft) !important;
+  color:var(--ubnt-mut) !important;font-weight:700 !important}
+tr:nth-child(even) td,.table tr:nth-child(even) td{background:rgba(255,255,255,.02) !important}
+
+/* 输入 / 下拉 / 按钮：胶囊（对齐 5.4 老仓 r29） */
+input,select,textarea,.cbi-input-text,.cbi-input-select,.cbi-input-password{
+  background:#0c1726 !important;color:var(--ubnt-tx) !important;
+  border:1px solid var(--ubnt-line) !important;border-radius:999px !important;
+  padding:6px 12px !important}
+input:focus,select:focus,textarea:focus{outline:none !important;border-color:var(--ubnt-brand) !important}
+input[type=checkbox],input[type=radio]{border-radius:3px !important;padding:0 !important}
+button,.cbi-button,.btn,input[type=submit],input[type=reset],.cbi-button-add,
+.cbi-button-apply,.cbi-button-save,.cbi-button-reset,.cbi-button-remove,
+a.cbi-button,a.btn,.cbi-pageactions > *{
+  background:var(--ubnt-soft) !important;color:var(--ubnt-tx) !important;
+  border:1px solid var(--ubnt-line) !important;border-radius:999px !important;
+  padding:6px 14px !important;text-decoration:none !important}
+button:hover,.cbi-button:hover,.btn:hover,input[type=submit]:hover,
+a.cbi-button:hover{border-color:var(--ubnt-brand) !important;color:#a9c9ff !important}
+.cbi-button-apply,.cbi-button-save,input[type=submit],.cbi-button-add,
+.cbi-button-positive{background:rgba(47,123,255,.2) !important;
+  border-color:var(--ubnt-brand) !important;color:#a9c9ff !important}
+.cbi-button-reset,.cbi-button-remove,.cbi-button-negative{
+  background:rgba(255,123,123,.12) !important;border-color:rgba(255,123,123,.4) !important;
+  color:#ffb3b3 !important}
+
+/* 状态色 / 徽章 / 提示 */
+.alert,.alert-message,.notice,.error,.cbi-section-error{
+  background:rgba(255,196,107,.1) !important;border:1px solid rgba(255,196,107,.35) !important;
+  border-radius:12px !important;color:#ffd79a !important}
+.alert-success,.success{background:rgba(61,220,151,.1) !important;
+  border-color:rgba(61,220,151,.35) !important;color:#9ff0c9 !important}
+.danger,.cbi-section-error{background:rgba(255,123,123,.1) !important;
+  border-color:rgba(255,123,123,.35) !important;color:#ffb3b3 !important}
+.ifacebadge,.badge,.label,.tag{
+  border-radius:999px !important;padding:3px 10px !important;
+  background:var(--ubnt-soft) !important;border:1px solid var(--ubnt-line) !important;
+  color:var(--ubnt-mut) !important}
+
+/* 导航高亮（UniFi 左侧蓝条） */
+#mainmenu > li > a.active,.active > a,.nav .active a,
+.selected > a,[aria-current=page]{
+  background:var(--ubnt-nav2) !important;color:#fff !important;
+  border-left:3px solid var(--ubnt-brand) !important}
+hr,hr.separator{border-color:var(--ubnt-line) !important}
+pre,code,.cbi-value-field code{background:#0a1220 !important;color:#9ff0c9 !important;
+  border-radius:8px !important;padding:2px 6px !important}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:var(--ubnt-nav)}
+::-webkit-scrollbar-thumb{background:var(--ubnt-line);border-radius:999px}

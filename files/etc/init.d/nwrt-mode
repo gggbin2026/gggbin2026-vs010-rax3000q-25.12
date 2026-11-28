@@ -4,7 +4,9 @@ START=24
 USE_PROCD=0
 EXTRA_COMMANDS="switch"
 start() {
+  # 先重放模式，再重读 user.cfg 全字段（对齐 5.4 老仓 r27：重启不丢）
   [ -x /usr/sbin/nwrt-apply-mode ] && /usr/sbin/nwrt-apply-mode boot
+  [ -r /etc/nwrt/user.cfg ] && /usr/sbin/nwrt-apply-config >/dev/null 2>&1 || true
 }
 switch() {
   [ -x /usr/sbin/nwrt-apply-mode ] && /usr/sbin/nwrt-apply-mode "$1"

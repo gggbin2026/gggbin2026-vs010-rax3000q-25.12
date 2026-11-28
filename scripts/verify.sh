@@ -36,7 +36,7 @@ for f in $(find . -type f \( -name '*.sh' -o -path './files/etc/init.d/*' \
   sh -n "$f" 2>/dev/null || blk "shell 语法错误: $f"
 done
 for f in $(find scripts config -type f -name '*.py' 2>/dev/null); do
-  python3 -m py_compile "$f" 2>/dev/null || blk "python 语法错误: $f"
+  PYTHONDONTWRITEBYTECODE=1 python3 -c "import ast,sys;ast.parse(open(sys.argv[1],encoding='utf-8').read())" "$f" 2>/dev/null || blk "python 语法错误: $f"
 done
 python3 scripts/luacheck.py files/usr/lib/lua/luci/controller/admin/nwrt.lua >/dev/null 2>&1 \
   && ok "Lua controller 词法" || blk "Lua controller 词法不通过（后台会 500）"
@@ -63,7 +63,27 @@ done
 
 echo "=== [4/9] LuCI 防 427 + 模式切换写入鉴权 ==="
 grep -q "config core 'main'" files/etc/config/luci && ok "named core main" || blk "缺 named config core 'main'"
-grep -q 'mediaurlbase.*bootstrap' files/etc/config/luci && ok "mediaurlbase=bootstrap" || blk "mediaurlbase 没指向 bootstrap"
+grep -q "mediaurlbase.*'/luci-static/ubnt'" files/etc/config/luci && ok "出厂 mediaurlbase=ubnt（UBNT 主题）" || blk "出厂没指向 UBNT 主题"
+grep -q "config internal 'themes'" files/etc/config/luci && ok "标准 internal themes 段" || blk "themes 段格式错"
+[ -f files/www/luci-static/ubnt/cascade.css ] && ok "UBNT 主题目录真实存在（非指向空气）" || blk "缺 ubnt/cascade.css"
+grep -q '^@import url("/luci-static/bootstrap/cascade.css");' files/www/luci-static/ubnt/cascade.css && ok "UBNT 用 @import 引官方完整资源" || blk "缺 @import 底资源"
+grep -q '^CONFIG_PACKAGE_luci-theme-bootstrap=y' config/common.seed && ok "bootstrap 底资源仍编入（删了会 404）" || blk "底资源被删，UBNT 会白屏"
+grep -q 'theme=ubnt' files/etc/init.d/luci-fix && grep -q '回退' files/etc/init.d/luci-fix && ok "luci-fix UBNT 优先 + 依赖缺失回退" || blk "缺主题回退（白屏风险）"
+grep -q 'luci.themes.UBNT' files/etc/init.d/luci-fix && ok "主题下拉含 UBNT" || blk "下拉没 UBNT"
+grep -q 'theme=ubnt' files/etc/nwrt/user.cfg && ok "user.cfg 主题=ubnt" || blk "user.cfg 还是 bootstrap"
+grep -q "'ubnt','UBNT（仿 UniFi）" files/www/app.js && ok "面板主题下拉 = UBNT" || blk "面板主题下拉未改"
+grep -q 'v=="ubnt"' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "LuCI 白名单放行 ubnt" || blk "控制器会拒收 ubnt"
+grep -q 'mediaurlbase' files/usr/sbin/nwrt-apply-config && ok "应用器真正落主题到 /etc/config/luci" || blk "主题只存 user.cfg 不生效"
+
+echo "=== [4.6/9] 出厂账号密码（之前只在文档里写过，镜像里没落地）==="
+[ -f files/etc/init.d/nwrt-passwd ] && ok "nwrt-passwd 脚本在" || blk "缺 root 密码脚本"
+grep -q 'START=19' files/etc/init.d/nwrt-passwd && ok "开机 START=19" || blk "密码脚本没开机顺序"
+grep -q 'chpasswd' files/etc/init.d/nwrt-passwd && ok "真设密码（非只写文档）" || blk "没有 chpasswd"
+grep -q '用户已设 root 密码，保持不变' files/etc/init.d/nwrt-passwd && ok "不覆盖用户改过的密码" || blk "会反复覆盖用户密码"
+grep -q 'FAILED' files/etc/init.d/nwrt-passwd && ok "失败如实记日志" || blk "会假装成功"
+grep -q '19:nwrt-passwd' .github/workflows/build.yml && ok "workflow 已建 rc.d 链接" || blk "脚本编进镜像但不开机执行"
+grep -q "option PasswordAuth 'on'" files/etc/config/dropbear && grep -q "option RootPasswordAuth 'on'" files/etc/config/dropbear && ok "dropbear 允许 root 密码登录" || blk "dropbear 会拒密码登录"
+! grep -qE 'root:admin|^(password|passwd|pass)=' files/etc/nwrt/user.cfg && ok "明文密码不写进 user.cfg" || blk "配置里出现明文密码" 
 grep -q 'luci-theme-argon' files/etc/config/luci && blk "luci 配置里出现幽灵 argon 主题" || ok "无幽灵主题"
 # 🔴 零裸 CGI 写入端点：状态 CGI 只能读
 FOUND=0
@@ -76,12 +96,48 @@ if [ "$FOUND" = 1 ]; then
 else
   ok "CGI 全只读，无裸写入端点"
 fi
-grep -q 'entry({"admin", "nwrt"' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "切换端点在 admin 树（sysauth）" || blk "切换端点不在 admin 树"
+grep -q 'entry({"admin","nwrt"' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "切换端点在 admin 树（sysauth）" || blk "切换端点不在 admin 树"
 grep -q 'mode == "wds" or mode == "ap"' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "mode 白名单校验" || blk "缺 mode 白名单"
 grep -q 'case "$ACT" in' files/usr/sbin/nwrt-apply-mode && grep -q 'boot) MODE=' files/usr/sbin/nwrt-apply-mode && ok "apply-mode 固定枚举" || blk "apply-mode 缺固定枚举"
 grep -q 'wifi reload' files/usr/sbin/nwrt-apply-mode && \
   ! (grep -v '^[[:space:]]*#' files/usr/sbin/nwrt-apply-mode | grep -q 'wifi down') && \
   ok "一次 reload / 无射频下线" || blk "apply-mode 违反不做射频下线"
+
+echo "=== [4.7/9] 管理 IP：用户改过就保存，绝不自动改回 ==="
+! grep -q 'rm -f /etc/nwrt/ipaddr' files/usr/sbin/nwrt-apply-config && ok "不再删除用户 IP 覆盖文件" || blk "会 rm ipaddr → 重启回 .241"
+! grep -q '172.10.10.242 > /etc/nwrt/ipaddr' files/usr/sbin/nwrt-apply-config && ok "role=client 不再写死 .242 覆盖用户值" || blk "会写死 .242"
+! grep -q 'rm -f /etc/nwrt/netmask' files/usr/sbin/nwrt-apply-config && ok "不删掩码覆盖文件" || blk "会删 netmask"
+! grep -qE 'rm -f /etc/nwrt/(ipaddr|netmask)' files/etc/init.d/bridge-netfix && ok "开机脚本不删覆盖文件" || blk "bridge-netfix 会删覆盖文件"
+grep -q '/etc/nwrt/ipaddr' files/etc/init.d/bridge-netfix && grep -q "/etc/nwrt/user.cfg" files/etc/init.d/bridge-netfix && ok "bridge-netfix 三级优先级" || blk "bridge-netfix 缺优先级"
+grep -q '/etc/nwrt/netmask' files/etc/init.d/bridge-netfix && ok "掩码可覆盖（/etc/nwrt/netmask）" || blk "掩码仍写死"
+grep -q 'network.lan.ipaddr' files/usr/sbin/nwrt-apply-config && ok "面板 IP 真正落到 network（非假生效）" || blk "面板 IP 假生效"
+grep -q 'network.lan.netmask' files/usr/sbin/nwrt-apply-config && ok "面板掩码真正落到 network" || blk "面板掩码假生效"
+grep -q '/etc/init.d/network reload' files/usr/sbin/nwrt-apply-config && ok "改完立刻 reload 生效" || blk "改完要等重启才生效"
+grep -q 'sync_override' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "面板 save 同步写覆盖文件" || blk "面板改 IP 不持久"
+grep -q 'http.formvalue("ip")' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "只同步显式提交的 ip（不覆盖串口设置）" || blk "每次保存都会覆盖串口 IP"
+grep -q 'SETUP=$(printf' files/www/cgi-bin/state && grep -q 'NETIP' files/www/cgi-bin/state && ok "面板回填显示实际生效 IP" || blk "串口覆盖后面板显示旧值"
+grep -q '改了就持久保存' files/www/app.js && ok "界面明示不自动改回" || blk "界面未说明"
+
+echo "=== [4.5/9] 二层防护：DHCP Snooping / STP / WAN / 全内网桥 ==="
+# DHCP Snooping 真生效的四道门槛，缺一就编出「假防护」
+grep -q '^CONFIG_PACKAGE_nftables=y' config/common.seed && ok "nftables 是 MUST（firewall4 关了没人拉）" || blk "nftables 未编入 → l2-guard 必然跳过"
+grep -q '^CONFIG_PACKAGE_kmod-nft-bridge=y' config/common.seed && ok "kmod-nft-bridge 是 MUST" || blk "缺 bridge 表内核模块"
+grep -q '未进 .config' config/gen-config.sh && ok "defconfig 后硬校验（缺包宁可停编）" || blk "缺二层防护硬校验"
+grep -q "option enabled '1'" files/etc/config/l2guard && ok "l2guard 出厂 enabled=1" || blk "l2guard 没开"
+grep -q 'hook prerouting' files/etc/init.d/l2-guard && ok "nft hook=prerouting（拦桥转发帧）" || blk "hook 不是 prerouting，拦不住私设 DHCP"
+! (grep -v '^[[:space:]]*#' files/etc/init.d/l2-guard | grep -q 'hook input') && ok "无失效的 input 钩子" || blk "执行行仍残留 hook input"
+grep -q 'FAILED' files/etc/init.d/l2-guard && grep -q 'nft list table' files/etc/init.d/l2-guard && ok "失败如实报 + 规则回读确认" || blk "会假报 OK"
+grep -q 'sport 67' files/etc/init.d/l2-guard && grep -q 'sport 547' files/etc/init.d/l2-guard && ok "DHCPv4 67→68 / DHCPv6 547→546 都拦" || blk "缺 v4 或 v6 规则"
+grep -q '22:l2-guard' .github/workflows/build.yml && ok "l2-guard 开机自启链接在" || blk "l2-guard 没进 rc.d"
+# STP / WAN / 全内网桥
+grep -q "option stp '1'" files/etc/config/network && ok "出厂 br-lan STP=1" || blk "出厂 STP 没开"
+grep -q "network.br_lan.stp='1'" files/etc/init.d/bridge-netfix && ok "运行期 STP 写在 device 段" || blk "STP 写错段"
+grep -q "network.br_lan.ports=" files/etc/init.d/bridge-netfix && ok "桥成员写在 device 段" || blk "ports 仍写在 interface 段（netifd 会忽略）"
+! grep -q 'network.lan.ports=' files/etc/init.d/bridge-netfix && ok "无失效的 lan.ports" || blk "残留 lan.ports"
+grep -q 'delete network.wan ' files/etc/init.d/bridge-netfix && grep -q 'delete network.wan6' files/etc/init.d/bridge-netfix && ok "运行期删 WAN / WAN6" || blk "没删 WAN/WAN6"
+grep -q 'network.wan' files/etc/config/network && blk "出厂 network 里仍有 wan 段" || ok "出厂无 WAN / WAN6 段"
+grep -q '/sys/class/net/wan[*]' files/etc/init.d/bridge-netfix && ok "WAN 物理口也进 br-lan" || blk "WAN 物理口没进桥"
+grep -q 'head -1 /tmp/nwrt-l2guard.status' files/www/cgi-bin/state && ok "状态页显示实际结果非配置值" || blk "状态页会假装防护已生效"
 
 echo "=== [5/9] 轻量巡检：单常驻、dryrun 默认、红线 ==="
 N=$(grep -rl 'USE_PROCD=1' files/etc/init.d/ 2>/dev/null | wc -l | tr -d ' ')
@@ -122,6 +178,53 @@ grep -q '/cgi-bin/luci/admin/nwrt' files/www/vs010-ubnt-skin.js && ok "六入口
 grep -q 'data-page' files/www/app.js && grep -q 'mismatch' files/www/app.js && ok "非当前模式提示条（不强制跳）" || blk "缺 mode 提示条"
 grep -q 'nwrt-apply-mode' files/www/app.js && ok "TTYD/SSH 命令兜底" || blk "缺命令兜底"
 grep -q 'nwrt-tick\|TICK' files/www/app.js && ok "巡检卡片" || blk "缺巡检卡片"
+
+echo "=== [9.5/9] 5.4 老仓界面基线（r28–r29.12）==="
+# 前 3 块同序
+grep -q '系统仪表盘' files/www/app.js && grep -q '常用设置控制台' files/www/app.js && grep -q '网络与本机' files/www/app.js && ok "前 3 块齐（GAUGE/SETUP/NETWORK）" || blk "缺前 3 块"
+# 用 render() 里的真实拼接顺序判定，而不是全文首次出现（注释里也会出现这三个词）
+LINE=$(grep -n "gauge(j)+setup(j)+network(j)" files/www/app.js | head -1)
+[ -n "$LINE" ] && ok "两页前 3 块严格同序（render 内 gauge→setup→network）" || blk "前 3 块顺序错"
+grep -q 'function ring' files/www/app.js && [ "$(grep -c 'ring(' files/www/app.js)" -ge 4 ] && ok "GAUGE 三环仪表" || blk "GAUGE 三环缺"
+grep -q '时间 ' files/www/app.js && grep -q '运行 ' files/www/app.js && ok "时间 / 运行徽章" || blk "缺徽章"
+grep -q '无线芯片温度' files/www/app.js && ok "无线芯片温度" || blk "缺无线芯片温度"
+# SETUP 八分组
+N=$(grep -o "grp('①\|grp('②\|grp('③\|grp('④\|grp('⑤\|grp('⑥\|grp('⑦\|grp('⑧" files/www/app.js | wc -l | tr -d ' ')
+[ "$N" = 8 ] && ok "SETUP ①…⑧ 八分组" || blk "SETUP 分组 $N 个（应 8）"
+grep -q 'HE160' files/www/app.js && grep -q 'HE40' files/www/app.js && grep -q 'HE20' files/www/app.js && ok "6.12 双频宽 HE*" || blk "频宽未升级为 HE*"
+! grep -qE "'HT160'|'HT80'|'HT40'" files/www/app.js && ok "无 QSDK HT* 残留" || blk "残留 QSDK HT* 频宽"
+grep -q '该基线不支持，不下发' files/www/app.js && ok "不支持字段如实标注" || blk "会伪造弱信号/MU-MIMO 已生效"
+grep -q 'demo=1' files/www/app.js && ok "离线 ?demo=1 预览（老仓 r29.8）" || blk "缺离线预览"
+# 六入口 / 胶囊 / 内网 LAN 6 列
+grep -q "'⚙','常用设置'" files/www/vs010-ubnt-skin.js && grep -q "'⚙','高级设置后台'" files/www/vs010-ubnt-skin.js && ok "六入口文案对齐老仓" || blk "入口文案不一致"
+grep -q '高级设置后台' files/www/vs010-ubnt-skin.js && ok "右上角 ⚙ 高级设置后台" || blk "缺右上角入口"
+grep -q 'border-radius:999px' files/www/vs010-ubnt.css && ok "胶囊 999px" || blk "缺胶囊规则"
+grep -q '内网LAN' files/www/cgi-bin/state && grep -q 'u-tbl6' files/www/app.js && ok "内网LAN1… + 6 列表" || blk "缺内网 LAN 6 列"
+grep -q '链接速率' files/www/app.js && grep -q '速率来源' files/www/app.js && ok "链接速率 / 来源列" || blk "缺速率列"
+# 写入只在 admin 树
+grep -q '/cgi-bin/luci/admin/nwrt/save' files/www/app.js && ok "写入走 admin/save" || blk "写入端点不在 admin 树"
+grep -q '/cgi-bin/luci/admin/nwrt/probe' files/www/app.js && ok "会话探测 probe" || blk "缺 probe"
+grep -q '零 eval' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "零 eval 声明" || blk "控制器缺零 eval"
+grep -q 'ACTS = {' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "维护动作固定枚举" || blk "维护动作未枚举"
+grep -q 'nwrt-apply-config' files/etc/init.d/nwrt-mode && ok "开机重读 user.cfg" || blk "重启会丢配置"
+grep -q '^CONFIG_PACKAGE_dnsmasq=y' config/common.seed && ok "AP 可选 DHCP 底座" || blk "缺 dnsmasq 底座"
+# 🔴 seed 自相矛盾检查：同一符号不能同时 =y 与 is not set（后者会让 defconfig 静默关掉前者）
+CONFLICT=$(python3 - <<'PYEOF'
+import re,collections
+d=collections.defaultdict(set)
+for l in open('config/common.seed',encoding='utf-8'):
+    s=l.strip()
+    if s.startswith('OPTIONAL:'): s=s[9:]
+    m=re.match(r'^(CONFIG_[A-Za-z0-9_]+)=y$',s)
+    if m: d[m.group(1)].add('y')
+    m=re.match(r'^# (CONFIG_[A-Za-z0-9_]+) is not set$',s)
+    if m: d[m.group(1)].add('n')
+print(','.join(k for k,v in d.items() if len(v)>1))
+PYEOF
+)
+[ -z "$CONFLICT" ] && ok "seed 无符号值冲突" || blk "seed 符号冲突: $CONFLICT"
+[ -f files/usr/sbin/nwrt-scan ] && ok "周边主端只读扫描" || blk "缺 nwrt-scan"
+grep -q 'vs010_home' files/usr/lib/lua/luci/controller/admin/nwrt.lua && ok "LuCI 一级返回菜单" || blk "缺 go_home 菜单"
 
 echo "=== [9/9] 非阻断文档 / 参考 ==="
 for f in FIRMWARE.md FLASHING.md MIGRATION.md 上传说明.txt 修复总览.md \

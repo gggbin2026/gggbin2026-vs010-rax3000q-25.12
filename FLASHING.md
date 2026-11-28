@@ -42,7 +42,7 @@ reset
 - `cat /sys/class/net/eth0/statistics/rx_bytes` 与 `eth1` 有计数；
 - 温度读不到显示「—」，不是报错、不是假数值；
 - `/bridge/`（WDS 固件）或 `/ap/`（AP 固件）能直接打开，未登录只读可见；
-- `http://<IP>/cgi-bin/luci/` 能打开，主题下拉只有实际存在的主题。
+- `http://<IP>/cgi-bin/luci/` 能打开，呈 UBNT 深色主题，主题下拉只有实际存在的主题（UBNT / Bootstrap）。
 
 ## 变砖边界
 

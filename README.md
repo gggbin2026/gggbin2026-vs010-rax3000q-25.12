@@ -48,7 +48,34 @@
 > `nwrt-apply-mode wds|ap` 切换；三界面全互访。详见 `docs/模式切换与巡检.md`。
 > 🟢 **轻量巡检**：单个 `nwrt-tick` 常驻（NTP + WDS 关联只读巡检），出厂 `dryrun=1` 不自动动作。
 
-## 三、界面：仿 UBNT，但绕开 25.12 的白屏坑
+## 三、界面：对齐 5.4 老仓 r28–r29.12，但按 6.12 升级修复
+
+🖼 **交付里附两张真渲染预览图**（Chromium + Playwright 截本仓页面，非手绘）：
+`界面预览-bridge.png`（网桥）与 `界面预览-ap.png`（AP），每张左桌面 1280px、右竖屏 390px，
+用 `?demo=1` 离线演示数据，图上明确标注 DEMO、非实机读数。
+
+对齐老仓的：三页 UBNT 深色 + 六入口互访 + 右上角「⚙ 高级设置后台」、
+前 3 块严格同序（系统仪表盘 GAUGE → 常用设置 SETUP → 网络与本机 NETWORK）、
+GAUGE 三环 + 时间/运行徽章 + 无线芯片温度、SETUP ①…⑧ 八分组、
+内网LAN1… 6 列表（链接速率/来源）、999px 胶囊、未登录只读 + probe 锁保存、
+写入只在 LuCI admin 树、维护动作固定枚举、WDS 搜索周边主端、离线 ?demo=1。
+
+**按 6.12 升级修复的**（详见 `docs/界面与配置对齐-5.4.md`）：
+QSDK 的 `HT160/HT80/HT40` → 主线 `HE160/HE80/HE40/HE20`（写 HT* 会让 radio 起不来）；
+`db_rssi_thr`/`db_timeout`/MU-MIMO 字段保留但明确标注「该基线不支持，不下发」；
+Argon 2.4.3 → **UBNT（仿 UniFi）主题**（官方 bootstrap 作底资源）；闭源 QSDK BDF → 官方 `board-2.bin`；
+模式守卫从「2 秒踢走」改为「非强制提示条 + 三页全互访」（单包双模式下更优）。
+
+### 主题：UBNT（仿 UniFi），不是 bootstrap 原样
+
+🟢 **用户要的 UBNT 主题已经同时覆盖三页状态页和 LuCI 后台**：
+`files/www/luci-static/ubnt/cascade.css` 是真·主题目录，第一行 `@import` 引入官方
+bootstrap 的完整资源，再叠 UBNT 深色覆盖（侧栏蓝条、深色卡片、胶囊按钮/输入项）。
+`common.seed` 仍编 `luci-theme-bootstrap`——它是 `@import` 的**底资源**，不是呈现主题，
+删了反而会 404。`luci-fix` 每次开机校验依赖，缺失即回退，绝不指向空气。
+细节见 `docs/主题与UBNT界面.md`。
+
+### 主题页面为什么不再报错（原说明，保留）
 
 老仓库的「主题页进不去 / dispatcher.lua:427」是两个根因叠加：
 `/etc/config/luci` 缺 named `config core 'main'`，以及 `mediaurlbase` 指向
@@ -56,7 +83,7 @@
 
 本仓做法：
 
-- **LuCI 后台**：只用官方 `luci-theme-bootstrap`（最新稳定、feed 里一定有），
+- **LuCI 后台**：呈现为 UBNT 深色主题，底层用官方 `luci-theme-bootstrap`（最新稳定、feed 里一定有）作 `@import` 资源，
   `files/etc/config/luci` 写死 named `main`；`luci-fix` 每次开机按
   `/www/luci-static/` 实际存在的目录重建主题下拉，永远不会出现幽灵主题。
 - **用户真正看到的界面**：`/ubnt/` 概览、`/bridge/` 网桥状态、`/ap/` AP 控制台，
@@ -71,7 +98,7 @@ Web 若仍报 427：串口 `sh /usr/sbin/health-fix`（或单跑 `/etc/init.d/lu
 
 ## 四、稳定 / 低占用 / 无线（沿用 5.4 老仓 STANDARDS 硬标准）
 
-- 只编：dropbear(SSH) + TTYD(`luci-app-ttyd`) + LuCI 底座/中文/bootstrap + 状态页 +
+- 只编：dropbear(SSH) + TTYD(`luci-app-ttyd`) + LuCI 底座/中文 + UBNT 主题（bootstrap 底资源） + 状态页 +
   无线/有线必要驱动 + `ethtool` / `iwinfo`。**第三方 luci-app-\*、科学/下载/统计插件、
   iperf3/htop/nano、firewall4/firewall 全部显式 n**。`verify.sh` 硬校验 luci-app 只能有 1 个。
 - 关闭防火墙：编译期显式 n，运行期 `no-firewall` stop+disable、清空 `/etc/config/firewall`、

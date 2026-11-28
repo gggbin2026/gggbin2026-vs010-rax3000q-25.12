@@ -1,0 +1,107 @@
+#!/bin/sh
+# WDS/AP（仿UBNT）· 配置唯一应用入口（零参数：只读 /etc/nwrt/user.cfg）
+#   LuCI admin 树的 save 端点负责「字段白名单 + 值校验 + 原子写 user.cfg」，
+#   本脚本不接收任何命令行参数 → 零参数注入面、零 eval。
+#   应用后仅一次 wifi reload；不重建 radio、不 wifi down、不重启、不新增常驻。
+# 🔴 6.12 主线升级修复：频宽只认 HE*，QSDK 的 HT160/HT80/db_rssi_thr 不下发。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+C=/etc/nwrt/user.cfg
+[ -r "$C" ] || { echo "FAILED: 无 $C"; exit 1; }
+cfg(){ v=$(grep -m1 "^$1=" "$C" 2>/dev/null | cut -d= -f2-); printf '%s' "$v"; }
+note(){ echo "[note] $1"; }
+bad=0
+
+MODE=$(cfg mode); case "$MODE" in wds|ap) ;; *) MODE=wds ;; esac
+ROLE=$(cfg role); case "$ROLE" in master|client) ;; *) ROLE=master ;; esac
+CH5=$(cfg ch5g); case "$CH5" in auto|36|40|44|48|52|56|60|64|100|104|108|112|116|120|124|128|132|136|140|144|149|153|157|161|165) ;; *) CH5=36 ;; esac
+HT5=$(cfg htmode); RAW5=$HT5; case "$HT5" in HE160|HE80|HE40) ;; *) HT5=HE160; note "非法 5G 频宽 '$RAW5' 回落 HE160" ;; esac
+CH2=$(cfg ch24g); case "$CH2" in auto|1|2|3|4|5|6|7|8|9|10|11|12|13) ;; *) CH2=1 ;; esac
+HT2=$(cfg ht24); RAW2=$HT2; case "$HT2" in HE40|HE20) ;; *) HT2=HE40; note "非法 2.4G 频宽 '$RAW2' 回落 HE40" ;; esac
+IP_CFG=$(cfg ip); case "$IP_CFG" in ''|*[!0-9.]*) IP_CFG=172.10.10.241 ;; esac
+MASK_CFG=$(cfg mask); case "$MASK_CFG" in ''|*[!0-9.]*) MASK_CFG=255.255.252.0 ;; esac
+STP=$(cfg stp); case "$STP" in 0|1) ;; *) STP=1 ;; esac
+DHCP=$(cfg dhcp_enabled); [ "$MODE" = wds ] && DHCP=0   # WDS 主/客硬禁止本机 DHCP
+START=$(cfg dhcp_start); case "$START" in ''|*[!0-9]*) START=100 ;; esac
+LIMIT=$(cfg dhcp_limit); case "$LIMIT" in ''|*[!0-9]*) LIMIT=150 ;; esac
+LEASE=$(cfg dhcp_lease); case "$LEASE" in 1h|12h|24h) ;; *) LEASE=12h ;; esac
+
+# ① 模式（沿用固定枚举命令，不重复实现）
+# 🔴 这里绝不碰 /etc/nwrt/ipaddr|netmask：
+#    旧版 role=master 每次开机 rm -f 用户手写的覆盖文件、role=client 又写死 .242，
+#    会把用户改的 IP 悄悄改回。用户改过就保存，脚本只读不删不写。
+/usr/sbin/nwrt-apply-mode "$MODE" 2>/dev/null || true
+
+# ② 射频参数：只改既有 wifi-device / wifi-iface
+for sec in $(uci show wireless 2>/dev/null | grep '=wifi-device' | cut -d. -f2 | cut -d= -f1); do
+  B=$(uci -q get "wireless.$sec.band" 2>/dev/null); H=$(uci -q get "wireless.$sec.hwmode" 2>/dev/null)
+  case "$B$H" in *5g*|*11a*|*11axa*) FIVE=1 ;; *) FIVE=0 ;; esac
+  uci -q set "wireless.$sec.country='CN'"
+  if [ "$FIVE" = 1 ]; then
+    uci -q set "wireless.$sec.channel='$CH5'"
+    uci -q set "wireless.$sec.htmode='$HT5'"
+  else
+    uci -q set "wireless.$sec.channel='$CH2'"
+    uci -q set "wireless.$sec.htmode='$HT2'"
+    [ "$MODE" = wds ] && uci -q set "wireless.$sec.disabled='1'" || uci -q set "wireless.$sec.disabled='0'"
+  fi
+done
+for sec in $(uci show wireless 2>/dev/null | grep '=wifi-iface' | cut -d. -f2 | cut -d= -f1); do
+  dev=$(uci -q get "wireless.$sec.device" 2>/dev/null)
+  B=$(uci -q get "wireless.$dev.band" 2>/dev/null); H=$(uci -q get "wireless.$dev.hwmode" 2>/dev/null)
+  case "$B$H" in *5g*|*11a*|*11axa*) FIVE=1 ;; *) FIVE=0 ;; esac
+  K=$(cfg key5); S=$(cfg ssid5); [ "$FIVE" = 0 ] && { K=$(cfg key2); S=$(cfg ssid2); }
+  [ "$MODE" = wds ] && [ "$FIVE" = 1 ] && { K=$(cfg peer_key); S=$(cfg peer_ssid); }
+  uci -q set "wireless.$sec.ssid='$S'"
+  uci -q set "wireless.$sec.key='$K'"
+  uci -q set "wireless.$sec.encryption='psk2'"
+  PB=$(cfg peer_bssid); case "$PB" in *[!0-9A-Fa-f:.-]*) PB='' ;; esac
+  [ -n "$PB" ] && [ "$MODE" = wds ] && uci -q set "wireless.$sec.bssid='$PB'" || uci -q delete "wireless.$sec.bssid" 2>/dev/null || true
+done
+uci commit wireless
+wifi reload >/dev/null 2>&1 || true
+
+# ③ 本机网络：面板「管理 IP / 子网掩码」真正落到 network（旧版读了却没用 = 假生效）
+#   优先级与 bridge-netfix 完全一致：覆盖文件 > user.cfg > 出厂默认；只读覆盖文件。
+IP=$(cat /etc/nwrt/ipaddr 2>/dev/null)
+case "$IP" in ''|*[!0-9.]*) IP="$IP_CFG" ;; esac
+MASK=$(cat /etc/nwrt/netmask 2>/dev/null)
+case "$MASK" in ''|*[!0-9.]*) MASK="$MASK_CFG" ;; esac
+uci -q set network.lan.ipaddr="$IP" 2>/dev/null || true
+uci -q set network.lan.netmask="$MASK" 2>/dev/null || true
+uci -q set network.lan.ipv6='0' 2>/dev/null || true
+uci -q set network.br_lan.stp="$STP" 2>/dev/null || true
+uci -q commit network 2>/dev/null || true
+/etc/init.d/network reload >/dev/null 2>&1 || true
+echo "[ok] 管理 IP=$IP 掩码=$MASK（仅应用，不删不写覆盖文件，重启不回退）"
+NTPV=$(cfg ntp); case "$NTPV" in ''|*[!0-9.]*) NTPV=172.10.10.254 ;; esac
+printf '%s\n' "$NTPV" > /etc/nwrt/ntpserver 2>/dev/null || true
+
+# ④ DHCP 服务端：默认关；WDS 硬禁；AP 可选（不开时零常驻）
+if [ "$DHCP" = 1 ] && [ "$MODE" = ap ] && command -v dnsmasq >/dev/null 2>&1; then
+  uci -q set dhcp.lan.ignore='0'; uci -q set dhcp.lan.start="$START"
+  uci -q set dhcp.lan.limit="$LIMIT"; uci -q set dhcp.lan.leasetime="$LEASE"
+  uci -q commit dhcp; /etc/init.d/dnsmasq enable >/dev/null 2>&1 || true
+  /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+  echo "[ok] AP 本机 DHCP 已开（$START / $LIMIT / $LEASE）"
+else
+  uci -q set dhcp.lan.ignore='1' 2>/dev/null || true
+  uci -q commit dhcp 2>/dev/null || true
+  /etc/init.d/dnsmasq stop >/dev/null 2>&1 || true
+  /etc/init.d/dnsmasq disable >/dev/null 2>&1 || true
+  echo "[ok] 本机 DHCP 服务端关闭（上级透传）"
+fi
+
+# ⑤ 主题：user.cfg 的 theme 真正落到 /etc/config/luci（目录存在才切，绝不指向空气）
+THEME=$(cfg theme); case "$THEME" in ubnt|bootstrap) ;; *) THEME=ubnt ;; esac
+if [ -f "/www/luci-static/$THEME/cascade.css" ]; then
+  uci -q set luci.main.mediaurlbase="/luci-static/$THEME" 2>/dev/null || true
+  uci -q commit luci 2>/dev/null || true
+  echo "[ok] LuCI 主题=$THEME（UBNT 仿 UniFi / bootstrap 底资源）"
+else
+  echo "[note] 主题目录 $THEME 不存在，保持出厂 mediaurlbase 不动"
+fi
+
+# ⑥ 明确标注「该基线不支持」的字段，绝不假装已生效
+note "MU-MIMO / 弱信号剔除(db_rssi_thr,db_timeout)：QSDK 私有 UCI，6.12 主线无对应项，已保存但不下发"
+note "主题：UBNT（仿 UniFi）覆盖层 + 官方 bootstrap 底资源；Argon/Footstrap 不在 feed（防 427 白屏）"
+echo "OK act=apply mode=$MODE role=$ROLE ip=$IP mask=$MASK 5G=$CH5/$HT5 2.4G=$CH2/$HT2 stp=$STP dhcp=$DHCP"

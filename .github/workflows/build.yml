@@ -154,7 +154,7 @@ jobs:
             echo "[files] 叠加机型差异 files.$D"
           fi
           # squashfs 只读，开机自启链接必须构建期自备；nwrt-tick 是唯一常驻
-          for pair in 18:luci-fix 21:bridge-netfix 22:l2-guard 23:no-firewall 24:nwrt-mode 25:nwrt-tick; do
+          for pair in 18:luci-fix 19:nwrt-passwd 21:bridge-netfix 22:l2-guard 23:no-firewall 24:nwrt-mode 25:nwrt-tick; do
             n=${pair%%:*}; s=${pair##*:}
             ln -sf "../init.d/$s" "openwrt/files/etc/rc.d/S${n}${s}"
           done
@@ -256,7 +256,7 @@ jobs:
             切换只写 overlay + 一次 `wifi reload`，不重建 radio、不 `wifi down`、不重启。
 
             - 轻量巡检：单个 `nwrt-tick` 常驻（NTP 校时 + WDS 关联只读巡检），默认 dryrun=1 不自动动作
-            - 只编 dropbear + TTYD + LuCI 底座/中文/bootstrap + 必要驱动；防火墙 / IPv6 / 第三方插件全关
+            - 只编 dropbear + TTYD + LuCI 底座/中文 + UBNT 主题（bootstrap 为底资源） + 必要驱动；防火墙 / IPv6 / 第三方插件全关
             - 刷前读 `FLASHING.md`：aarch64 不死 U-Boot、TTL、别勾「保留配置」
           files: |
             out/*.ubi

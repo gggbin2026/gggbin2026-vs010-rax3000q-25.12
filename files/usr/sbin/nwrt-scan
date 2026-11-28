@@ -1,0 +1,21 @@
+#!/bin/sh
+# WDS/AP（仿UBNT）· 周边主端只读扫描（零 HTTP 参数、零写入）
+# 6.12 主线用 iw dev <iface> scan；QSDK 的 wlanconfig 在本基线不存在，不伪装。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+IF=''
+for i in /sys/class/net/wlan1 /sys/class/net/wlan0 /sys/class/net/phy1-ap0 /sys/class/net/phy0-ap0; do
+  [ -e "$i" ] && { IF=$(basename "$i"); break; }
+done
+if [ -z "$IF" ] || ! command -v iw >/dev/null 2>&1; then
+  echo "ok=0 msg=无无线接口或 iw 不可用（如实留白，不伪造 SSID）"
+  exit 0
+fi
+OUT=$(timeout 8 iw dev "$IF" scan 2>/dev/null | awk '
+  /^BSS /{if(ssid!="")printf "%s\t%s\t%s\t%s\n",bssid,ssid,sig,ch; bssid=$2;ssid="";sig="";ch=""}
+  /SSID:/{sub(/^[ \t]*SSID: /,"");ssid=$0}
+  /signal:/{sig=$2}
+  /DS Parameter set: channel/{ch=$NF}
+  END{if(ssid!="")printf "%s\t%s\t%s\t%s\n",bssid,ssid,sig,ch}')
+[ -n "$OUT" ] || { echo "ok=0 msg=扫描无结果或超时（约 2–5 秒，桥接可能短暂抖动）"; exit 0; }
+echo "ok=1 iface=$IF  (BSSID / SSID / 信号 / 信道；点选后手填密码再保存)"
+printf '%s\n' "$OUT" | sort -t$'\t' -k3 -nr | head -20

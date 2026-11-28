@@ -9,4 +9,5 @@ src-git routing https://github.com/openwrt/routing.git;openwrt-25.12
 
 # 注意：argon / footstrap 是社区主题，官方 25.12 luci feed 里没有。
 # 写 =y 会被 make defconfig 静默丢掉、配置却指向空气 → LuCI 白屏 / 427。
-# 本仓只用 luci-theme-bootstrap，UBNT 观感由独立静态页提供。
+# 本仓编入 luci-theme-bootstrap 作为 UBNT 主题的 @import 底资源；
+# UBNT 观感由 /luci-static/ubnt 覆盖层 + 三页独立静态页共同提供。

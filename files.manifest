@@ -1,4 +1,5 @@
 etc/banner
+etc/config/dhcp
 etc/config/dropbear
 etc/config/l2guard
 etc/config/luci
@@ -9,16 +10,21 @@ etc/init.d/l2-guard
 etc/init.d/luci-fix
 etc/init.d/no-firewall
 etc/init.d/nwrt-mode
+etc/init.d/nwrt-passwd
 etc/init.d/nwrt-tick
 etc/nwrt/default_mode
 etc/nwrt/mode
 etc/nwrt/product
 etc/nwrt/tick.conf
+etc/nwrt/user.cfg
 etc/sysctl.d/99-nwrt-no-ipv6.conf
 usr/lib/lua/luci/controller/admin/nwrt.lua
 usr/lib/lua/luci/view/admin_nwrt/switch.htm
 usr/sbin/health-fix
+usr/sbin/nwrt-apply-config
 usr/sbin/nwrt-apply-mode
+usr/sbin/nwrt-logs
+usr/sbin/nwrt-scan
 usr/sbin/nwrt-tick
 usr/sbin/oem-stack-check
 usr/sbin/wifi-fullspeed
@@ -29,6 +35,7 @@ www/cgi-bin/apstatus
 www/cgi-bin/bridge
 www/cgi-bin/state
 www/index.html
+www/luci-static/ubnt/cascade.css
 www/ubnt/index.html
 www/vs010-ubnt-skin.js
 www/vs010-ubnt.css

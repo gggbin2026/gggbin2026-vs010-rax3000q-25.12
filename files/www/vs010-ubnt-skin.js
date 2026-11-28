@@ -14,8 +14,8 @@
     ['/ubnt/','◧','概览'],
     ['/bridge/','⇄','网桥状态'],
     ['/ap/','≋','AP 状态'],
-    ['/cgi-bin/luci/admin/nwrt','⇄','模式切换'],
-    ['/cgi-bin/luci/','↗','高级后台']
+    ['#setup','⚙','常用设置'],
+    ['/cgi-bin/luci/','⚙','高级设置后台']
   ];
   function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]});}
@@ -35,8 +35,8 @@
       ['/ubnt/','◧ 概览'],
       ['/bridge/','⇄ 网桥状态'],
       ['/ap/','≋ AP 状态'],
-      ['/cgi-bin/luci/admin/nwrt','⇄ 模式切换'],
-      ['/cgi-bin/luci/','↗ OpenWrt / LuCI']
+      ['#setup','⚙ 常用设置'],
+      ['/cgi-bin/luci/','⚙ 高级设置后台']
     ];
     function jumpHTML(){
       var h='';
@@ -73,9 +73,10 @@
     side.innerHTML='<div class="u-brand"><i></i><div>WDS/AP（仿UBNT）<small>NWRT · 6.12 · 单包双模式</small></div></div>'+
       '<div class="u-lbl">状态</div><nav class="u-nav">'+navHTML()+'</nav>'+
       '<div class="u-lbl u-ext">外部</div><nav class="u-nav u-ext">'+
-      '<a href="/cgi-bin/luci/"><b>↗</b>高级设置后台</a>'+
+      '<a href="/cgi-bin/luci/"><b>⚙</b>高级设置后台</a>'+
+      '<a href="/cgi-bin/luci/admin/nwrt"><b>⇄</b>模式切换</a>'+
       '<a href="/bridge/"><b>↗</b>网桥状态</a><a href="/ap/"><b>↗</b>AP 状态</a></nav>'+
-      '<div class="u-foot">WDS/AP（仿UBNT）· 三入口共存 · AP⇄WDS 界面可切 · AP⇄WDS 界面可切 · AP⇄WDS 界面可切 · AP⇄WDS 界面可切<br>单包双模式 · 5G HE160 / 2.4G HE40<br>未登录只读 · 设置需 LuCI 会话</div>';
+      '<div class="u-foot">WDS/AP（仿UBNT）· 三入口共存 · 六按钮互访<br>单包双模式 · 5G HE160 / 2.4G HE40<br>未登录只读 · 设置需 LuCI 会话<br>界面基线对齐 5.4 老仓 r28–r29.12</div>';
     /* 顶栏 KPI */
     var top=el('header','u-top');
     top.innerHTML='<span class="u-dot"></span><h1 id="uDev">'+(IS_AP?'AP 控制台':'网桥状态')+'</h1>'+
@@ -143,6 +144,8 @@
           }).catch(function(){});
         }
       }catch(e){}
+      /* r29.10 同源：会话探测由 app.js 的 /admin/nwrt/probe 完成（只读 GET）；
+         注入器只 hook 状态 CGI，零写入、零额外请求。 */
       return p;
     };
   }

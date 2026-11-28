@@ -41,9 +41,9 @@
   Release tag: fw-<内核>-<run_id>-<机型>-dual（滚动保留最新 5 个）
 
 刷前必读 FLASHING.md：aarch64 不死 U-Boot、TTL、别勾「保留配置」。
-切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
-切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
-切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
+界面预览见交付里的 界面预览-bridge.png / 界面预览-ap.png（DEMO 演示数据，非实机读数）。
+出厂账号 root / admin（SSH 22、LuCI、TTYD :7681、串口 ttyMSM0 115200n8 同一套）。
+主题是 UBNT（仿 UniFi）深色：三页状态页 + LuCI 后台统一，见 docs/主题与UBNT界面.md。
 切模式：http://<设备IP>/cgi-bin/luci/admin/nwrt 或 TTYD/SSH `nwrt-apply-mode wds|ap`（不用重刷）。
 
 ## 下载后核对（先看大小再解压）

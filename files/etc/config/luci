@@ -1,12 +1,15 @@
-# 第 43/44 次：必须是 named section，不能是匿名 config main。
-# 旧 overlay 残留 / sysupgrade 勾「保留配置」会盖掉它 → dispatcher.lua:427。
+# WDS/AP（仿UBNT）· LuCI 主题
+# 🔴 必须 named section：匿名 config main 会让 LuCI 按名字找不到 → dispatcher.lua:427
+# 🔴 mediaurlbase 指向本仓自带的 /luci-static/ubnt（真目录，不是社区主题）。
+#    该目录的 cascade.css 用 @import 引入官方 bootstrap 完整资源，所以
+#    luci-theme-bootstrap 必须编入（它是底资源，不是"呈现主题"）。
 config core 'main'
 	option lang 'zh_cn'
-	option mediaurlbase '/luci-static/bootstrap'
+	option mediaurlbase '/luci-static/ubnt'
 	option resourcebase '/luci-static/resources'
 
-config themes 'bootstrap'
-	option title 'Bootstrap（官方稳定）'
-
-# argon / footstrap 不在官方 25.12 luci feed。写进去 = 指向空气 → 白屏 / 500。
-# luci-fix 每次开机按 /www/luci-static/ 实际目录重建主题下拉。
+# 标准格式：config internal 'themes'，option 名=下拉显示名，值=mediaurlbase 路径。
+# argon / footstrap 不在官方 25.12 luci feed，绝不写进来（幽灵项 → 白屏 / 500）。
+config internal 'themes'
+	option UBNT '/luci-static/ubnt'
+	option Bootstrap '/luci-static/bootstrap'
