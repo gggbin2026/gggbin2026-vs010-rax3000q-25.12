@@ -1,4 +1,14 @@
+# 机型差异只有 hostname；其余字段与公共 files/etc/config/system 完全一致。
+# rootfs 合并时 cp -a 会覆盖公共版，漏字段会让 sysntpd / 日志配置失效。
 config system 'main'
 	option hostname 'RAX3000Q'
 	option timezone 'CST-8'
 	option zonename 'Asia/Shanghai'
+	option log_size '64'
+	option urandom_seed '0'
+
+config timeserver 'ntp'
+	option enabled '1'
+	option enable_server '0'
+	list server '172.10.10.254'
+	list server 'ntp.aliyun.com'

@@ -1,0 +1,65 @@
+#!/bin/sh
+# WDS/AP（仿UBNT）· 接口 MAC 自动读取（零写入、零参数）
+# DTS 已用 nvmem-cells 从 ART 分区装配 MAC：
+#   VS010    hw_mac_addr（nvmem-layout，MAC@0 / +1）
+#   RAX3000Q macaddr_art_0 / macaddr_art_6（nvmem-layout）
+# 本脚本只「读出来给界面显示」：不写死 MAC、不 uci set、不覆盖内核已装配值。
+# 面板没有任何 MAC 输入框；ART 分区读不到时如实标「未检出」，绝不伪造。
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+esc(){ printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g' | tr -d '\n\r'; }
+BASE=''; MTD=''; OFF=''; VALID=0
+# 找 ART / 0:ART / art 分区（/proc/mtd 是内核真实分区表，不猜设备节点）
+if [ -r /proc/mtd ]; then
+  while read -r dev size eraser name; do
+    case "$name" in
+      *ART*|*art*|*Art*) ;;
+      *) continue ;;
+    esac
+    num=$(printf '%s' "$dev" | tr -cd '0-9')
+    [ -n "$num" ] || continue
+    RO=/dev/mtd${num}ro
+    [ -r "$RO" ] || RO=/dev/mtd${num}
+    [ -r "$RO" ] || continue
+    HEX=$(dd if="$RO" bs=1 count=16 2>/dev/null | od -An -tx1 -v 2>/dev/null | tr -d ' \n')
+    [ ${#HEX} -ge 32 ] || continue
+    # 逐 6 字节窗口找第一个合法单播 MAC（非全 0 / 非全 F / 首字节 bit0=0）
+    i=0
+    while [ $i -le 5 ]; do
+      M=$(printf '%s' "$HEX" | cut -c$((i*2+1))-$((i*2+12)))
+      A=$(printf '%s' "$M" | cut -c1-2)
+      case "$M" in
+        000000000000|ffffffffffff|'') i=$((i+1)); continue ;;
+      esac
+      # 首字节最低位必须为 0（单播）
+      case "$A" in
+        *[13579bdfBDF]) i=$((i+1)); continue ;;
+      esac
+      BASE=$(printf '%s' "$M" | sed 's/../:&/g;s/^://' | tr 'a-f' 'A-F')
+      MTD=$(printf '%s' "$name" | tr -d '"'); OFF=$(printf '0x%x' "$i"); VALID=1
+      break
+    done
+    [ "$VALID" = 1 ] && break
+  done < /proc/mtd
+fi
+# 所有网络接口：名称 / MAC / 来源（全部来自内核 sysfs，绝不手填）
+IFACES=''
+sep=''
+for p in /sys/class/net/*; do
+  [ -d "$p" ] || continue
+  nm=$(basename "$p")
+  mac=$(cat "$p/address" 2>/dev/null | tr 'a-f' 'A-F')
+  [ -n "$mac" ] || continue
+  case "$nm" in
+    lo) continue ;;
+  esac
+  if [ "$VALID" = 1 ]; then src='ART / nvmem-cells 自动装配'
+  else src='内核 sysfs（未检出 ART 分区，沿用已装配 MAC）'; fi
+  IFACES="${IFACES}${sep}{\"name\":\"$(esc "$nm")\",\"mac\":\"$(esc "$mac")\",\"source\":\"$(esc "$src")\"}"
+  sep=','
+done
+if [ "$VALID" = 1 ]; then
+  printf '{"valid":1,"base":"%s","mtd":"%s","offset":"%s","source":"ART 分区（DTS nvmem-cells 自动装配，无手动输入）","ifaces":[%s]}\n' \
+    "$(esc "$BASE")" "$(esc "$MTD")" "$(esc "$OFF")" "$IFACES"
+else
+  printf '{"valid":0,"base":"","mtd":"","offset":"","source":"ART 分区未检出或 MAC 无效；接口 MAC 仍由内核 sysfs 自动读取，不手填、不伪造","ifaces":[%s]}\n' "$IFACES"
+fi

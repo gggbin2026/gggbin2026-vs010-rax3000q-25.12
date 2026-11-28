@@ -35,6 +35,34 @@ while :; do
     fi
   fi
 
+  # ②b 弱信号剔除（仅 AP；用户显式 kick_enabled=1 才动作，默认关）
+  #    主线无 QSDK db_rssi_thr UCI，用标准 `iw station del` deauth；
+  #    分频 5 轮一次、单轮最多 3 个，绝不循环踢、不重启、不 wifi down。
+  if [ "$MODE" = ap ] && [ $((round % 5)) -eq 0 ]; then
+    U=/etc/nwrt/user.cfg
+    KE=$(grep -m1 '^kick_enabled=' "$U" 2>/dev/null | cut -d= -f2); case "$KE" in 0|1) ;; *) KE=0 ;; esac
+    KR=$(grep -m1 '^kick_rssi=' "$U" 2>/dev/null | cut -d= -f2); case "$KR" in ''|*[!0-9-]*) KR=-90 ;; esac
+    if [ "$KE" = 1 ] && command -v iw >/dev/null 2>&1; then
+      KIF=''
+      for i in /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
+        [ -e "$i" ] && { KIF=$(basename "$i"); break; }
+      done
+      if [ -n "$KIF" ]; then
+        KICKED=0
+        for mac in $(iw dev "$KIF" station dump 2>/dev/null | awk -v t="$KR" '
+          /^Station /{m=$2}
+          /signal:/{s=$2+0; if(m!="" && s<t){print m; m=""}}'); do
+          [ "$KICKED" -lt 3 ] || break
+          iw dev "$KIF" station del "$mac" >/dev/null 2>&1 && KICKED=$((KICKED+1))
+        done
+        logger -t nwrt-tick "kick rssi<${KR}dBm deauth=$KICKED iface=$KIF"
+        echo "[nwrt-tick] kick round=$round deauth=$KICKED thr=${KR}dBm" >> /tmp/nwrt-tick.status
+      else
+        echo "[nwrt-tick] kick 跳过（无无线接口，如实留白）" >> /tmp/nwrt-tick.status
+      fi
+    fi
+  fi
+
   # ② WDS 关联巡检（纯只读；无工具/无接口如实留白，绝不伪造）
   if [ "$MODE" = wds ] && [ $((round % WDS_E)) -eq 0 ]; then
     IFACE=''

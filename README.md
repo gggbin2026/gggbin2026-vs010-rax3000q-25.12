@@ -131,12 +131,50 @@ Web 若仍报 427：串口 `sh /usr/sbin/health-fix`（或单跑 `/etc/init.d/lu
   `cmcc,rax3000q` + `cmcc,rax3000qy`；
 - 两台都**不定义按键**（恩山变砖实录：复位键 GPIO 冲突会循环重启、TTL 失联、需编程器）；
   不改 `qcom,bdf-addr`、不改 boot-args、不整份替换 DTS、不把 ART 切片编进固件；
-- `DEVICE_PACKAGES` 必补 `ath11k-firmware-ipq5018-qcn6122` + `kmod-ath11k-ahb` +
-  本地 `ipq-wifi` 包，否则射频根本不 probe。官方 DTS 里 wifi 是 `disabled`，
+- `DEVICE_PACKAGES` 只补 `ath11k-firmware-ipq5018-qcn6122` + `kmod-ath11k-ahb`
+  （两者在 `v25.12.6` 实证存在；后者定义在 `package/kernel/mac80211/ath.mk:339`），
+  否则射频根本不 probe。🔴 **不引用 `ipq-wifi-<机型>`**：官方 `v25.12.6` 的
+  `ipq-wifi/Makefile` 的 `ALLWIFIBOARDS` 里没有 `cucc_vs010` / `cmcc_rax3000q`，
+  引用不存在的包会让 make 打包阶段报缺包；本仓 `ART_CALIBRATION=0` 用官方通用
+  `board-2.bin`，本来就不需要机型 BDF。官方 DTS 里 wifi 是 `disabled`，
   本仓改为 `okay` 并配 `ATH11K_MEM_PROFILE_256M`（256M LOW）。
 
 ⚠ **这两块板级未在 6.12 主线实机验证**（按同芯片 PZ-L8 骨架 + 好固件 FIT 真实 DTB 融合）。
 首次刷务必接 TTL，建议 `device` 先选 `vs010` 单跑一次，成功再 `both`。
+
+## 五之补、无线界面与配置（按真实 v25.12.6 源码实证）
+
+**网桥页 /bridge/ 的「搜索 → 一键加入」**：② 分组 `🔍 搜索 SSID` 调
+`/cgi-bin/luci/admin/nwrt/scan`（admin 树 sysauth、`iw dev <iface> scan` 只读）。
+结果表格点「选用」自动带入 `peer_ssid` / `peer_bssid` / `ch5g` / `htmode`；
+频宽由扫描里的 `STA/VHT channel width` 映射 `160→HE160 / 80→HE80 / 40→HE40 / 20→HE20`，
+未广播频宽留空并提示手动选，**不猜**。**密码必须手填**，点选只填表单、绝不自动写配置；
+② 分组同时保留手动填写上级 WDS 的 SSID / BSSID / 密码，信道与频宽在 ④ 里手动选。
+
+**AP 页 /ap/ 的弱信号（显示 + 设置）**：状态卡片显示 `rssi_reject_assoc_rssi` /
+`rssi_reject_assoc_timeout` / `disassoc_low_ack` / 主动剔除开关与生效范围；设置在 ④ 分组。
+按 `openwrt/openwrt @ v25.12.6` 的 `package/network/config/wifi-scripts/files/lib/netifd/hostapd.sh:128,245`
+实证，这三个 `rssi_*` 是 **wifi-device 级真实 UCI**（→ hostapd 配置），
+`disassoc_low_ack` 默认 1（`:574,611`）。老仓 QSDK 私有的 `db_rssi_thr` / `db_timeout`
+**不下发**；本版改用主线等价项，属于「内核升级修复」而非字段照抄。
+主动剔除（踢已关联弱客户端）主线无 UCI，由唯一常驻 `nwrt-tick` 每 5 轮一次、
+按 `kick_rssi` 用标准 `iw station del` deauth，**默认关**、单轮最多 3 个、不循环踢。
+⚠ WDS 是 STA / wpa_supplicant 模式、hostapd 不运行 → 拒绝连接项**如实删除不下发**。
+
+**WDS 回程实况**：`iw dev <iface> link` 实读信号 / TX·RX 速率 / BSSID，
+终端表来自 `iw station dump` 并加 RX 速率与距离列。**距离是 FSPL 估算**
+（假设 EIRP 20dBm / 5GHz），界面明确标「估算，非实测」，读不到一律留白「—」。
+
+**接口 MAC 全自动**：两块 DTS 本来就用 `nvmem-cells` 从 ART 分区装配 MAC
+（VS010 `hw_mac_addr`、RAX3000Q `macaddr_art_0|6`）。新增只读 `nwrt-mac` 扫
+`/proc/mtd` 的 ART 分区并列出所有 `/sys/class/net/*` 的 MAC + 来源。
+**面板没有任何 MAC 输入框**，不写死、不 `uci set` 覆盖内核；ART 未检出如实沿用 sysfs。
+
+**WMM / MU-MIMO（用户写 MOMU）**：`hostapd.sh:614` 无条件写 `wmm_enabled=1`，
+`mac80211.sh:464,492+` 在 HE 模式硬写 `ieee80211ax=1` + `he_mu_edca_*` 参数集。
+两者在主线**没有独立 UCI 开关**，所以本版：WMM 显示「hostapd 强制开启」、
+MU-MIMO 显示「随 HE160 由 ath11k 固件协商」，`mu_mimo=1` 默认；
+用户若选关闭，后端明确提示「主线忽略该选择」，**绝不伪造开关生效**。
 
 ## 六、上传与编译
 
@@ -158,8 +196,18 @@ sh scripts/verify.sh     # 必须输出 RESULT: PASS
 - ART 已采集但不编进固件：`ART_CALIBRATION=0` / `CALDATA_DEFAULT=off`，
   默认用官方通用 `board-2.bin`。实机日志证明好固件报 `Caldata not present` 且加载模板 BDF，
   改这条路径风险大于收益。
-- NAND V2 补丁（FM25LS01 / FM25LS02BI3）默认关，`nand_patch=true` 且 6.12 基线才尝试应用，
-  `git apply --check` 不过只警告不停编；EUCLEAN 风险不变。
+- NAND V2 补丁（FM25LS01 / FM25LS02BI3）默认关；`nand_patch=true` 且 6.12 基线时
+  workflow 已接线调用 `scripts/apply-nand-patch.sh`，`git apply --check` 不过只警告
+  不停编。当前 `patches/` 下没有 `.patch`，勾了也只打 warning 跳过；EUCLEAN 风险不变。
+- 🔴 **上游 4-bit ECC 补丁（`fb90296` / `0401-spi-spi-qpic-snand-default-to-4-bit-ECC`）
+  不需要手动加**：`v25.12.6`、`qosmio 25.12-nss` 的 `patches-6.12/0401`、
+  `main` 的 `patches-6.18/0401` 都已内置；本仓两块 DTS 还显式写了
+  VS010 `nand-ecc-strength=<4>` / RAX3000Q `<8>` + `step=512`，按 412/417 backport
+  直接命中合法 case，根本不走 1-bit 回退路径。详见 `patches/README.md`。
+  把邮件原版 diff 放进 `patches/` 只会 `git apply --check` 失败被 warning 跳过。
+- **feeds 口径**：workflow 不覆盖上游 `feeds.conf.default`。`v25.12.6` 自带四个 feed
+  全部锁具体 commit，比仓库根目录那份「分支对照表」更可复现；`feeds.conf.default`
+  仅作人工对照，不参与编译。
 
 ## 八、目录
 

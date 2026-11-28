@@ -10,6 +10,7 @@ module("luci.controller.admin.nwrt", package.seeall)
 local WHITELIST = {
     "mode","role","peer_ssid","peer_bssid","peer_key","ssid5","key5","ssid2","key2",
     "ch5g","htmode","ch24g","ht24","txpower","wmm","mu_mimo","rssi_thr","rssi_timeout",
+    "kick_enabled","kick_rssi",
     "ip","mask","hostname","stp","ntp","theme","dhcp_enabled","dhcp_start","dhcp_limit","dhcp_lease"
 }
 local LIMITS = {
@@ -24,6 +25,8 @@ local LIMITS = {
     mu_mimo=function(v) return v=="0" or v=="1" end,
     rssi_thr=function(v) local x=tonumber(v); return x~=nil and x>=-100 and x<=-30 end,
     rssi_timeout=function(v) local x=tonumber(v); return x~=nil and x>=1 and x<=60 end,
+    kick_enabled=function(v) return v=="0" or v=="1" end,
+    kick_rssi=function(v) local x=tonumber(v); return x~=nil and x>=-100 and x<=-30 end,
     stp=function(v) return v=="0" or v=="1" end,
     ip=function(v) return v:match("^%d+%.%d+%.%d+%.%d+$")~=nil end,
     mask=function(v) return v:match("^%d+%.%d+%.%d+%.%d+$")~=nil end,
@@ -150,9 +153,11 @@ end
 
 function action_scan()
     local http = require "luci.http"
-    http.prepare_content("text/plain")
+    http.prepare_content("application/json; charset=utf-8")
     local sys = require "luci.sys"
-    http.write(sys.exec("/usr/sbin/nwrt-scan 2>&1"))
+    local out = sys.exec("/usr/sbin/nwrt-scan 2>/dev/null")
+    -- 只回显只读扫描结果；不接收任何 HTTP 参数、不写配置（密码必须用户手填后 /save）
+    http.write(out ~= "" and out or '{"ok":0,"msg":"扫描无输出","aps":[]}')
 end
 
 function action_act()

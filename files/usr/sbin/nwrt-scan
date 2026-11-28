@@ -1,21 +1,41 @@
 #!/bin/sh
-# WDS/AP（仿UBNT）· 周边主端只读扫描（零 HTTP 参数、零写入）
+# WDS/AP（仿UBNT）· 周边主端只读扫描 → 结构化 JSON（零 HTTP 参数、零写入）
 # 6.12 主线用 iw dev <iface> scan；QSDK 的 wlanconfig 在本基线不存在，不伪装。
+# 前端点选一行即自动带入 SSID / BSSID / 信道 / 频宽；密码必须手填，绝不自动写配置。
 PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+esc(){ printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g' | tr -d '\n\r'; }
 IF=''
 for i in /sys/class/net/wlan1 /sys/class/net/wlan0 /sys/class/net/phy1-ap0 /sys/class/net/phy0-ap0; do
   [ -e "$i" ] && { IF=$(basename "$i"); break; }
 done
 if [ -z "$IF" ] || ! command -v iw >/dev/null 2>&1; then
-  echo "ok=0 msg=无无线接口或 iw 不可用（如实留白，不伪造 SSID）"
+  printf '{"ok":0,"iface":"%s","msg":"无无线接口或 iw 不可用（如实留白，不伪造 SSID）","aps":[]}\n' "$(esc "$IF")"
   exit 0
 fi
-OUT=$(timeout 8 iw dev "$IF" scan 2>/dev/null | awk '
-  /^BSS /{if(ssid!="")printf "%s\t%s\t%s\t%s\n",bssid,ssid,sig,ch; bssid=$2;ssid="";sig="";ch=""}
-  /SSID:/{sub(/^[ \t]*SSID: /,"");ssid=$0}
-  /signal:/{sig=$2}
-  /DS Parameter set: channel/{ch=$NF}
-  END{if(ssid!="")printf "%s\t%s\t%s\t%s\n",bssid,ssid,sig,ch}')
-[ -n "$OUT" ] || { echo "ok=0 msg=扫描无结果或超时（约 2–5 秒，桥接可能短暂抖动）"; exit 0; }
-echo "ok=1 iface=$IF  (BSSID / SSID / 信号 / 信道；点选后手填密码再保存)"
-printf '%s\n' "$OUT" | sort -t$'\t' -k3 -nr | head -20
+# awk 解析 iw scan 的真实字段：DS Parameter set: channel / * STA channel width /
+# VHT operation: channel width / HE operation（读不到就留空，前端不猜）
+RAW=$(timeout 8 iw dev "$IF" scan 2>/dev/null)
+[ -n "$RAW" ] || {
+  printf '{"ok":0,"iface":"%s","msg":"扫描无结果或超时（约 2–5 秒，桥接可能短暂抖动）","aps":[]}\n' "$(esc "$IF")"
+  exit 0
+}
+APS=$(printf '%s\n' "$RAW" | awk '
+  function emit(   ht,w) {
+    if (bssid=="" || ssid=="") return
+    w=width+0
+    if (w>=160) ht="HE160"; else if (w>=80) ht="HE80"; else if (w>=40) ht="HE40"; else if (w>=20) ht="HE20"; else ht=""
+    if (n++) printf ","
+    printf "{\"bssid\":\"%s\",\"ssid\":\"%s\",\"signal\":\"%s\",\"channel\":\"%s\",\"width\":\"%s\",\"htmode\":\"%s\",\"inferred\":\"%s\"}",
+      bssid, ssid, sig, ch, (width==""?"":width), ht, (width==""?"0":"1")
+  }
+  /^BSS /{emit(); bssid=$2; sub(/\(.*/,"",bssid); ssid=""; sig=""; ch=""; width=""; next}
+  /^[[:space:]]*SSID:/{sub(/^[[:space:]]*SSID: /,""); ssid=$0; gsub(/"/,"\\\"",ssid); next}
+  /^[[:space:]]*signal:/{sig=$2; next}
+  /DS Parameter set: channel/{ch=$NF; next}
+  /\* STA channel width:/{v=$(NF-1)+0; if(v>width+0) width=v; next}
+  /\* channel width:/{v=$(NF-1)+0; if(v>width+0) width=v; next}
+  /HE operation:/{next}
+  END{emit()}
+' )
+# awk 内已对 SSID 的引号转义；不再二次 sed，避免 " 被重复转义成 \\"
+printf '{"ok":1,"iface":"%s","aps":[%s]}\n' "$(esc "$IF")" "$APS"

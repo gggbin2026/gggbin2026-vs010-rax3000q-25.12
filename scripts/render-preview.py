@@ -43,8 +43,8 @@ def main():
         desk = shot(page, 1280, 900, port, tmp / f"{page}-desk.png")
         mob = shot(page, 390, 844, port, tmp / f"{page}-mob.png")
         # 限制高度，避免长图过大
-        desk = desk.crop((0, 0, desk.width, min(desk.height, 3400)))
-        mob = mob.crop((0, 0, mob.width, min(mob.height, 3400)))
+        desk = desk.crop((0, 0, desk.width, min(desk.height, 4800)))
+        mob = mob.crop((0, 0, mob.width, min(mob.height, 4800)))
         HDR = 54
         W, H = desk.width + mob.width + 60, max(desk.height, mob.height) + HDR + 34
         canvas = Image.new("RGB", (W, H), "#0b1422")

@@ -83,18 +83,48 @@ for p in /sys/class/net/eth* /sys/class/net/lan* /sys/class/net/wan*; do
   rx=$(cat "$p/statistics/rx_bytes" 2>/dev/null || echo 0); tx=$(cat "$p/statistics/tx_bytes" 2>/dev/null || echo 0)
   LANROWS="${LANROWS:+$LANROWS,}{\"name\":\"$label\",\"speed\":\"$sp\",\"source\":\"PHY 实测\",\"carrier\":$ca,\"rx\":\"$rx B\",\"tx\":\"$tx B\"}"
 done
-# 关联客户端（只读；无 iw / 无接口保持空数组，绝不伪造）
-STATIONS=''
+# FSPL 距离估算：iw 不提供距离，按 RSSI + 假设 EIRP 20dBm / 5GHz 估算。
+#   界面必须标注「估算，非实测」；无信号时留白「—」，绝不伪造。
+dist(){ r=$(printf '%s' "$1" | tr -cd '0-9-'); [ -n "$r" ] || { printf '%s' '—'; return; }
+  awk -v s="$r" 'BEGIN{ if(s>=0){print "—";exit}
+    d=10^((20-s+27.55-20*log(5180)/log(10))/20); if(d>9999)d=9999
+    printf "≈%.0f m", d }' 2>/dev/null || printf '%s' '—'; }
+
+# 关联接口（WDS 回程 + AP 客户端共用；只读 sysfs）
 IF=''
 for i in /sys/class/net/wlan* /sys/class/net/phy*-ap*; do
   [ -e "$i" ] && { IF=$(basename "$i"); break; }
 done
+
+# WDS 回程链路：iw dev <iface> link（STA 模式真实字段）
+WDS='{"ok":0}'
+if [ -n "$IF" ] && command -v iw >/dev/null 2>&1; then
+  L=$(timeout 5 iw dev "$IF" link 2>/dev/null)
+  case "$L" in
+    *'Connected to'*)
+      BSS=$(printf '%s\n' "$L" | sed -n 's/^Connected to \([0-9A-Fa-f:]*\).*/\1/p' | head -1)
+      SSIDW=$(printf '%s\n' "$L" | sed -n 's/^[[:space:]]*SSID: //p' | head -1)
+      SIGW=$(printf '%s\n' "$L" | sed -n 's/^[[:space:]]*signal: //p' | head -1)
+      TXW=$(printf '%s\n' "$L" | sed -n 's/^[[:space:]]*tx bitrate: //p' | head -1)
+      RXW=$(printf '%s\n' "$L" | sed -n 's/^[[:space:]]*rx bitrate: //p' | head -1)
+      FREQ=$(printf '%s\n' "$L" | sed -n 's/^[[:space:]]*freq: //p' | head -1)
+      DW=$(dist "$SIGW")
+      SSIDWJ=$(printf '%s' "$SSIDW" | sed 's/\\/\\\\/g;s/"/\\"/g')
+      WDS=$(printf '{"ok":1,"ssid":"%s","bssid":"%s","signal":"%s","distance":"%s","tx":"%s","rx":"%s","freq":"%s","iface":"%s","note":"距离为 FSPL 估算（EIRP 20dBm / 5GHz），非实测"}' "$SSIDWJ" "$BSS" "$SIGW" "$DW" "$TXW" "$RXW" "$FREQ" "$IF")
+      ;;
+  esac
+fi
+
+# 关联客户端（只读；无 iw / 无接口保持空数组，绝不伪造）
+STATIONS=''
 if [ -n "$IF" ] && command -v iw >/dev/null 2>&1; then
   STATIONS=$(iw dev "$IF" station dump 2>/dev/null | awk '
-    /^Station /{if(mac!="")printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate;sep=",";mac=$2;sig="";rate=""}
-    /signal:/{sig=$2" dBm"}
+    BEGIN{d="—"}
+    /^Station /{if(mac!=""){printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"rx_rate\":\"%s\",\"distance\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate,rxr,d;sep=","} mac=$2;sig="";rate="";rxr="";d="—"}
+    /signal:/{sig=$2" dBm"; s=$2+0; if(s<0){ m=20-s+27.55-20*log(5180)/log(10); q=exp(m/20*log(10)); if(q>9999)q=9999; d=sprintf("≈%.0f m",q) }}
     /tx bitrate:/{rate=$3" "$4}
-    END{if(mac!="")printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate}' iface="$IF")
+    /rx bitrate:/{rxr=$3" "$4}
+    END{if(mac!="")printf "%s{\"mac\":\"%s\",\"iface\":\"%s\",\"signal\":\"%s\",\"rate\":\"%s\",\"rx_rate\":\"%s\",\"distance\":\"%s\",\"band\":\"5G\"}",sep,mac,iface,sig,rate,rxr,d}' iface="$IF")
 fi
 # setup 当前值（读 user.cfg，页面回填；不伪造）
 SETUP=''
@@ -109,6 +139,19 @@ NETIP=$(uci -q get network.lan.ipaddr 2>/dev/null || echo 172.10.10.241)
 NETMASK=$(uci -q get network.lan.netmask 2>/dev/null || echo 255.255.252.0)
 NETSTP=$(uci -q get network.br_lan.stp 2>/dev/null || echo 1)
 DHCPSRV=$(uci -q get dhcp.lan.ignore 2>/dev/null); [ "$DHCPSRV" = 0 ] && DHCPSRV='开启（本机发地址）' || DHCPSRV='关闭（上级透传）'
+
+# 弱信号 / WMM / MU 的「实际生效」值（读 UCI + 主线硬写事实，不读 user.cfg 自欺）
+REJ=$(uci -q get wireless.radio0.rssi_reject_assoc_rssi 2>/dev/null || echo '—')
+REJT=$(uci -q get wireless.radio0.rssi_reject_assoc_timeout 2>/dev/null || echo '—')
+LOW=$(uci -q get wireless.default_radio0.disassoc_low_ack 2>/dev/null || echo '1')
+UK=/etc/nwrt/user.cfg
+KE=$(grep -m1 '^kick_enabled=' "$UK" 2>/dev/null | cut -d= -f2); case "$KE" in 0|1) ;; *) KE=0 ;; esac
+KR=$(grep -m1 '^kick_rssi=' "$UK" 2>/dev/null | cut -d= -f2); case "$KR" in ''|*[!0-9-]*) KR=-90 ;; esac
+if [ "$MODE" = ap ]; then RSSI_ACT='AP 模式生效（hostapd）'; else RSSI_ACT='WDS 是 STA 模式，hostapd 不运行，拒绝连接项不下发'; fi
+[ "$KE" = 1 ] && KICK_ACT="启用 · <${KR}dBm 由 nwrt-tick deauth" || KICK_ACT='关闭（默认，需手动启用）'
+
+# 接口 MAC：ART / nvmem-cells 自动装配，零手填（脚本只读）
+MACJSON=$(/usr/sbin/nwrt-mac 2>/dev/null || printf '{"valid":0,"base":"","mtd":"","offset":"","source":"nwrt-mac 不可用","ifaces":[]}')
 # 面板 ⑤ 回填必须显示「实际生效」的 IP/掩码（串口写 ipaddr 覆盖后 user.cfg 仍是旧值）
 SETUP=$(printf '%s' "$SETUP" | sed "s/\"ip\":\"[^\"]*\"/\"ip\":\"$NETIP\"/;s/\"mask\":\"[^\"]*\"/\"mask\":\"$NETMASK\"/")
 
@@ -131,6 +174,11 @@ j dhcp_server "$DHCPSRV"; printf '},'
 printf '"lan":[%s],' "$LANROWS"
 printf '"stations":[%s],' "$STATIONS"
 printf '"setup":{%s},' "$SETUP"
+printf '"wds":%s,' "$WDS"
+printf '"rssi":{"reject":"%s","timeout":"%s","low_ack":"%s","kick":"%s","kick_thr":"%s","active":"%s","wmm":"wmm_enabled=1（hostapd 强制）","mu":"HE160 / ieee80211ax 由 ath11k 固件协商（无独立 UCI 开关）"},' \
+  "$(printf '%s' "$REJ" | sed 's/"/\\"/g')" "$(printf '%s' "$REJT" | sed 's/"/\\"/g')" "$LOW" \
+  "$(printf '%s' "$KICK_ACT" | sed 's/"/\\"/g')" "$KR" "$(printf '%s' "$RSSI_ACT" | sed 's/"/\\"/g')"
+printf '"mac":%s,' "$MACJSON"
 printf '"bdf":{'; j file "$BDF_FILE"; printf ','; j source "$BDF_SRC"; printf ','; j caldata 'off'; printf '},'
 j guard "$GUARD"; printf ','; j l2guard_status "$GUARD"; printf ','; j dhcp_server "$DHCPSRV"; printf ','
 j ttyd "$TTYD"; printf ','; j ssh 'dropbear · ttyMSM0 115200n8'; printf ','

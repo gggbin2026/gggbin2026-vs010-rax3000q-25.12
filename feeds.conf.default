@@ -1,11 +1,17 @@
-# 官方 25.12 / main 基线用这三个 feed（与 xiangye277 的 update 列表一致）
+# ⚠ 本文件是「分支对照表」，workflow 不会把它复制进 openwrt/。
+#    实际生效的是 clone 下来的上游自带 feeds.conf.default：
+#    openwrt/openwrt @ v25.12.6 里四个 feed 全部锁了具体 commit
+#    （packages/luci/routing/telephony ^<sha>），比按分支名滚动更可复现。
+#    官方 25.12 / main 基线因此不用改；NSS 基线同理用上游自带 feeds。
+#    下面三行仅记录对应分支名，便于人工对照（与 xiangye277 的 update 列表一致）
 src-git packages https://github.com/openwrt/packages.git;openwrt-25.12
 src-git luci https://github.com/openwrt/luci.git;openwrt-25.12
 src-git routing https://github.com/openwrt/routing.git;openwrt-25.12
 
-# NSS 基线（qosmio / kuncy7）由 scripts/prepare.sh 在 clone 后按上游自带
-# feeds.conf.default 处理；若上游用了额外 feed，请在这里按上游分支名追加，
-# 不要往官方基线里塞 nss feed（官方树没有对应包，defconfig 会静默丢掉）。
+# NSS 基线（qosmio / kuncy7）同样用上游自带 feeds.conf.default；若上游用了额外
+# feed，由上游 `./scripts/feeds update -a` 自行拉取，不要把 nss feed 塞进官方基线
+# （官方树没有对应包，defconfig 会静默丢掉）。scripts/prepare.sh 只是本地预检工具，
+# 不属于编译链，workflow 不调用它。
 
 # 注意：argon / footstrap 是社区主题，官方 25.12 luci feed 里没有。
 # 写 =y 会被 make defconfig 静默丢掉、配置却指向空气 → LuCI 白屏 / 427。

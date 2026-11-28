@@ -14,10 +14,13 @@ define Device/unicom_vs010
   NAND_SIZE := 128m
   IMAGES += factory.ubi
   IMAGE/factory.ubi := append-ubi
+  # 🔴 不引用机型专属 BDF 包：官方 v25.12.6 的 ipq-wifi/Makefile 的 ALLWIFIBOARDS
+  #    里没有 cucc_vs010 / cmcc_rax3000q，引用不存在的包会让 make 打包阶段报缺包。
+  #    本仓 ART_CALIBRATION=0，用 ath11k-firmware 自带的官方通用 board-2.bin。
+  #    kmod-ath11k-ahb 实证存在（package/kernel/mac80211/ath.mk:339）。
   DEVICE_PACKAGES := \
 	ath11k-firmware-ipq5018-qcn6122 \
-	kmod-ath11k-ahb \
-	ipq-wifi-cucc_vs010
+	kmod-ath11k-ahb
 endef
 TARGET_DEVICES += unicom_vs010
 
@@ -34,9 +37,9 @@ define Device/cmcc_rax3000q
   NAND_SIZE := 128m
   IMAGES += factory.ubi
   IMAGE/factory.ubi := append-ubi
+  # 同上：不引用 RAX3000Q 机型专属 BDF 包（上游 v25.12.6 无此包）。
   DEVICE_PACKAGES := \
 	ath11k-firmware-ipq5018-qcn6122 \
-	kmod-ath11k-ahb \
-	ipq-wifi-cmcc_rax3000q
+	kmod-ath11k-ahb
 endef
 TARGET_DEVICES += cmcc_rax3000q

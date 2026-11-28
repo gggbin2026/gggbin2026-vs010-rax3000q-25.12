@@ -115,6 +115,12 @@ jobs:
           cd openwrt && git rev-parse HEAD | tee "$GITHUB_WORKSPACE/source-commit.txt"
           echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      - name: NAND V2 补丁（默认关，勾了才尝试）
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          set -eu
+          sh scripts/apply-nand-patch.sh "$GITHUB_WORKSPACE" "$KERNEL_HINT" '${{ github.event.inputs.nand_patch }}'
+
       - name: 注入两台板级（DTS / Device / 02_network / BDF 包）
         if: steps.gate.outputs.go == 'true'
         run: |

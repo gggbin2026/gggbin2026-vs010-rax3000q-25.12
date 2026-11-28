@@ -109,3 +109,45 @@ nwrt-apply-mode ap    # 切到 AP（wds 则回网桥），不用重刷
 
 内核版本由编译期 `make -s kernel_version` 实抓（退回 `LINUX_VERSION`，再退回 `baseline.env` 提示值），
 固件名、Release tag、`/etc/nwrt/build` 三处一致，不写死旧 SDK 编号。
+
+## 无线界面新增（本轮）
+
+| 需求 | 落地 | 真值来源 |
+|---|---|---|
+| 网桥页搜索并自动加入 SSID | ② 分组 `🔍 搜索 SSID` → 结果表「选用」一键带入 SSID / BSSID / 信道 / 频宽；密码手填；手动填写区保留 | `iw scan` 的 `DS Parameter set` / `STA·VHT channel width` |
+| 自动匹配频宽 | 160→HE160 / 80→HE80 / 40→HE40 / 20→HE20；未广播留空提示手选 | 同上，不猜 |
+| AP 页弱信号拒绝连接 | `rssi_reject_assoc_rssi` / `rssi_reject_assoc_timeout` / `rssi_ignore_probe_request` 真实下发到 wifi-device | `wifi-scripts/.../hostapd.sh:128,245`（v25.12.6 实证） |
+| AP 页弱信号剔除 | `disassoc_low_ack=1`（hostapd 默认）+ `kick_enabled` 开关（默认关）按 `kick_rssi` 用 `iw station del` deauth | `hostapd.sh:574,611` + 标准 iw |
+| WDS 桥接后信号 / 距离 / 速率 | 回程 LINK 卡片 + 终端表距离列；TX/RX 实读，距离 FSPL **估算并标注非实测** | `iw link` / `iw station dump` |
+| 接口 MAC 不手填 | NETWORK 新增 MAC 表格；ART 分区 base + 所有接口 MAC 自动读取 | DTS `nvmem-cells` + `/proc/mtd` + sysfs |
+| WMM / MU-MIMO | WMM `wmm_enabled=1` 恒定开；MU-MIMO 随 HE / `ieee80211ax` 由固件协商；**无独立 UCI 开关，不伪造** | `hostapd.sh:614` / `mac80211.sh:464,492+` |
+
+⚠ WDS 是 STA 模式，hostapd 不运行 → 弱信号拒绝连接项在 WDS 下**删除不下发**，
+状态页会如实写明；AP 模式才生效。QSDK 私有 `db_rssi_thr` / `db_timeout` / `HT*` 仍禁用。
+
+## NAND ECC 补丁口径（第 21 轮实证）
+
+用户给出 [上游 fb90296 邮件](https://lists.infradead.org/pipermail/lede-commits/2025-May/025412.html)
+（*qualcommax: ipq50xx: spi-qpic-snand: default to 4-bit ECC*），问 VS010 / RAX3000Q
+是否要加入。**结论：不需要，上游三条基线已内置，本仓 DTS 另有一重保险。**
+
+| 基线 | 0401 位置 | 状态 |
+|---|---|---|
+| `official-25.12` / `v25.12.6`（默认） | `target/linux/qualcommax/patches-6.12/0401-spi-spi-qpic-snand-default-to-4-bit-ECC.patch` | ✅ 1589 字节 |
+| `qosmio-25.12-nss` | 同名 | ✅ 内容一致 |
+| `official-main`（KERNEL_PATCHVER=6.18） | `target/linux/qualcommax/patches-6.18/0401-...` | ✅ 随内核目录迁移 |
+| `kuncy7-6.18-nss` | REPO 留空，workflow 拒绝 | ⚠ 无法实证 |
+
+补丁本身：芯片 ID 表声明 1/2-bit 最小 ECC → QPIC-SNAND 只支持 4/8-bit → 旧驱动
+probe 失败；0401 把 1/2-bit 回退成 `ECC_MODE_4BIT`。`v25.12.6` 内置版 hunk 为
+`@@ -304,6 +304,24 @@`（邮件原版是 `-296,6`，因为前面叠了 backport）。
+
+**本仓双保险**：`v25.12.6` 的 generic backport `412`（DT `user_conf` 优先于芯片
+`reqs`）+ `417`（新增 8-bit 支持）都在；本仓 DTS 显式写
+VS010 `step=512 / strength=4`、RAX3000Q `step=512 / strength=8`，
+直接命中 `case 4` / `case 8`，不会走进 1-bit 回退分支。
+
+把邮件原版 diff 放进本仓 `patches/` 会 `git apply --check` 失败（OpenWrt 树里没有
+`drivers/spi/spi-qpic-snand.c`，内核源码构建期才展开），脚本只打 warning 跳过，
+**不会生效也不会破坏编译**。`nand_patch` 保持默认 `false` 即可。
+EUCLEAN / FM25LS01 V2 批次是 UBI 层坏块问题，与这个驱动修复不是一回事。

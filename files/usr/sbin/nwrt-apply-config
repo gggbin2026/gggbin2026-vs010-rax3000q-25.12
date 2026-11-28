@@ -21,6 +21,13 @@ IP_CFG=$(cfg ip); case "$IP_CFG" in ''|*[!0-9.]*) IP_CFG=172.10.10.241 ;; esac
 MASK_CFG=$(cfg mask); case "$MASK_CFG" in ''|*[!0-9.]*) MASK_CFG=255.255.252.0 ;; esac
 STP=$(cfg stp); case "$STP" in 0|1) ;; *) STP=1 ;; esac
 DHCP=$(cfg dhcp_enabled); [ "$MODE" = wds ] && DHCP=0   # WDS 主/客硬禁止本机 DHCP
+# 6.12 主线真实 UCI（v25.12.6 wifi-scripts 实证），对齐用户「弱信号 / WMM / MU-MIMO」要求
+WMM=$(cfg wmm); case "$WMM" in 0|1) ;; *) WMM=1 ;; esac
+MU=$(cfg mu_mimo); case "$MU" in 0|1) ;; *) MU=1 ;; esac
+REJ=$(cfg rssi_thr); case "$REJ" in ''|*[!0-9-]*) REJ=-85 ;; esac
+REJT=$(cfg rssi_timeout); case "$REJT" in ''|*[!0-9]*) REJT=10 ;; esac
+KICK=$(cfg kick_enabled); case "$KICK" in 0|1) ;; *) KICK=0 ;; esac
+KICKR=$(cfg kick_rssi); case "$KICKR" in ''|*[!0-9-]*) KICKR=-90 ;; esac
 START=$(cfg dhcp_start); case "$START" in ''|*[!0-9]*) START=100 ;; esac
 LIMIT=$(cfg dhcp_limit); case "$LIMIT" in ''|*[!0-9]*) LIMIT=150 ;; esac
 LEASE=$(cfg dhcp_lease); case "$LEASE" in 1h|12h|24h) ;; *) LEASE=12h ;; esac
@@ -36,6 +43,17 @@ for sec in $(uci show wireless 2>/dev/null | grep '=wifi-device' | cut -d. -f2 |
   B=$(uci -q get "wireless.$sec.band" 2>/dev/null); H=$(uci -q get "wireless.$sec.hwmode" 2>/dev/null)
   case "$B$H" in *5g*|*11a*|*11axa*) FIVE=1 ;; *) FIVE=0 ;; esac
   uci -q set "wireless.$sec.country='CN'"
+  # 弱信号拒绝连接：wifi-device 级真实 UCI（hostapd.sh:245 → rssi_reject_assoc_*）。
+  # 仅 AP 模式生效（WDS 是 STA / wpa_supplicant，hostapd 不跑）→ WDS 时删除，绝不假装生效。
+  if [ "$MODE" = ap ]; then
+    uci -q set "wireless.$sec.rssi_reject_assoc_rssi='$REJ'"
+    uci -q set "wireless.$sec.rssi_reject_assoc_timeout='$REJT'"
+    uci -q set "wireless.$sec.rssi_ignore_probe_request='$REJ'"
+  else
+    uci -q delete "wireless.$sec.rssi_reject_assoc_rssi" 2>/dev/null || true
+    uci -q delete "wireless.$sec.rssi_reject_assoc_timeout" 2>/dev/null || true
+    uci -q delete "wireless.$sec.rssi_ignore_probe_request" 2>/dev/null || true
+  fi
   if [ "$FIVE" = 1 ]; then
     uci -q set "wireless.$sec.channel='$CH5'"
     uci -q set "wireless.$sec.htmode='$HT5'"
@@ -54,6 +72,8 @@ for sec in $(uci show wireless 2>/dev/null | grep '=wifi-iface' | cut -d. -f2 | 
   uci -q set "wireless.$sec.ssid='$S'"
   uci -q set "wireless.$sec.key='$K'"
   uci -q set "wireless.$sec.encryption='psk2'"
+  # disassoc_low_ack=1 是 hostapd.sh 默认真实 UCI（wifi-iface 级），弱客户端无 ACK 即解除关联。
+  uci -q set "wireless.$sec.disassoc_low_ack='1'"
   PB=$(cfg peer_bssid); case "$PB" in *[!0-9A-Fa-f:.-]*) PB='' ;; esac
   [ -n "$PB" ] && [ "$MODE" = wds ] && uci -q set "wireless.$sec.bssid='$PB'" || uci -q delete "wireless.$sec.bssid" 2>/dev/null || true
 done
@@ -101,7 +121,17 @@ else
   echo "[note] 主题目录 $THEME 不存在，保持出厂 mediaurlbase 不动"
 fi
 
-# ⑥ 明确标注「该基线不支持」的字段，绝不假装已生效
-note "MU-MIMO / 弱信号剔除(db_rssi_thr,db_timeout)：QSDK 私有 UCI，6.12 主线无对应项，已保存但不下发"
+# ⑥ 主线真实口径：能下发的说下发，不能独立开关的如实说明，绝不伪造
+if [ "$MODE" = ap ]; then
+  echo "[ok] 弱信号拒绝连接：rssi_reject_assoc_rssi=$REJ timeout=$REJT（hostapd 生效）"
+  echo "[ok] 弱信号剔除：disassoc_low_ack=1（hostapd 默认）+ 主动 deauth=$( [ "$KICK" = 1 ] && echo "开 <${KICKR}dBm" || echo 关 )"
+else
+  echo "[note] WDS 是 STA 模式，hostapd 不运行：rssi_reject_assoc_* 不下发（如实）"
+fi
+# WMM：hostapd.sh:614 无条件 wmm_enabled=1，主线没有独立 UCI 开关
+if [ "$WMM" = 0 ]; then note "WMM 用户选了关闭，但 6.12 hostapd 恒定 wmm_enabled=1（802.11ax 必需），关闭被忽略"; fi
+echo "[ok] WMM=wmm_enabled=1（hostapd 强制开启） MU-MIMO=随 HE160/ieee80211ax 由 ath11k 固件协商（无独立 UCI 开关）"
+if [ "$MU" = 0 ]; then note "MU-MIMO 用户选了关闭，但主线无对应 UCI，保持 HE 模式不改动（不伪造关闭）"; fi
+note "QSDK 私有 db_rssi_thr / db_timeout / HT160 该基线不支持，不下发；本版改用主线真实 UCI"
 note "主题：UBNT（仿 UniFi）覆盖层 + 官方 bootstrap 底资源；Argon/Footstrap 不在 feed（防 427 白屏）"
-echo "OK act=apply mode=$MODE role=$ROLE ip=$IP mask=$MASK 5G=$CH5/$HT5 2.4G=$CH2/$HT2 stp=$STP dhcp=$DHCP"
+echo "OK act=apply mode=$MODE role=$ROLE ip=$IP mask=$MASK 5G=$CH5/$HT5 2.4G=$CH2/$HT2 stp=$STP dhcp=$DHCP rssi=$REJ kick=$KICK wmm=1 mu=HE"

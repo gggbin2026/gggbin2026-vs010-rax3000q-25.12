@@ -30,9 +30,14 @@
     device        : both / rax3000q / vs010（首次建议 vs010 单跑）
     default_mode  : wds（默认）/ ap —— 只决定刷完首启模式，之后界面里随时切，不用重刷
     source_url / source_ref : 可空；要精确锁某个上游 commit 就填这里
-    nand_patch : 默认 false
+    nand_patch : 默认 false（上游 0401 4-bit ECC 补丁已内置，本仓无需再加；当前 patches/ 无 .patch，勾 true 只打 warning 跳过）
 
   push 不触发编译，只有手动 Run workflow 才编。
+
+  本轮界面新增（刷完可见）：/bridge/ ②「🔍 搜索 SSID → 选用」自动带入 SSID/BSSID/
+  信道/频宽（密码手填）；/ap/ 弱信号拒绝连接与剔除的显示 + ④ 分组设置；
+  WDS 回程 LINK 显示信号/估算距离/TX·RX 速率；两页 NETWORK 显示 ART 自动读取的
+  接口 MAC（零手填）；WMM 与 MU-MIMO 按主线真实口径显示已开启。
 
 产物
 ----

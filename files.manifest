@@ -24,6 +24,7 @@ usr/sbin/health-fix
 usr/sbin/nwrt-apply-config
 usr/sbin/nwrt-apply-mode
 usr/sbin/nwrt-logs
+usr/sbin/nwrt-mac
 usr/sbin/nwrt-scan
 usr/sbin/nwrt-tick
 usr/sbin/oem-stack-check

@@ -32,7 +32,22 @@
       {band:'5G',ssid:'NWRT-WDS',channel:'36',htmode:'HE160',status:'WDS 4addr · DFS CAC 约 60s'},
       {band:'2.4G',ssid:'—',channel:'1',htmode:'HE40',status:'WDS 模式已关闭'}
     ],
-    stations:[{mac:'00:03:7F:12:EF:EF',iface:'wlan1',signal:'-54 dBm',rate:'866 Mbps',band:'5G'}],
+    stations:[{mac:'00:03:7F:12:EF:EF',iface:'wlan1',signal:'-54 dBm',rate:'866 Mbps',rx_rate:'780 Mbps',distance:'≈46 m',band:'5G'}],
+    wds:{ok:1,ssid:'NWRT-WDS',bssid:'00:03:7F:12:EF:EE',signal:'-54 dBm',distance:'≈46 m',
+         tx:'866 Mbps',rx:'780 Mbps',freq:'5180',iface:'wlan1',
+         note:'距离为 FSPL 估算（EIRP 20dBm / 5GHz），非实测'},
+    rssi:{reject:'-85',timeout:'10',low_ack:'1',kick:'关闭（默认，需手动启用）',kick_thr:'-90',
+          active:'AP 模式生效（hostapd）',wmm:'wmm_enabled=1（hostapd 强制）',
+          mu:'HE160 / ieee80211ax 由 ath11k 固件协商（无独立 UCI 开关）'},
+    mac:{valid:1,base:'00:03:7F:12:EF:EE',mtd:'0:ART',offset:'0x0',
+         source:'ART 分区（DTS nvmem-cells 自动装配，无手动输入）',
+         ifaces:[{name:'br-lan',mac:'00:03:7F:12:EF:EE',source:'ART / nvmem-cells 自动装配'},
+                 {name:'eth0',mac:'00:03:7F:12:EF:EE',source:'ART / nvmem-cells 自动装配'},
+                 {name:'wlan1',mac:'00:03:7F:12:EF:EF',source:'ART / nvmem-cells 自动装配'}]},
+    scan:{ok:1,iface:'wlan1',aps:[
+      {bssid:'00:03:7F:12:EF:EE',ssid:'NWRT-WDS-UP',signal:'-54',channel:'36',width:'160',htmode:'HE160',inferred:'1'},
+      {bssid:'A4:5E:60:22:11:08',ssid:'Office-5G',signal:'-71',channel:'149',width:'80',htmode:'HE80',inferred:'1'},
+      {bssid:'CC:32:E5:90:1A:44',ssid:'Neighbor',signal:'-83',channel:'6',width:'',htmode:'',inferred:'0'}]},
     nss:{present:0,fw:'—',conn:'—',load:'—'},
     tick:{enabled:1,dryrun:1,last:'[nwrt-tick] round=17 mode=wds dryrun=1'},
     guard:'已生效：拦截无线侧 DHCPv4/v6 Offer/ACK（hook prerouting）',
@@ -41,8 +56,9 @@
     bdf:{file:'board-2.bin',source:'官方通用容器',caldata:'off'},
     setup:{mode:'wds',role:'master',peer_ssid:'',peer_bssid:'',peer_key:'',
       ssid5:'NWRT-WDS',key5:'WDS123456',ssid2:'NWRT-AP-2G',key2:'AP123456',
-      ch5g:'36',htmode:'HE160',ch24g:'1',ht24:'HE40',txpower:'auto',wmm:'1',mu_mimo:'0',
-      rssi_thr:'-85',rssi_timeout:'10',ip:'172.10.10.241',mask:'255.255.252.0',
+      ch5g:'36',htmode:'HE160',ch24g:'1',ht24:'HE40',txpower:'auto',wmm:'1',mu_mimo:'1',
+      rssi_thr:'-85',rssi_timeout:'10',kick_enabled:'0',kick_rssi:'-90',
+      ip:'172.10.10.241',mask:'255.255.252.0',
       hostname:'NWRT-VS010',stp:'1',ntp:'172.10.10.254',theme:'ubnt',
       dhcp_enabled:'0',dhcp_start:'100',dhcp_limit:'150',dhcp_lease:'12h'},
     logs:'[nwrt-tick] round=17 mode=wds dryrun=1\n[l2-guard] OK 无线侧 DHCP 已拦（prerouting）\n[bridge-netfix] OK stp=1 wan/wan6=deleted\n[nwrt-mode] OK act=boot mode=wds 一次 wifi reload\n[DEMO] 以上为演示数据，非实机日志'
@@ -104,37 +120,44 @@
         hint:'第二台改 IP：echo 172.10.10.242 > /etc/nwrt/ipaddr（改了就保存，脚本绝不改回）'})+
       '<div class="u-note">老仓 r27 的左右滑动开关与模式守卫保留；6.12 下切换由 '+
       '<code>nwrt-apply-mode wds|ap</code> 固定枚举执行，零 eval、零参数注入面。</div>');
-    g+=grp('②','WDS 桥接目标',
-      fld('主端 SSID','peer_ssid',s.peer_ssid,{ph:'NWRT-WDS'})+
-      fld('密码','peer_key',s.peer_key,{ph:'WDS123456'})+
-      fld('BSSID 定向','peer_bssid',s.peer_bssid,{ph:'可留空'})+
-      '<div class="u-fld"><label>搜索周边主端（只读扫描）</label>'+
+    g+=grp('②','WDS 桥接目标 · 搜索 / 手动填写',
+      fld('主端 SSID','peer_ssid',s.peer_ssid,{ph:'上级 WDS 的 SSID'})+
+      fld('密码','peer_key',s.peer_key,{ph:'⚠ 密码必须手动填入'})+
+      fld('BSSID 定向','peer_bssid',s.peer_bssid,{ph:'可留空；点选搜索结果会自动带出'})+
+      '<div class="u-fld" style="grid-column:1/-1"><label>🔍 搜索周边主端（只读扫描，零参数）</label>'+
         '<button class="u-btn2" id="btnScan" type="button">🔍 搜索 SSID</button>'+
-        '<span class="hint">点选结果自动填 SSID / BSSID 并跟随信道；不自动写配置。</span></div>'+
-      '<div class="u-fld" style="grid-column:1/-1"><div id="scanOut" class="u-hint">尚未扫描。</div></div>');
+        '<span class="hint">点「选用」自动加入 SSID / BSSID 并自动匹配信道与频宽；密码手动填，再点底部「保存并应用」。</span>'+
+        '<div id="scanOut" class="u-hint" style="margin-top:8px">尚未扫描。也可直接在上面手填上级 WDS 的 SSID / BSSID / 密码，信道与频宽在 ④ 里手动选。</div></div>'+
+      '<div class="u-note">搜索走 <code>/cgi-bin/luci/admin/nwrt/scan</code>（admin 树继承 sysauth，只读）；'+
+      '点选只填表单、<b>不自动写配置</b>，密码绝不自动带入。频宽由扫描结果里的 <code>STA/VHT channel width</code> 映射 '+
+      '160→HE160 / 80→HE80 / 40→HE40 / 20→HE20；未广播频宽时留空并提示手动选，不猜。</div>');
     g+=grp('③','AP 双频独立 SSID 与密码',
       fld('5G SSID','ssid5',s.ssid5)+fld('5G 密码','key5',s.key5)+
       fld('2.4G SSID','ssid2',s.ssid2)+fld('2.4G 密码','key2',s.key2)+
       '<div class="u-note">WDS 模式只用 5G 4addr（2.4G 关闭）；AP 模式双频同时作为 AP。</div>');
-    g+=grp('④','WiFi 射频参数（6.12 主线口径）',
+    g+=grp('④','WiFi 射频 · 弱信号控制（6.12 主线真实 UCI）',
       fld('5G 信道','ch5g',s.ch5g,{type:'select',opts:[['auto','auto（ACS 自动选）'],['36','36'],['44','44'],['149','149'],['165','165']],
-        hint:'CN + HE160 需约 60s DFS CAC；改 HE80 可免等，吞吐少约 1/3'})+
+        hint:'点选搜索结果会自动带出；CN + HE160 需约 60s DFS CAC，HE80 可免等'})+
       fld('5G 频宽','htmode',s.htmode,{type:'select',opts:[['HE160','HE160 · 160MHz'],['HE80','HE80 · 80MHz'],['HE40','HE40 · 40MHz']],
-        hint:'🔴 升级修复：6.12 主线 mac80211 用 HE*，老仓 QSDK 的 HT160/HT80 已弃用'})+
+        hint:'🔴 升级修复：6.12 主线 mac80211 用 HE*，老仓 QSDK 的 HT160/HT80 已弃用；搜索点选会自动匹配'})+
       fld('2.4G 信道','ch24g',s.ch24g,{type:'select',opts:[['auto','auto'],['1','1'],['6','6'],['11','11']]})+
       fld('2.4G 频宽','ht24',s.ht24,{type:'select',opts:[['HE40','HE40 · 20/40 共存'],['HE20','HE20 · 仅 20MHz']],
         hint:'交叉串写会被后端双白名单拒绝；2.4G 绝不写 HE160/HE80'})+
       fld('发射功率','txpower',s.txpower,{type:'select',opts:[['auto','auto'],['20','20 dBm'],['17','17 dBm'],['14','14 dBm']]})+
-      fld('WMM','wmm',s.wmm,{type:'select',opts:[['1','开启'],['0','关闭']]})+
-      fld('MU-MIMO','mu_mimo',s.mu_mimo,{type:'select',opts:[['0','关闭'],['1','开启']],
-        hint:'⚠ 6.12 主线 hostapd 无通用 UCI：字段保留但不下发，如实标注'})+
-      fld('弱信号剔除','rssi_thr',s.rssi_thr,{hint:'−100…−30 dBm；⚠ 6.12 无 db_rssi_thr，标注不下发'})+
-      fld('最低连接保持','rssi_timeout',s.rssi_timeout,{hint:'1–60 s；⚠ 同上，不下发'})+
-      '<div class="u-note red">🔴 内核升级修复：老仓 r29.12 的 <code>HT160/HT80/HT40</code> 是 QSDK '+
-      '<code>qcawifi.sh</code> 私有约定，写进 6.12 主线 ath11k 会让 radio 起不来；'+
-      '本版统一改 <code>HE160/HE80/HE40/HE20</code>。QSDK 的 <code>db_rssi_thr</code> / '+
-      '<code>db_timeout</code> / MU-MIMO 无对应 UCI，字段保留在 user.cfg 但明确标注「该基线不支持，不下发」，'+
-      '绝不伪造已生效。</div>');
+      fld('WMM','wmm',s.wmm,{type:'select',opts:[['1','开启（默认）'],['0','关闭（主线忽略）']],
+        hint:'✅ 已开启：v25.12.6 hostapd.sh 无条件写 wmm_enabled=1（802.11ax 必需），无独立 UCI 开关；选关闭会被忽略并如实提示'})+
+      fld('MU-MIMO','mu_mimo',s.mu_mimo,{type:'select',opts:[['1','开启（随 HE 自动）'],['0','关闭（主线忽略）']],
+        hint:'✅ 已开启：HE 模式下 mac80211.sh 硬写 ieee80211ax=1 + he_mu_edca_*，MU-MIMO 由 ath11k 固件协商；无独立 UCI 开关，不伪造'})+
+      fld('弱信号拒绝连接阈值','rssi_thr',s.rssi_thr,{hint:'−100…−30 dBm，默认 −85；→ wifi-device 的 rssi_reject_assoc_rssi（真实 UCI，AP 模式 hostapd 生效）'})+
+      fld('拒绝后重连等待','rssi_timeout',s.rssi_timeout,{hint:'1–60 s，默认 10；→ rssi_reject_assoc_timeout'})+
+      fld('弱信号剔除（主动 deauth）','kick_enabled',s.kick_enabled,{type:'select',opts:[['0','关闭（默认）'],['1','启用']],
+        hint:'启用后 nwrt-tick 每 5 轮按阈值 iw station del；默认关避免误踢，单轮最多 3 个'})+
+      fld('剔除阈值','kick_rssi',s.kick_rssi,{hint:'−100…−30 dBm，默认 −90；仅 kick_enabled=1 时生效'})+
+      '<div class="u-note red">🔴 内核升级修复：老仓 QSDK 的 <code>db_rssi_thr</code> / <code>db_timeout</code> / '+
+      '<code>HT160</code> 该基线不支持，不下发；本版改用 6.12 主线真实 UCI '+
+      '<code>rssi_reject_assoc_rssi / rssi_reject_assoc_timeout / rssi_ignore_probe_request</code> + '+
+      '<code>disassoc_low_ack=1</code>（hostapd 默认）+ 标准 <code>iw station del</code> 做剔除。'+
+      '<b>WDS 是 STA 模式、hostapd 不运行</b>，拒绝连接项不下发并在状态页如实说明，绝不伪造已生效。</div>');
     g+=grp('⑤','本机与网络',
       fld('管理 IP','ip',s.ip)+fld('子网掩码','mask',s.mask)+
       '<div class="u-note">改了就持久保存：开机脚本只读不删不写覆盖文件，切模式/重启都不会自动改回。'+
@@ -182,7 +205,10 @@
   }
 
   function network(j){
-    var t=j.net||{}, lan=j.lan||[];
+    var t=j.net||{}, lan=j.lan||[], m=j.mac||{}, mi=m.ifaces||[];
+    var macrows=mi.map(function(x){return '<tr><td>'+esc(x.name)+'</td><td><code>'+esc(x.mac)+'</code></td><td>'+
+      esc(x.source||'—')+'</td></tr>'}).join('')||
+      '<tr><td colspan="3" class="none">—（读不到接口 MAC，不伪造）</td></tr>';
     var rows=lan.map(function(x){
       return '<tr><td>'+esc(x.name)+'</td><td>'+esc(x.speed||'—')+'</td><td>'+esc(x.source||'—')+'</td>'+
         '<td>'+(x.carrier?pill('已连接','ok'):pill('未连接'))+'</td><td>'+esc(x.rx||'—')+'</td><td>'+esc(x.tx||'—')+'</td></tr>';
@@ -198,7 +224,15 @@
         '<tr><td>WAN / WAN6</td><td>'+esc(t.wan||'已删除')+' / '+esc(t.wan6||'已删除')+'</td></tr>'+
         '<tr><td>全部网口</td><td>内网（含 WAN 物理口）+ 双频同桥</td></tr>'+
         '<tr><td>本机 DHCP 服务端</td><td>'+esc(t.dhcp_server||'关闭（上级透传）')+'</td></tr></table></div>'+
-      '<div class="u-card"><h3>防护 · GUARD</h3><table class="u-tbl">'+
+      '<div class="u-card"><h3>接口 · MAC（ART 自动读取）</h3><table class="u-tbl">'+
+        '<tr><td>ART 基准 MAC</td><td><code>'+n(m.base)+'</code> '+(m.valid?pill('已检出','ok'):pill('未检出','warn'))+'</td></tr>'+
+        '<tr><td>来源</td><td>'+esc(m.source||'—')+'</td></tr>'+
+        '<tr><td>分区 / 偏移</td><td>'+esc(m.mtd||'—')+' / '+esc(m.offset||'—')+'</td></tr>'+
+        '<tr><td>手动填 MAC</td><td>'+pill('无输入框','ok')+'</td></tr></table>'+
+        '<table class="u-tbl" style="margin-top:9px"><tr><th>接口</th><th>MAC</th><th>来源</th></tr>'+macrows+'</table>'+
+        '<p class="u-hint">两块 DTS 已用 <code>nvmem-cells</code> 从 ART 分区自动装配 MAC（VS010 hw_mac_addr / '+
+        'RAX3000Q macaddr_art_0|6）；本仓不写死、不覆盖、不提供任何手填框。ART 未检出时如实沿用内核 sysfs 值。</p></div>'+
+      '<div class="u-card"><h3>防护 · GUARD</h3><table class="u-tbl">'
         '<tr><td>无线侧 DHCP Snooping</td><td>'+esc(j.guard||'—')+'</td></tr>'+
         '<tr><td>防火墙 / IPv6</td><td>'+pill('已关')+' / '+pill('已关')+'</td></tr>'+
         '<tr><td>SSH / 串口</td><td>'+esc(j.ssh||'dropbear · ttyMSM0 115200n8')+'</td></tr>'+
@@ -218,9 +252,21 @@
       esc(x.channel||'—')+'</td><td>'+esc(x.htmode||'—')+'</td><td>'+esc(x.status||'—')+'</td></tr>'}).join('')||
       '<tr><td colspan="5" class="none">—</td></tr>';
     var ss=st.map(function(x){return '<tr><td>'+esc(x.mac||'—')+'</td><td>'+esc(x.iface||'—')+'</td><td>'+
-      esc(x.signal||'—')+'</td><td>'+esc(x.rate||'—')+'</td><td>'+esc(x.band||'—')+'</td></tr>'}).join('')||
-      '<tr><td colspan="5" class="none">—（无关联客户端 / iw 不可用，如实留白）</td></tr>';
+      esc(x.signal||'—')+'</td><td>'+esc(x.rate||'—')+'</td><td>'+esc(x.rx_rate||'—')+'</td><td>'+
+      esc(x.distance||'—')+'</td></tr>'}).join('')||
+      '<tr><td colspan="6" class="none">—（无关联客户端 / iw 不可用，如实留白）</td></tr>';
+    var w=j.wds||{};
+    var wrows='<tr><td>上级 SSID / BSSID</td><td>'+esc(w.ssid||'—')+' / <code>'+esc(w.bssid||'—')+'</code></td></tr>'+
+      '<tr><td>信号值 · RSSI</td><td><b>'+esc(w.signal||'—')+'</b></td></tr>'+
+      '<tr><td>距离</td><td>'+esc(w.distance||'—')+' <span class="u-hint">估算，非实测</span></td></tr>'+
+      '<tr><td>发送 / 接收速率</td><td>'+esc(w.tx||'—')+' / '+esc(w.rx||'—')+'</td></tr>'+
+      '<tr><td>频率 / 接口</td><td>'+esc(w.freq||'—')+' MHz · '+esc(w.iface||'—')+'</td></tr>'+
+      '<tr><td>状态</td><td>'+(w.ok?pill('已关联','ok'):pill('未关联 / 未检出','warn'))+'</td></tr>';
     return '<section class="u-sec"><h2>网桥业务 <span class="tag">WDS · 守护 · RF · 诊断 · 加速</span></h2><div class="u-grid">'+
+      '<div class="u-card"><h3>WDS 回程 · LINK</h3><table class="u-tbl">'+wrows+'</table>'+
+        '<p class="u-hint">信号 / TX·RX 速率来自 <code>iw dev &lt;iface&gt; link</code> 实读；'+
+        '<b>距离是按 RSSI + FSPL 推算的估算值（EIRP 20dBm / 5GHz），不是实测</b>，读不到一律留白「—」。'+
+        esc(w.note||'')+'</p></div>'+
       '<div class="u-card"><h3>WDS 守护 · WATCHDOG</h3><table class="u-tbl">'+
         '<tr><td>单常驻</td><td>'+(tk.enabled?pill('nwrt-tick 已启用','ok'):pill('未启用','warn'))+'</td></tr>'+
         '<tr><td>自愈动作</td><td>'+(tk.dryrun?pill('dryrun=1 · 只记录','warn'):pill('允许限频 reload'))+'</td></tr>'+
@@ -234,7 +280,7 @@
         '<tr><td>客户端表</td><td>见下方终端</td></tr>'+
         '<tr><td>自检命令</td><td><code>wifi-fullspeed</code></td></tr>'+
         '<tr><td>栈自检</td><td><code>oem-stack-check</code></td></tr></table>'+
-        '<table class="u-tbl" style="margin-top:9px"><tr><th>MAC</th><th>接口</th><th>信号</th><th>速率</th><th>频段</th></tr>'+ss+'</table></div>'+
+        '<table class="u-tbl" style="margin-top:9px"><tr><th>MAC</th><th>接口</th><th>信号</th><th>TX 速率</th><th>RX 速率</th><th>距离(估算)</th></tr>'+ss+'</table></div>'+
       '<div class="u-card"><h3>加速 · DATA PLANE</h3><table class="u-tbl">'+
         '<tr><td>加速栈</td><td>'+(ns.present?pill('已加载','ok'):pill('未加载 / 官方无 NSS 基线','warn'))+'</td></tr>'+
         '<tr><td>固件版本</td><td>'+esc(ns.fw||'—')+'</td></tr>'+
@@ -250,17 +296,24 @@
       esc(x.channel||'—')+'</td><td>'+esc(x.htmode||'—')+'</td><td>'+esc(x.status||'—')+'</td></tr>'}).join('')||
       '<tr><td colspan="5" class="none">—</td></tr>';
     var ss=st.map(function(x){return '<tr><td>'+esc(x.mac||'—')+'</td><td>'+esc(x.iface||'—')+'</td><td>'+
-      esc(x.signal||'—')+'</td><td>'+esc(x.rate||'—')+'</td><td>'+esc(x.band||'—')+'</td></tr>'}).join('')||
-      '<tr><td colspan="5" class="none">—（无关联客户端 / iw 不可用，如实留白）</td></tr>';
+      esc(x.signal||'—')+'</td><td>'+esc(x.rate||'—')+'</td><td>'+esc(x.rx_rate||'—')+'</td><td>'+
+      esc(x.distance||'—')+'</td></tr>'}).join('')||
+      '<tr><td colspan="6" class="none">—（无关联客户端 / iw 不可用，如实留白）</td></tr>';
+    var q=j.rssi||{};
     return '<section class="u-sec"><h2>AP 业务 <span class="tag">射频 · 终端 · 弱信号 · BDF · 加速</span></h2><div class="u-grid">'+
       '<div class="u-card"><h3>射频 · RADIO</h3><table class="u-tbl"><tr><th>频段</th><th>SSID</th><th>信道</th><th>频宽</th><th>状态</th></tr>'+rr+'</table></div>'+
-      '<div class="u-card"><h3>终端 · STATIONS</h3><table class="u-tbl"><tr><th>MAC</th><th>接口</th><th>信号</th><th>速率</th><th>频段</th></tr>'+ss+'</table>'+
-        '<p class="u-hint">读不到关联一律留白，不伪造客户端。</p></div>'+
-      '<div class="u-card"><h3>弱信号剔除 · RSSI</h3><table class="u-tbl">'+
-        '<tr><td>阈值字段</td><td><code>rssi_thr</code>（已保存）</td></tr>'+
-        '<tr><td>6.12 下发</td><td>'+pill('该基线不支持，不下发','warn')+'</td></tr>'+
-        '<tr><td>原因</td><td>QSDK db_rssi_thr / db_timeout 无对应主线 UCI</td></tr></table>'+
-        '<p class="u-hint">升级修复：保留老仓字段与按钮，但不假装生效。</p></div>'+
+      '<div class="u-card"><h3>终端 · STATIONS</h3><table class="u-tbl"><tr><th>MAC</th><th>接口</th><th>信号</th><th>TX 速率</th><th>RX 速率</th><th>距离(估算)</th></tr>'+ss+'</table>'+
+        '<p class="u-hint">读不到关联一律留白，不伪造客户端；距离是 FSPL 估算，非实测。</p></div>'+
+      '<div class="u-card"><h3>弱信号控制 · RSSI（显示 + 设置在 ④）</h3><table class="u-tbl">'+
+        '<tr><td>拒绝连接阈值</td><td><code>rssi_reject_assoc_rssi='+esc(q.reject||'—')+'</code> dBm</td></tr>'+
+        '<tr><td>重连等待</td><td><code>rssi_reject_assoc_timeout='+esc(q.timeout||'—')+'</code> s</td></tr>'+
+        '<tr><td>无 ACK 解除关联</td><td><code>disassoc_low_ack='+esc(q.low_ack||'1')+'</code>（hostapd 默认）</td></tr>'+
+        '<tr><td>主动剔除</td><td>'+pill(q.kick||'关闭','warn')+'</td></tr>'+
+        '<tr><td>生效范围</td><td>'+esc(q.active||'—')+'</td></tr>'+
+        '<tr><td>WMM</td><td>'+esc(q.wmm||'—')+'</td></tr>'+
+        '<tr><td>MU-MIMO</td><td>'+esc(q.mu||'—')+'</td></tr></table>'+
+        '<p class="u-hint">✅ 本版把老仓 QSDK 私有的 db_rssi_thr/db_timeout <b>升级修复</b>为 v25.12.6 主线真实 UCI；'+
+        '「该基线不支持，不下发」只针对 QSDK 私有字段。设置入口在上方 ④ 分组（阈值 / 超时 / 剔除开关），保存后即时应用。</p></div>'+
       '<div class="u-card"><h3>BDF · 校准</h3><table class="u-tbl">'+
         '<tr><td>容器</td><td><code>'+esc(b.file||'board-2.bin')+'</code></td></tr>'+
         '<tr><td>来源</td><td>'+esc(b.source||'官方通用容器')+'</td></tr>'+
@@ -342,13 +395,40 @@
       }).catch(function(e){say('保存失败：'+esc(String(e))+'。可用 TTYD/SSH 执行 nwrt-apply-config 兜底。','bad');});
     };
     D.getElementById('btnRevert').onclick=function(){render(j);say('已还原为设备当前值。','');};
+    /* ① 搜索 → 点选「选用」自动加入 SSID/BSSID + 自动匹配信道/频宽；密码必须手填 */
     var scan=D.getElementById('btnScan');
     if(scan) scan.onclick=function(){
       if(locked){say('未登录，扫描已锁定。','bad');return;}
       var o=D.getElementById('scanOut'); if(o)o.textContent='扫描中（约 2–5 秒，桥接可能短暂抖动）…';
-      fetch(E+'/scan',{credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){
-        if(o)o.textContent=String(t).slice(0,1500)||'无结果';
-      }).catch(function(e){if(o)o.textContent='扫描失败：'+String(e);});
+      fetch(E+'/scan',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(s){
+        if(!o)return;
+        if(!s || !s.ok || !s.aps || !s.aps.length){
+          o.textContent='无结果：'+esc((s&&s.msg)||'扫描为空 / 无无线口')+'（如实留白，不伪造 SSID）'; return;
+        }
+        var h='<table class="u-tbl" style="margin-top:6px"><tr><th>SSID</th><th>BSSID</th><th>信号</th><th>信道</th><th>频宽</th><th></th></tr>';
+        for(var i=0;i<s.aps.length;i++){
+          var a=s.aps[i];
+          h+='<tr><td>'+esc(a.ssid||'—')+'</td><td><code>'+esc(a.bssid||'—')+'</code></td><td>'+esc(a.signal||'—')+' dBm</td>'+
+             '<td>'+esc(a.channel||'—')+'</td><td>'+esc(a.htmode|| (a.width?a.width+' MHz':'—'))+
+             (a.inferred==='0'?' <span class="u-hint">未广播，需手选</span>':'')+'</td>'+
+             '<td><button class="u-btn2" type="button" data-pick="'+i+'">选用</button></td></tr>';
+        }
+        h+='</table><p class="u-hint">接口 '+esc(s.iface||'—')+' · 共 '+s.aps.length+' 个；点选只填表单，不自动写配置。</p>';
+        o.innerHTML=h;
+        var picks=o.querySelectorAll('button[data-pick]');
+        for(var k=0;k<picks.length;k++) picks[k].onclick=function(){
+          var a=s.aps[parseInt(this.getAttribute('data-pick'),10)]||{};
+          function set(name,v){var el=D.querySelector('.u-setup [name='+name+']'); if(el && v!=null && v!=='') el.value=v;}
+          set('peer_ssid',a.ssid); set('peer_bssid',a.bssid);
+          set('ch5g',a.channel); set('htmode',a.htmode);
+          var pw=D.querySelector('.u-setup [name=peer_key]');
+          if(pw){pw.focus(); pw.style.outline='2px solid #f0a';}
+          say('已自动加入 '+esc(a.ssid||'')+' · 信道 '+esc(a.channel||'—')+' · 频宽 '+esc(a.htmode||'未广播，请手选')+
+              '。⚠ 密码请手动填入，然后点「保存并应用」。','ok');
+          log('[scan] 点选：SSID='+esc(a.ssid||'')+' BSSID='+esc(a.bssid||'')+
+              ' channel='+esc(a.channel||'—')+' htmode='+esc(a.htmode||'—（未广播）')+'；密码未带入。');
+        };
+      }).catch(function(e){if(o)o.textContent='扫描失败：'+esc(String(e))+'。检查 iw 与登录态。';});
     };
     var acts=D.querySelectorAll('.u-setup button[data-act]');
     for(var k=0;k<acts.length;k++) acts[k].onclick=function(){
